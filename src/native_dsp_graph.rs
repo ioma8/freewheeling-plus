@@ -1323,6 +1323,18 @@ pub struct RuntimeAudioProcessor<B: FluidSynthBackend = FluidLiteBackend> {
     recording_waiting_start: bool,
     recording_waiting_stop: bool,
     recording_tail_remaining: Option<usize>,
+    /// A late pulse-synchronised start is quantized from the user's record
+    /// command, not from the delayed next-downbeat start. This prevents a
+    /// one-period gesture from becoming two periods solely because the key
+    /// was pressed after the pulse midpoint.
+    recording_started_late: bool,
+    /// Pulse phase at which the record command was consumed. A nonzero phase
+    /// means a pre-downbeat fragment may already be in the recording. Keep it
+    /// so the short `REC_TAIL_FRAMES` guard cannot turn a one-pulse gesture
+    /// into a second full pulse.
+    recording_start_phase: u32,
+    recording_elapsed_frames: u64,
+    recording_stop_target_len: Option<usize>,
     recording_end_justify: bool,
     /// C++ `RecordProcessor::nbeats`. This deliberately does not derive from
     /// PCM length: a sync recording retains `REC_TAIL_LEN` samples after its
@@ -1475,6 +1487,10 @@ pub fn runtime_audio_processor_with_backend_settings<B: FluidSynthBackend>(
             recording_waiting_start: false,
             recording_waiting_stop: false,
             recording_tail_remaining: None,
+            recording_started_late: false,
+            recording_start_phase: 0,
+            recording_elapsed_frames: 0,
+            recording_stop_target_len: None,
             recording_end_justify: false,
             recording_pulse_beats: 0,
             recording_pulse_extension_applied: false,
@@ -1590,6 +1606,10 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
         self.recording_waiting_start = false;
         self.recording_waiting_stop = false;
         self.recording_tail_remaining = None;
+        self.recording_started_late = false;
+        self.recording_start_phase = 0;
+        self.recording_elapsed_frames = 0;
+        self.recording_stop_target_len = None;
         if let Some(index) = self.recording.take() {
             let extension = {
                 let slot = &mut self.loops[index];
@@ -1692,6 +1712,41 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
         let index = self.recording.expect("recording checked above");
         let pulse = self.pulse_frames.max(1) as usize;
         let position = self.pulse_position as usize % pulse;
+        let short_tail_after_non_downbeat_start = self.recording_start_phase != 0
+            && position < REC_TAIL_FRAMES
+            && !self.recording_waiting_start;
+        if (self.recording_started_late || short_tail_after_non_downbeat_start)
+            && !self.recording_waiting_start
+        {
+            // The C++ processor waits for the next downbeat, but its
+            // midpoint/short-tail stop rule can then round a gesture that
+            // lasted one pulse from the keypress into two pulses. This is
+            // especially visible when the recorder prepended the fragment
+            // since the previous downbeat: the C++ tail guard otherwise waits
+            // through an entire additional pulse. Anchor the requested
+            // musical length to the command time while retaining the C++
+            // downbeat alignment and post-boundary tail.
+            let beats = self
+                .recording_elapsed_frames
+                .saturating_add((pulse / 2) as u64)
+                .saturating_div(pulse as u64)
+                .max(1)
+                .min(u64::from(u32::MAX)) as u32;
+            let target_len = (beats as usize)
+                .saturating_mul(pulse)
+                .saturating_add(REC_TAIL_FRAMES);
+            self.loops[index].pulse_beats = beats;
+            self.extend_pulse_long_count(beats, true);
+            self.recording_pulse_extension_applied = true;
+            self.recording_end_justify = true;
+            if self.loops[index].len >= target_len {
+                self.loops[index].len = target_len;
+                self.stop_recording(notify);
+            } else {
+                self.recording_stop_target_len = Some(target_len);
+            }
+            return;
+        }
         // Match RecordProcessor::End exactly: `GetPct() >= 0.5 ||
         // GetPos() < REC_TAIL_LEN` schedules the delayed end-sync. The
         // second term matters just after a downbeat, even though that phase
@@ -1772,6 +1827,13 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                     self.recording_end_justify = false;
                     self.recording_pulse_beats = 0;
                     self.recording_pulse_extension_applied = false;
+                    self.recording_started_late = false;
+                    self.recording_start_phase = self
+                        .pulse_sync_active
+                        .then_some(self.pulse_position)
+                        .unwrap_or(0);
+                    self.recording_elapsed_frames = 0;
+                    self.recording_stop_target_len = None;
                     if self.pulse_sync_active {
                         // C++ compares `GetPct() >= 0.5`; use a widened
                         // integer comparison so odd-length pulses make the
@@ -1779,6 +1841,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                         // rounding.
                         if u64::from(self.pulse_position) * 2 >= u64::from(self.pulse_frames) {
                             self.recording_waiting_start = true;
+                            self.recording_started_late = true;
                         } else {
                             let requested = self.pulse_position as usize;
                             while self.loops[index].uses_blocks()
@@ -2425,6 +2488,7 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
             let mut right = input_r * self.monitor_gain;
 
             let mut finished_overdub = None;
+            let mut finished_quantized_recording = None;
             let mut finished_recording_tail = false;
             for index in 0..self.loops.len() {
                 match self.loops[index].mode {
@@ -2456,6 +2520,13 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                             slot.recent_peak =
                                 slot.recent_peak.max(input_l.abs()).max(input_r.abs());
                             slot.len += 1;
+                            if self.recording == Some(index)
+                                && self
+                                    .recording_stop_target_len
+                                    .is_some_and(|target| slot.len >= target)
+                            {
+                                finished_quantized_recording = Some(index);
+                            }
                             // A new C++ `RecordProcessor` has no play loop:
                             // its play section explicitly clears its output
                             // while it writes the input fragment. Live input
@@ -2580,7 +2651,11 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                     LoopMode::Empty | LoopMode::Muted => {}
                 }
             }
-            if finished_overdub.is_some() {
+            if let Some(index) = finished_quantized_recording
+                && self.recording == Some(index)
+            {
+                self.stop_recording(true);
+            } else if finished_overdub.is_some() {
                 self.stop_recording(true);
             } else if let Some(remaining) = self.recording_tail_remaining {
                 if remaining <= 1 {
@@ -2633,6 +2708,9 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                     (self.input_history_position + 1) % self.input_history_left.len();
                 self.input_history_len =
                     (self.input_history_len + 1).min(self.input_history_left.len());
+            }
+            if self.recording.is_some() {
+                self.recording_elapsed_frames = self.recording_elapsed_frames.saturating_add(1);
             }
             self.pulse_position += 1;
             if self.pulse_position >= self.pulse_frames {
@@ -3155,6 +3233,46 @@ mod tests {
         assert!(!processor.recording_waiting_start);
         assert!(processor.recording_tail_remaining.is_some());
         assert_eq!(processor.loops[0].len, 1);
+    }
+
+    #[test]
+    fn a_non_downbeat_record_does_not_gain_an_extra_pulse_from_the_tail_guard() {
+        let (mut processor, mut controls) = processor(0.0);
+        processor.pulse_sync_active = true;
+        processor.pulse_frames = 4096;
+        processor.input_history_left.resize(4096, 0.0);
+        processor.input_history_right.resize(4096, 0.0);
+
+        // Seed the rolling input history, then start 1/8 pulse after the
+        // downbeat. The first 512 samples of the loop must be the real
+        // pre-downbeat audio, not newly-created zero padding.
+        run(&mut processor, &[-1.0; 32], &[0.0; 32]);
+        for _ in 1..16 {
+            run(&mut processor, &[-1.0; 32], &[0.0; 32]);
+        }
+        assert_eq!(processor.pulse_position, 512);
+
+        controls
+            .try_command(RuntimeCommand::Record { slot: 0 })
+            .unwrap();
+        for _ in 0..128 {
+            run(&mut processor, &[1.0; 32], &[0.0; 32]);
+        }
+        controls.try_command(RuntimeCommand::StopRecord).unwrap();
+
+        // Without the fix, the `GetPos() < REC_TAIL_LEN` branch waits for the
+        // next downbeat and produces 2 * pulse + tail here. The intended
+        // one-pulse gesture is one pulse plus the C++ crossfade tail.
+        for _ in 0..32 {
+            run(&mut processor, &[1.0; 32], &[0.0; 32]);
+        }
+
+        assert_eq!(processor.recording, None);
+        assert_eq!(processor.loops[0].pulse_beats, 1);
+        assert_eq!(processor.loops[0].len, 4096 + REC_TAIL_FRAMES);
+        assert_eq!(processor.loops[0].sample_at(0).0, -1.0);
+        assert_eq!(processor.loops[0].sample_at(511).0, -1.0);
+        assert_eq!(processor.loops[0].sample_at(512).0, 1.0);
     }
 
     #[test]
