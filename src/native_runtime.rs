@@ -864,6 +864,7 @@ impl NativeRuntime {
                     if let RuntimeCommand::Record { slot } = command {
                         // C++ updates lastrecidx when recording starts, so the
                         // L1..L8 visual labels change immediately.
+                        r.last_recorded_loop = Some(slot);
                         r.recent_recordings.retain(|recent| *recent != slot);
                         r.recent_recordings.push_front(slot);
                         r.recent_recordings.truncate(8);
@@ -1085,9 +1086,13 @@ impl NativeRuntime {
                         .try_command(RuntimeCommand::ClearPulse)
                         .map_err(|_| "DSP command queue is full")?;
                     r.pulse_selected = false;
-                } else if let Some(slot) = r.last_recorded_loop {
+                } else if !r.pulse_selected
+                    && let Some(slot) = r.last_recorded_loop
+                {
                     // Match C++ LoopManager::SelectPulse: derive the pulse from
-                    // the live completed loop, not a potentially stale UI snapshot.
+                    // the live last-recorded loop, not a potentially stale UI
+                    // snapshot. If a pulse already exists, C++ only reselects
+                    // it; the guard above preserves its phase.
                     r.controls
                         .as_mut()
                         .ok_or("DSP controls are closed")?

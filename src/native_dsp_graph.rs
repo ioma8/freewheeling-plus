@@ -1945,6 +1945,14 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 self.pulse_subdivide = beats.max(1);
             }
             RuntimeCommand::SetPulseFromLoop { slot } => {
+                // C++ `LoopManager::SelectPulse` reselects an existing pulse
+                // when F1 is pressed again; it does not recreate the pulse
+                // from the latest loop or reset its phase.  Rebuilding it
+                // here could move every already-synced loop and make later
+                // recordings appear to have lost synchronization.
+                if self.pulse_sync_active {
+                    return;
+                }
                 let Some(loop_state) = self.loops.get(slot as usize) else {
                     self.send_status(RuntimeStatus::CommandRejected(command));
                     return;
@@ -2802,6 +2810,49 @@ mod tests {
             }
         };
         assert_eq!(snapshot.pulse_frames, 3);
+    }
+
+    #[test]
+    fn reselecting_f1_keeps_the_existing_pulse_phase_for_later_loops() {
+        let (mut processor, mut controls) = processor(0.0);
+        controls
+            .try_command(RuntimeCommand::Record { slot: 0 })
+            .unwrap();
+        run(&mut processor, &[1.0; 4], &[0.0; 4]);
+        controls.try_command(RuntimeCommand::StopRecord).unwrap();
+        run(&mut processor, &[], &[]);
+
+        controls
+            .try_command(RuntimeCommand::SetPulseFromLoop { slot: 0 })
+            .unwrap();
+        run(&mut processor, &[], &[]);
+        processor.pulse_position = 2;
+        processor.pulse_long_count = 5;
+        processor.pulse_long_length = 6;
+
+        // F1 with an existing pulse is a reselect in C++, not a pulse
+        // reconstruction from whichever loop was recorded most recently.
+        controls
+            .try_command(RuntimeCommand::SetPulseFromLoop { slot: 0 })
+            .unwrap();
+        run(&mut processor, &[], &[]);
+
+        assert_eq!(processor.pulse_frames, 4);
+        assert_eq!(processor.pulse_position, 2);
+        assert_eq!(processor.pulse_long_count, 5);
+        assert_eq!(processor.pulse_long_length, 6);
+
+        // Every new recording observes the still-active pulse, including
+        // recordings started after the reselect.
+        for slot in [1_u8, 2_u8] {
+            controls
+                .try_command(RuntimeCommand::Record { slot })
+                .unwrap();
+            run(&mut processor, &[0.5], &[0.0]);
+            assert!(processor.loops[slot as usize].pulse_synced);
+            controls.try_command(RuntimeCommand::StopRecord).unwrap();
+            run(&mut processor, &[], &[]);
+        }
     }
 
     #[test]
