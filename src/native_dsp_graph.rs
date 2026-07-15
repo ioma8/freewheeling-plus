@@ -1611,13 +1611,25 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
         self.recording_elapsed_frames = 0;
         self.recording_stop_target_len = None;
         if let Some(index) = self.recording.take() {
+            let smooth_unsynchronised = {
+                let slot = &self.loops[index];
+                matches!(slot.mode, LoopMode::Recording)
+                    && !slot.pulse_synced
+                    && slot.len >= LOOP_SMOOTH_FRAMES
+            };
+            // The C++ endpoint smoother consumes the first 64 samples from
+            // the logical loop. Append that overlap before smoothing so the
+            // user-visible duration remains the number of frames captured at
+            // the stop command, without waiting for a post-stop callback.
+            let smooth_unsynchronised =
+                smooth_unsynchronised && self.append_unsynchronised_crossfade_tail(index);
             let extension = {
                 let slot = &mut self.loops[index];
                 let is_new_recording = matches!(slot.mode, LoopMode::Recording);
                 let is_overdub = matches!(slot.mode, LoopMode::Overdubbing);
                 let completed = slot.len != 0
                     && matches!(slot.mode, LoopMode::Recording | LoopMode::Overdubbing);
-                if is_new_recording && !slot.pulse_synced {
+                if smooth_unsynchronised {
                     smooth_unsynchronised_loop_endpoints(slot);
                 }
                 // C++ `LoopManager::Deactivate` copies
@@ -1669,6 +1681,27 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 self.send_status(RuntimeStatus::LoopCompleted { slot: index as u8 });
             }
         }
+    }
+
+    fn append_unsynchronised_crossfade_tail(&mut self, index: usize) -> bool {
+        let original_len = self.loops[index].len;
+        let required = original_len.saturating_add(LOOP_SMOOTH_FRAMES);
+        while self.loops[index].capacity() < required {
+            if !self.loops[index].uses_blocks()
+                || !self.loop_storage.add_block(&mut self.loops[index])
+            {
+                return false;
+            }
+        }
+        for offset in 0..LOOP_SMOOTH_FRAMES {
+            let (left, right) = {
+                let slot = &self.loops[index];
+                slot.sample_at(offset)
+            };
+            self.loops[index].set_sample(original_len + offset, left, right);
+        }
+        self.loops[index].len = required;
+        true
     }
 
     fn prefill_recording_from_history(&mut self, index: usize, requested: usize) {
@@ -2666,8 +2699,8 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                 }
                 if finished_recording_tail {
                     // `PulseSync` is delivered after the pulse has advanced
-                    // to its requested offset.  This sample loop advances
-                    // the pulse at the bottom of the iteration, so present
+                    // to its requested offset. This sample loop advances the
+                    // pulse at the bottom of the iteration, so present
                     // EndNow with that next position before publishing the
                     // PlayProcessor start offset.
                     let current_pulse_position = self.pulse_position;
@@ -3421,6 +3454,22 @@ mod tests {
             (slot.sample_at(slot.len - 1).1 - (0.25 - 0.5 / LOOP_SMOOTH_FRAMES as f32)).abs()
                 < 0.000_001
         );
+    }
+
+    #[test]
+    fn unsynchronised_recording_keeps_all_captured_frames_after_crossfade() {
+        let (mut processor, mut controls) = processor(0.0);
+        controls
+            .try_command(RuntimeCommand::Record { slot: 0 })
+            .unwrap();
+        for _ in 0..4 {
+            run(&mut processor, &[1.0; 32], &[0.0; 32]);
+        }
+        controls.try_command(RuntimeCommand::StopRecord).unwrap();
+        run(&mut processor, &[], &[]);
+
+        assert_eq!(processor.recording, None);
+        assert_eq!(processor.loops[0].len, 128);
     }
 
     #[test]
