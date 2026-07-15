@@ -937,6 +937,42 @@ mod tests {
     }
 
     #[test]
+    fn shipped_loop_wheel_bindings_adjust_gain() {
+        let registry_and_batch = |button| {
+            let mut config = shipped_config();
+            let input = LoopClickedEvent::new(true, button, 3, true);
+            let registry = config.binding_registry.clone();
+            RuntimeEventDispatcher::<32>::new()
+                .dispatch(
+                    &mut config,
+                    &registry,
+                    &input,
+                    &[LoopMode::Playing; MAX_RUNTIME_LOOPS],
+                )
+                .unwrap()
+        };
+
+        assert_eq!(
+            outputs(&registry_and_batch(4)),
+            vec![DispatchOutput::Application(
+                ApplicationAction::AdjustLoopGain {
+                    loop_id: 3,
+                    factor: 1.0 / 0.9,
+                }
+            )]
+        );
+        assert_eq!(
+            outputs(&registry_and_batch(5)),
+            vec![DispatchOutput::Application(
+                ApplicationAction::AdjustLoopGain {
+                    loop_id: 3,
+                    factor: 0.9,
+                }
+            )]
+        );
+    }
+
+    #[test]
     fn shipped_qwerty_binding_preserves_the_visible_legacy_loop_id() {
         let mut config = shipped_config();
         // The pckeyboard XML and graphics both address Q as SDL/ASCII 113.

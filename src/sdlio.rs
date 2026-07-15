@@ -166,6 +166,25 @@ impl SdlBackend for Sdl2InputBackend {
                     y,
                     down: false,
                 }),
+                Event::MouseWheel {
+                    y: scroll_y,
+                    precise_y,
+                    mouse_x,
+                    mouse_y,
+                    ..
+                } if scroll_y != 0 || precise_y != 0.0 => Some(SdlEvent::MouseButton {
+                    // SDL1 exposed wheel motion to the original C++ event
+                    // path as button 4/5. Preserve that contract so the
+                    // XML `loop-clicked` bindings adjust loop gain.
+                    button: if scroll_y > 0 || (scroll_y == 0 && precise_y > 0.0) {
+                        4
+                    } else {
+                        5
+                    },
+                    x: mouse_x,
+                    y: mouse_y,
+                    down: true,
+                }),
                 Event::KeyDown {
                     keycode: Some(keycode),
                     keymod,
@@ -565,6 +584,43 @@ mod tests {
         );
         assert!(io.keys_held()[32] && io.settings.spacekey);
         assert_eq!(io.poll(), Some(InputEvent::MouseMotion { x: 4, y: 9 }));
+    }
+
+    #[test]
+    fn wheel_compatibility_events_are_loop_click_buttons() {
+        let mut io = SdlIo::new(Fake(vec![
+            SdlEvent::MouseButton {
+                button: 4,
+                x: 12,
+                y: 34,
+                down: true,
+            },
+            SdlEvent::MouseButton {
+                button: 5,
+                x: 12,
+                y: 34,
+                down: true,
+            },
+        ]));
+        io.activate();
+        assert_eq!(
+            io.poll(),
+            Some(InputEvent::MouseButton {
+                button: 4,
+                x: 12,
+                y: 34,
+                down: true,
+            })
+        );
+        assert_eq!(
+            io.poll(),
+            Some(InputEvent::MouseButton {
+                button: 5,
+                x: 12,
+                y: 34,
+                down: true,
+            })
+        );
     }
 
     #[test]
