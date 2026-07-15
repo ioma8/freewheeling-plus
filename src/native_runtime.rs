@@ -77,6 +77,28 @@ const BROWSER_LOOP: i32 = 3;
 const BROWSER_SCENE: i32 = 4;
 const BROWSER_PATCH: i32 = 5;
 
+/// Convert SDL window coordinates to the logical coordinates used by the
+/// XML layout and the legacy input bindings.  SDL reports window pixels (not
+/// the Retina drawable pixels), so use the window's logical extent here.
+fn map_mouse_to_logical(
+    x: i32,
+    y: i32,
+    logical_size: (u32, u32),
+    window_size: (u32, u32),
+) -> (i32, i32) {
+    let map = |value: i32, logical: u32, window: u32| {
+        if window == 0 {
+            return value;
+        }
+        let mapped = i64::from(value.max(0)) * i64::from(logical) / i64::from(window);
+        mapped.clamp(0, i64::from(logical)) as i32
+    };
+    (
+        map(x, logical_size.0, window_size.0),
+        map(y, logical_size.1, window_size.1),
+    )
+}
+
 /// C++ keeps user configuration under `~/.fweelin`, including relative
 /// SoundFont paths. The initial config copy deliberately excludes binary SF2
 /// assets, so its default `basic.sf2` path is often absent. Preserve every
@@ -224,6 +246,15 @@ struct MainThreadVideo {
     backend: Sdl2VideoBackend,
     renderer: FrameRenderer,
     frame: VideoFrame,
+    /// XML coordinates are authored in this stable logical space.  It must
+    /// not be replaced with the fullscreen drawable size.
+    logical_size: (u32, u32),
+    /// The requested windowed size is retained across fullscreen toggles;
+    /// the current frame may instead be a Retina/fullscreen drawable.
+    windowed_size: (u32, u32),
+    /// SDL mouse events use window coordinates, while hit-testing and event
+    /// bindings use the XML logical coordinate system.
+    input_window_size: (u32, u32),
     interval: Duration,
     next_frame: Instant,
     active: bool,
@@ -237,20 +268,38 @@ impl MainThreadVideo {
         let scene_state = Arc::clone(&scene.state);
         let production = production_software_renderer(scene)?;
         let mut backend = Sdl2VideoBackend::new("FreeWheeling");
-        backend.open(VideoMode {
+        let metrics = backend.open(VideoMode {
             fullscreen: false,
             windowed_size: size,
         })?;
+        let drawable_size = (
+            metrics.drawable_width.max(1),
+            metrics.drawable_height.max(1),
+        );
+        let mut renderer = production.renderer;
+        // Render into the actual backing surface while retaining the XML's
+        // logical coordinate system.  This makes fullscreen and Retina
+        // transitions scale the complete scene instead of shrinking it to a
+        // 1:1 640x480 island.
+        renderer.metrics = crate::videoio_displays::RenderMetrics::new(
+            size.0 as i32,
+            size.1 as i32,
+            drawable_size.0 as i32,
+            drawable_size.1 as i32,
+        );
         Ok(Self {
             backend,
-            renderer: production.renderer,
+            renderer,
             frame: VideoFrame {
                 pixels: vec![0; size.0 as usize * size.1 as usize * 4],
-                width: size.0,
-                height: size.1,
-                stride: size.0 as usize * 4,
+                width: drawable_size.0,
+                height: drawable_size.1,
+                stride: drawable_size.0 as usize * 4,
                 timestamp: 0.0,
             },
+            logical_size: size,
+            windowed_size: size,
+            input_window_size: (metrics.logical_width.max(1), metrics.logical_height.max(1)),
             interval: production.frame_delay,
             next_frame: Instant::now(),
             active: true,
@@ -276,9 +325,29 @@ impl MainThreadVideo {
 
     /// Mirror the historical VideoIO mouse path: raw mouse events are first
     /// offered to browsers, then a visible layout element emits LoopClicked.
-    /// SDL mouse coordinates are window-logical coordinates, which are the
-    /// same coordinate system retained by XML layouts even on a HiDPI backing
-    /// surface.
+    /// SDL mouse coordinates are in the current window's logical pixels. The
+    /// XML layout remains in its authored logical resolution, so fullscreen
+    /// needs the inverse of the render scale before hit-testing or dispatch.
+    fn map_mouse_position(&self, x: i32, y: i32) -> (i32, i32) {
+        map_mouse_to_logical(x, y, self.logical_size, self.input_window_size)
+    }
+
+    fn map_mouse_event(&self, event: InputEvent) -> InputEvent {
+        match event {
+            InputEvent::MouseMotion { x, y } => {
+                let (x, y) = self.map_mouse_position(x, y);
+                InputEvent::MouseMotion { x, y }
+            }
+            InputEvent::MouseButton { button, x, y, down } => {
+                let (x, y) = self.map_mouse_position(x, y);
+                InputEvent::MouseButton { button, x, y, down }
+            }
+            other => other,
+        }
+    }
+
+    /// Find the visible XML layout element at an already-normalized logical
+    /// coordinate.
     fn loop_at(&self, x: i32, y: i32) -> Option<i32> {
         let state = self.scene_state.read().expect("UI state poisoned");
         self.renderer
@@ -1154,18 +1223,27 @@ impl NativeRuntime {
             }
             ApplicationAction::SetFullscreen(fullscreen) => {
                 let video = r.video.as_mut().ok_or("video is closed")?;
-                let size = (video.frame.width, video.frame.height);
                 let metrics = video.backend.set_mode(VideoMode {
                     fullscreen,
-                    windowed_size: size,
+                    windowed_size: video.windowed_size,
                 })?;
-                video.frame.width = metrics.drawable_width;
-                video.frame.height = metrics.drawable_height;
-                video.frame.stride = metrics.drawable_width as usize * 4;
+                video.input_window_size =
+                    (metrics.logical_width.max(1), metrics.logical_height.max(1));
+                let drawable_width = metrics.drawable_width.max(1);
+                let drawable_height = metrics.drawable_height.max(1);
+                video.renderer.metrics = crate::videoio_displays::RenderMetrics::new(
+                    video.logical_size.0 as i32,
+                    video.logical_size.1 as i32,
+                    drawable_width as i32,
+                    drawable_height as i32,
+                );
+                video.frame.width = drawable_width;
+                video.frame.height = drawable_height;
+                video.frame.stride = drawable_width as usize * 4;
                 video
                     .frame
                     .pixels
-                    .resize(video.frame.stride * metrics.drawable_height as usize, 0);
+                    .resize(video.frame.stride * drawable_height as usize, 0);
             }
             ApplicationAction::ToggleStreaming { codec } => {
                 r.stream_codec = Self::resolve_codec(r, codec)?;
@@ -2979,6 +3057,11 @@ impl NativeComponentAdapter for NativeRuntime {
             match input_event {
                 Some(event) if Self::handle_rename_input(&mut r, &event)? => continue,
                 Some(event) => {
+                    let event = if let Some(video) = r.video.as_ref() {
+                        video.map_mouse_event(event)
+                    } else {
+                        event
+                    };
                     let loop_click = match &event {
                         InputEvent::MouseButton { button, x, y, down } => r
                             .video
@@ -3136,6 +3219,22 @@ pub fn production_application() -> Result<NativeProductionApp, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fullscreen_mouse_coordinates_map_back_to_xml_space() {
+        assert_eq!(
+            map_mouse_to_logical(864, 558, (640, 480), (1728, 1117)),
+            (320, 239)
+        );
+        assert_eq!(
+            map_mouse_to_logical(1727, 1116, (640, 480), (1728, 1117)),
+            (639, 479)
+        );
+        assert_eq!(
+            map_mouse_to_logical(320, 240, (640, 480), (640, 480)),
+            (320, 240)
+        );
+    }
 
     #[test]
     fn osc_long_cycle_uses_the_cpp_lcm_not_the_largest_loop_count() {

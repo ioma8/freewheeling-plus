@@ -105,21 +105,17 @@ pub struct FrameRenderer {
 impl VideoRenderer for FrameRenderer {
     fn render(&mut self, frame: &mut VideoFrame) {
         if frame.width > 0 && frame.height > 0 {
-            // Window-size changes alter the legacy logical canvas; only an
-            // integral drawable multiple represents High-DPI backing pixels.
-            let (logical_width, logical_height) = if frame
-                .width
-                .is_multiple_of(self.metrics.logical_width as u32)
-                && frame
-                    .height
-                    .is_multiple_of(self.metrics.logical_height as u32)
-                && frame.width / self.metrics.logical_width as u32
-                    == frame.height / self.metrics.logical_height as u32
-            {
-                (self.metrics.logical_width, self.metrics.logical_height)
-            } else {
-                (frame.width as i32, frame.height as i32)
-            };
+            // The XML layout is authored in the logical resolution from
+            // graphics.xml (normally 640x480).  A fullscreen transition can
+            // change the drawable framebuffer to an arbitrary display size;
+            // that size is not a new logical coordinate system.  In
+            // particular, desktop fullscreen dimensions are almost never an
+            // integral multiple of 640x480, so inferring the logical size
+            // from the framebuffer makes the entire UI render at unit scale
+            // in the upper-left corner.  Keep the logical dimensions stable
+            // and update only the drawable dimensions.
+            let logical_width = self.metrics.logical_width;
+            let logical_height = self.metrics.logical_height;
             self.metrics = DisplayMetrics::new(
                 logical_width,
                 logical_height,
@@ -571,6 +567,54 @@ impl Sdl2VideoBackend {
             canvas.window().size(),
             canvas.output_size()?,
         ))
+    }
+}
+
+#[cfg(test)]
+mod frame_renderer_tests {
+    use super::*;
+
+    struct Capture(Vec<DrawOp>);
+
+    impl PlatformRenderer for Capture {
+        fn draw(&mut self, op: DrawOp) {
+            self.0.push(op);
+        }
+    }
+
+    #[test]
+    fn drawable_resize_keeps_xml_logical_coordinate_system() {
+        let mut renderer = FrameRenderer {
+            scene: DisplayScene::new(),
+            platform: Box::new(Capture(Vec::new())),
+            metrics: DisplayMetrics::new(640, 480, 640, 480),
+        };
+        let mut frame = VideoFrame {
+            pixels: Vec::new(),
+            width: 1728,
+            height: 1117,
+            stride: 1728 * 4,
+            timestamp: 0.0,
+        };
+
+        renderer.render(&mut frame);
+
+        assert_eq!(
+            (
+                renderer.metrics.logical_width,
+                renderer.metrics.logical_height
+            ),
+            (640, 480)
+        );
+        assert_eq!(
+            (
+                renderer.metrics.drawable_width,
+                renderer.metrics.drawable_height
+            ),
+            (1728, 1117)
+        );
+        assert_eq!(renderer.metrics.x(640), 1728);
+        assert_eq!(renderer.metrics.y(480), 1117);
     }
 }
 
