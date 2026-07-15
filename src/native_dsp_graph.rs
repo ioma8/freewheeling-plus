@@ -115,12 +115,16 @@ fn pulse_synced_loop_position(
     pulse_long_count: u32,
     pulse_beats: u32,
     loop_len: usize,
+    capture_alignment_frames: u32,
 ) -> usize {
     if loop_len == 0 || pulse_beats == 0 {
         return 0;
     }
     let beat = pulse_long_count % pulse_beats;
-    ((beat as usize * pulse_frames.max(1) as usize) + pulse_position as usize) % loop_len
+    ((beat as usize * pulse_frames.max(1) as usize)
+        .saturating_add(pulse_position as usize)
+        .saturating_add(capture_alignment_frames as usize))
+        % loop_len
 }
 
 const TRANSFER_FREE: u8 = 0;
@@ -403,6 +407,11 @@ pub enum RuntimeCommand {
     /// a loop, while leaving an already-created pulse untouched.
     SetPulseSubdivide {
         beats: u32,
+    },
+    /// Capture-to-DSP delay used to advance newly recorded synced loops back
+    /// onto the pulse clock. This is input latency, not round-trip latency.
+    SetRecordingAlignmentFrames {
+        frames: u32,
     },
     SetPulseFromLoop {
         slot: u8,
@@ -774,6 +783,9 @@ struct LoopSlot {
     /// recording can carry a post-downbeat crossfade tail beyond its musical
     /// period.
     pulse_beats: u32,
+    /// Source advance that compensates capture-to-DSP latency for a newly
+    /// recorded synced loop. The pulse-defining loop remains at zero.
+    capture_alignment_frames: u32,
     /// Offset within the 64-frame C++ `fadepreandcurrent` equivalent after a
     /// pulse-synchronised loop wraps. `None` means no restart fade is active.
     boundary_fade_position: Option<usize>,
@@ -817,6 +829,7 @@ impl LoopSlot {
             feedback: 0.5,
             pulse_synced: false,
             pulse_beats: 0,
+            capture_alignment_frames: 0,
             boundary_fade_position: None,
             overdub_fade_out: None,
             overdub_jump: Box::default(),
@@ -1291,6 +1304,7 @@ pub struct RuntimeAudioProcessor<B: FluidSynthBackend = FluidLiteBackend> {
     pulse_long_length: u32,
     pulse_subdivide: u32,
     pulse_sync_active: bool,
+    recording_alignment_frames: u32,
     metro_enabled: bool,
     metro_gain: f32,
     metro_noise: Vec<f32>,
@@ -1440,6 +1454,7 @@ pub fn runtime_audio_processor_with_backend_settings<B: FluidSynthBackend>(
             pulse_long_length: 1,
             pulse_subdivide: 1,
             pulse_sync_active: false,
+            recording_alignment_frames: 0,
             metro_enabled: false,
             metro_gain: 0.1,
             metro_noise,
@@ -1611,6 +1626,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                         self.pulse_long_count,
                         slot.pulse_beats,
                         slot.len,
+                        slot.capture_alignment_frames,
                     )
                 } else {
                     0
@@ -1740,6 +1756,10 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                     target.gain_delta = 1.0;
                     target.pulse_synced = self.pulse_sync_active;
                     target.pulse_beats = 0;
+                    target.capture_alignment_frames = self
+                        .pulse_sync_active
+                        .then_some(self.recording_alignment_frames)
+                        .unwrap_or(0);
                     target.boundary_fade_position = None;
                     target.recent_peak = 0.0;
                     target.overdub_jump.reset();
@@ -1792,6 +1812,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                             self.pulse_long_count,
                             target.pulse_beats,
                             target.len,
+                            target.capture_alignment_frames,
                         )
                     } else {
                         0
@@ -1824,6 +1845,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                             self.pulse_long_count,
                             target.pulse_beats,
                             target.len,
+                            target.capture_alignment_frames,
                         )
                     } else {
                         0
@@ -1918,6 +1940,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                     target.gain_delta = 1.0;
                     target.pulse_synced = false;
                     target.pulse_beats = 0;
+                    target.capture_alignment_frames = 0;
                     target.boundary_fade_position = None;
                     target.recent_peak = 0.0;
                     target.overdub_jump.reset();
@@ -1943,6 +1966,9 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
             }
             RuntimeCommand::SetPulseSubdivide { beats } => {
                 self.pulse_subdivide = beats.max(1);
+            }
+            RuntimeCommand::SetRecordingAlignmentFrames { frames } => {
+                self.recording_alignment_frames = frames;
             }
             RuntimeCommand::SetPulseFromLoop { slot } => {
                 // C++ `LoopManager::SelectPulse` reselects an existing pulse
@@ -1975,6 +2001,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 self.pulse_sync_active = true;
                 self.loops[slot as usize].pulse_synced = true;
                 self.loops[slot as usize].pulse_beats = beats;
+                self.loops[slot as usize].capture_alignment_frames = 0;
                 self.loops[slot as usize].boundary_fade_position = None;
             }
             RuntimeCommand::ClearPulse => {
@@ -2080,6 +2107,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 target.trigger_gain = 1.0;
                 target.gain_delta = 1.0;
                 target.pulse_synced = false;
+                target.capture_alignment_frames = 0;
                 target.boundary_fade_position = None;
                 target.recent_peak = 0.0;
                 target.scope.reset();
@@ -2361,6 +2389,7 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                                 self.pulse_long_count,
                                 slot.pulse_beats,
                                 slot.len,
+                                slot.capture_alignment_frames,
                             );
                             if slot.position != expected {
                                 // `PlayProcessor::PulseSync` calls
@@ -2853,6 +2882,26 @@ mod tests {
             controls.try_command(RuntimeCommand::StopRecord).unwrap();
             run(&mut processor, &[], &[]);
         }
+    }
+
+    #[test]
+    fn capture_alignment_advances_synced_loop_source_without_moving_pulse() {
+        let (mut processor, mut controls) = processor(0.0);
+        controls
+            .try_command(RuntimeCommand::SetRecordingAlignmentFrames { frames: 5 })
+            .unwrap();
+        controls
+            .try_command(RuntimeCommand::SetPulse { frames: 16 })
+            .unwrap();
+        controls
+            .try_command(RuntimeCommand::Record { slot: 0 })
+            .unwrap();
+        run(&mut processor, &[1.0], &[0.0]);
+
+        assert!(processor.loops[0].pulse_synced);
+        assert_eq!(processor.loops[0].capture_alignment_frames, 5);
+        assert_eq!(processor.pulse_position, 1);
+        assert_eq!(pulse_synced_loop_position(16, 2, 0, 1, 64, 5), 7);
     }
 
     #[test]

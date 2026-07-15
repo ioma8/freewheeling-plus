@@ -83,6 +83,13 @@ pub trait AudioBackend: Send {
     fn cpu_load(&self) -> Option<f32> {
         None
     }
+    /// Capture-to-DSP latency in frames for recording alignment. This is not
+    /// round-trip latency: output latency is shared by the pulse and every
+    /// loop, while this value describes how far captured input trails the
+    /// DSP/output clock.
+    fn input_latency_frames(&self) -> NFrames {
+        0
+    }
     /// True after a route change or device loss. Reopening is deliberately
     /// controlled by the non-realtime owner rather than an audio callback.
     fn recovery_requested(&self) -> bool {
@@ -191,6 +198,10 @@ impl<B: AudioBackend> AudioIO<B> {
     }
     pub fn metrics(&self) -> AudioMetrics {
         self.backend.metrics()
+    }
+    /// Capture-to-DSP alignment delay reported by the active backend.
+    pub fn input_latency_frames(&self) -> NFrames {
+        self.backend.input_latency_frames()
     }
     /// Inspect backend-specific non-realtime state such as device route and
     /// callback health. Never call this from an audio callback.

@@ -15,7 +15,8 @@ use cpal::{
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 
 const DEFAULT_RATE: u32 = 48_000;
 // Match Config::Config() in the C++ implementation.  At 48 kHz this halves
@@ -28,6 +29,12 @@ const DEFAULT_BUFFER_FRAMES: u32 = 16;
 #[cfg(not(target_os = "macos"))]
 const DEFAULT_BUFFER_FRAMES: u32 = 64;
 const MIN_RING_PERIODS: usize = 2;
+// Capture and playback are separate streams on the non-aggregate macOS
+// fallback. Keep enough bounded headroom for the host to arm playback after
+// capture has started. Playback trims this safety backlog to one callback
+// period before invoking DSP, so the larger capacity is not extra steady-state
+// latency.
+const DEFAULT_RING_PERIODS: usize = 32;
 const MAX_CALLBACK_FRAMES: usize = 16_384;
 const ROUTE_POLL_INTERVAL_MS: u64 = 250;
 
@@ -88,7 +95,7 @@ impl Default for CpalAudioOptions {
                 .and_then(|value| value.parse::<u32>().ok())
                 .filter(|frames| *frames > 0)
                 .unwrap_or(DEFAULT_BUFFER_FRAMES),
-            ring_periods: MIN_RING_PERIODS,
+            ring_periods: DEFAULT_RING_PERIODS,
         }
     }
 }
@@ -447,19 +454,31 @@ impl AudioBackend for CpalAudioBackend {
                 format!("cannot build audio playback stream: {error}")
             })?;
 
+        // Start capture before playback. These are separate streams on the
+        // fallback route; starting playback first can consume several empty
+        // periods before CoreAudio schedules the input callback, which shows
+        // up as a permanent startup underrun in diagnostics and loses the
+        // first live input frames. Give capture a short non-realtime startup
+        // window to publish at least one frame before arming playback. This
+        // does not add steady-state latency: playback still trims the queue
+        // to at most one callback period below.
+        let capture_callbacks_before_start = self.metrics.capture_callbacks.load(Ordering::Acquire);
+        if let Err(error) = input_stream.play() {
+            self.reclaim_callback();
+            return Err(format!("cannot start audio capture stream: {error}"));
+        }
+        let capture_deadline = Instant::now() + Duration::from_millis(100);
+        while self.metrics.capture_callbacks.load(Ordering::Acquire)
+            == capture_callbacks_before_start
+            && Instant::now() < capture_deadline
+        {
+            thread::sleep(Duration::from_millis(1));
+        }
         if let Err(error) = output_stream.play() {
+            let _ = input_stream.pause();
             drop(output_stream);
             self.reclaim_callback();
             return Err(format!("cannot start audio playback stream: {error}"));
-        }
-        // Starting capture first allows it to fill the tiny low-latency ring
-        // while CoreAudio is scheduling playback. Arm output first so startup
-        // produces a short silence rather than dropping the first input frames.
-        if let Err(error) = input_stream.play() {
-            let _ = output_stream.pause();
-            drop(output_stream);
-            self.reclaim_callback();
-            return Err(format!("cannot start audio capture stream: {error}"));
         }
         self.input_stream = Some(input_stream);
         self.output_stream = Some(output_stream);

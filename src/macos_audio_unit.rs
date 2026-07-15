@@ -687,6 +687,16 @@ impl AudioBackend for MacosAudioUnitBackend {
         self.metrics.snapshot()
     }
 
+    fn input_latency_frames(&self) -> NFrames {
+        self.latency
+            .map(|latency| {
+                latency
+                    .input_device_frames
+                    .saturating_add(latency.software_queue_frames)
+            })
+            .unwrap_or(0)
+    }
+
     fn cpu_load(&self) -> Option<f32> {
         if let Some(fallback) = &self.fallback {
             return fallback.cpu_load();

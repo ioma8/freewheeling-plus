@@ -2678,6 +2678,11 @@ impl NativeStartupAdapter for NativeRuntime {
             }
             StartupPhase::SynthAndBuffers => {
                 let rate = r.sample_rate;
+                let recording_alignment_frames = r
+                    .audio
+                    .as_ref()
+                    .map(|audio| audio.input_latency_frames())
+                    .unwrap_or(0);
                 let synth_config = r.config.borrow().fluidsynth.clone();
                 let mut cfg = FluidLiteConfig::new(rate as f64);
                 cfg.settings = synth_config.settings;
@@ -2716,6 +2721,16 @@ impl NativeStartupAdapter for NativeRuntime {
                 controls
                     .try_command(RuntimeCommand::SetSynthStereo(synth_config.stereo))
                     .map_err(|_| "DSP command queue is full during synth setup")?;
+                controls
+                    .try_command(RuntimeCommand::SetRecordingAlignmentFrames {
+                        frames: recording_alignment_frames,
+                    })
+                    .map_err(|_| "DSP command queue is full during latency setup")?;
+                if std::env::var_os("FWEELIN_DIAGNOSTICS").is_some() {
+                    eprintln!(
+                        "FreeWheeling recording alignment: {recording_alignment_frames} input frames"
+                    );
+                }
                 r.controls = Some(controls);
                 PROCESSOR.with(|slot| *slot.borrow_mut() = Some(processor));
             }
