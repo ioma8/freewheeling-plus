@@ -1,0 +1,5 @@
+AU container output is not historically implemented. Although AU is enumerated
+and BlockWriteManager passes AU to SndFileEncoder, src/fweelin_block.cc's
+SndFileEncoder constructor selects SF_FORMAT_FLAC only for FLAC and selects
+SF_FORMAT_WAV | SF_FORMAT_FLOAT for every other value (including AU). Capturing
+an .au file would therefore fabricate AU support: its bytes would be WAV/RIFF.

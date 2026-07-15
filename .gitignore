@@ -1,0 +1,11 @@
+/target/
+.DS_Store
+
+# Local runtime data and diagnostic output
+.fweelin/
+*.wav
+*.aiff
+*.flac
+*.ogg
+*.sf2
+freewheeling-diagnostic-*/

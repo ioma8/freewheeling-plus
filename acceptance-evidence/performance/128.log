@@ -1,0 +1,55 @@
+realtime_acceptance 48 kHz / 128-frame hardware acceptance run log
+status: BLOCKED_BEFORE_RUN
+timestamp_utc: 2026-07-14T17:33:29Z
+timestamp_local: 2026-07-14T19:33:29+0200 CEST
+
+Requested run
+  duration_seconds: 7200
+  sample_rate_hz: 48000
+  buffer_frames: 128
+  hardware: actual default CPAL/CoreAudio input and output devices
+  instrumentation: CallbackCountingAllocator, RealtimeMetrics callback timing/xruns,
+                   InstrumentedMutex lock-attempt counter, 1-second RSS sampling
+  acceptance: schema validation, duration >= 7200, p99 < 70% deadline,
+              zero callback allocations, zero blocking lock attempts,
+              zero unexplained xruns
+
+Revision and host
+  git_revision: 6dcc9155b0239da4fab12169ed650c28e788ef19
+  git_describe: 6dcc915-dirty
+  architecture: arm64
+  macOS: 26.4 (25E246)
+  rustc: 1.97.0 (2d8144b78 2026-07-07), host aarch64-apple-darwin
+  cargo: 1.97.0 (c980f4866 2026-06-30)
+
+Build
+  command: cargo build --locked --release --target aarch64-apple-darwin --bin realtime_acceptance
+  result: success
+  binary: target/aarch64-apple-darwin/release/realtime_acceptance
+  binary_sha256: f7630c211e6313221c695af9edcbaff37a34f06c35e60c93ada448be148c9bb9
+  binary_size: 1226816
+  binary_mtime: 2026-07-14T19:32:54+0200
+
+Actual CoreAudio hardware query
+  input: id=71 name="Mikrofon MacBook Pro" sample_rate=48000
+         buffer_current=512 buffer_min=15 buffer_max=4096
+  output: id=76 name="Reproduktory MacBook Pro" sample_rate=48000
+          buffer_current=512 buffer_min=15 buffer_max=4096
+
+Exact blocker
+  src/bin/realtime_acceptance.rs constructs CpalAudioBackend with
+  CpalAudioOptions::default(). src/audio_native_cpal.rs defines that default as
+  preferred_sample_rate=48000 and preferred_buffer_frames=256. There is no CLI
+  argument or environment-variable override for the requested buffer size.
+  negotiate_format() calls choose_buffer_frames(256, input_range, output_range).
+  Both actual default devices expose a 15..4096 frame range, so the clamp result
+  is exactly 256 frames, not 128. A 7200-second invocation of this binary would
+  therefore run at 48 kHz / 256 frames and cannot produce the requested 128-frame
+  acceptance evidence.
+
+Run and evidence disposition
+  The 7200-second audio run was not started because native hardware negotiation
+  deterministically cannot select 128 with this unmodified binary. No shortened
+  run was used. acceptance-evidence/performance/128.json was not written. Schema
+  and performance-threshold validation are not applicable without a qualifying
+  48 kHz / 128-frame run. No passing evidence was fabricated.

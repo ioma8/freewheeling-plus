@@ -1,0 +1,5 @@
+startup acquire 1
+startup acquire 2
+startup injected-failure
+rollback 2
+rollback 1

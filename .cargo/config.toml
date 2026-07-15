@@ -1,0 +1,5 @@
+[env]
+# SDL 2.0.20's vendored CMake project predates CMake 4's policy floor.
+# Pinning the compatibility policy keeps the fully bundled build reproducible
+# with modern CMake without patching the vendored SDL sources.
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FreeWheeling performance result",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "sample_rate_hz", "buffer_frames", "duration_seconds", "callback_p99_us", "callback_deadline_us", "callback_allocations", "blocking_lock_attempts", "unexplained_xruns", "rss_start_bytes", "rss_peak_bytes"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "sample_rate_hz": { "const": 48000 },
+    "buffer_frames": { "enum": [128, 256] },
+    "duration_seconds": { "type": "number", "minimum": 0 },
+    "callback_p99_us": { "type": "number", "minimum": 0 },
+    "callback_deadline_us": { "type": "number", "exclusiveMinimum": 0 },
+    "callback_allocations": { "const": 0 },
+    "blocking_lock_attempts": { "const": 0 },
+    "unexplained_xruns": { "const": 0 },
+    "rss_start_bytes": { "type": "integer", "minimum": 0 },
+    "rss_peak_bytes": { "type": "integer", "minimum": 0 }
+  }
+}

@@ -1,0 +1,7 @@
+schema=freewheeling-cpp-persistence-golden-v1
+cpp_revision=6dcc9155b0239da4fab12169ed650c28e788ef19
+capture_script=scripts/capture_cpp_codec_golden.sh
+compiler=Apple clang version 21.0.0 (clang-2100.1.1.101)
+libxml_version=2.9.13
+scene_source=src/fweelin_core.cc:638
+loop_source=src/fweelin_core_persistence.cc:433

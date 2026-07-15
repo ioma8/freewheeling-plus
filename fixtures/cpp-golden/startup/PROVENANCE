@@ -1,0 +1,16 @@
+schema=freewheeling-cpp-full-startup-v1
+cpp_revision=6dcc9155b0239da4fab12169ed650c28e788ef19
+capture_script=scripts/capture_cpp_full_startup.sh
+capture_script_sha256=7f7a34f75b261b4d4bca094e5ffc66b4e8165404bfa4a9954ed2b2db18954396
+application_binary=MacOSX/build/Release/fweelin.app/Contents/MacOS/fweelin
+application_binary_sha256=c13747fed16494c809f1ac02a6b367b8e1a31fc851b8adc16c2c9a5e9a7f8ee5
+compiler=Apple clang version 21.0.0 (clang-2100.1.1.101)
+host_os=26.4
+host_arch=arm64
+locale=C
+video_driver=dummy
+render_driver=software
+audio_driver=dummy
+midi_backend=CoreMIDI
+shutdown_signal=TERM
+normalization=temporary HOME and hexadecimal runtime addresses only

@@ -1,0 +1,12 @@
+schema=freewheeling-cpp-midi-startup-v1
+cpp_revision=6dcc9155b0239da4fab12169ed650c28e788ef19
+capture_script=scripts/capture_cpp_midi_startup.sh
+capture_script_sha256=2f4df6497c3845c1be3eebc3ff13771e4d1db5e6fb79843e07ce6a3de7604542
+compiler=Apple clang version 21.0.0 (clang-2100.1.1.101)
+host_arch=arm64
+locale=C
+boundary=fake-CoreMIDI-packet-list
+midi_source=src/fweelin_midiio.cc
+midi_source_sha256=ce8f7fe9aa8d2991bdd3f783ca3d9ef59185d2e60943922709746b6f6ed31502
+startup_source=src/fweelin_startup_guard.cc
+startup_source_sha256=a05a0745538d2bb8722f36572544b363b069d568ad0df5346f19e93c88b77d11

@@ -1,0 +1,37 @@
+[package]
+name = "freewheeling-plus"
+version = "0.1.0"
+edition = "2024"
+default-run = "freewheeling-plus"
+
+[dependencies]
+libc = "0.2"
+roxmltree = "0.20"
+hound = "3.5"
+lewton = "0.10"
+vorbis_rs = "0.5.5"
+flacenc = "0.5.1"
+claxon = "0.4.3"
+crossbeam-queue = "0.3.12"
+cpal = "0.18.1"
+midir = "0.11.0"
+sdl2 = { version = "0.38.0", features = ["bundled", "static-link"] }
+fluidlite = { version = "0.2.1", features = ["bindgen", "builtin"] }
+fontdue = "0.9.3"
+image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "pnm", "tga"] }
+rtrb = "0.3.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+jack = "0.13.5"
+# Keep this aligned with CPAL 0.18's Linux backend; Cargo cannot link two
+# different `alsa-sys` packages into one graph.
+alsa = "0.11.0"
+
+[package.metadata.bundle]
+name = "FreeWheeling"
+identifier = "org.freewheeling.freewheeling-plus"
+category = "public.app-category.music"
+short_description = "Live looping instrument"
+copyright = "FreeWheeling contributors"
+osx_minimum_system_version = "11.0"
+resources = ["../data"]

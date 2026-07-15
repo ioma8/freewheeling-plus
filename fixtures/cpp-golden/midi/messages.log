@@ -1,0 +1,17 @@
+input note-off channel=0 data1=60 data2=45
+input note-on channel=1 data1=61 data2=99
+input note-off channel=2 data1=62 data2=0
+input control-change channel=3 data1=7 data2=100
+input program-change channel=4 data1=42
+input channel-pressure channel=5 data1=77
+input pitch-bend channel=6 data1=4660
+output port=0 bytes=92 40 7F
+output port=0 bytes=82 40 20
+output port=0 bytes=B3 4A 7F
+output port=0 bytes=B3 4B 00
+output port=0 bytes=C4 7F
+output port=0 bytes=D5 00
+output port=0 bytes=E6 34 12
+output port=0 bytes=F8
+output port=0 bytes=FA
+output port=0 bytes=FC

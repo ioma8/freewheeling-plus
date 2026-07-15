@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<scene>
+  <loop loopid="3" hash="00112233445566778899aabbccddeeff" volume="0.62500"/>
+  <snapshot snapid="2" name="Golden &amp; snapshot">
+    <loopsnapshot loopid="3" status="1" loopvol="0.62500" triggervol="0.75000"/>
+  </snapshot>
+</scene>

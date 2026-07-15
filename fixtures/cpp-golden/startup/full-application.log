@@ -1,0 +1,2528 @@
+FreeWheeling 0.6
+May we return to the circle.
+
+CORE: Register ringbuffer writer thread: <addr>
+CORE: Register ringbuffer #0: <addr>
+MEMMGR: Stacksize: 131072.
+CORE: Register ringbuffer writer thread: <addr>
+CORE: RingBuffer <addr>: Update reader and writer threads to 2
+MEM: Memory manager thread (p47)
+INIT: Configuration file '<HOME>/.fweelin/fweelin.xml' not in usual place. Checking.
+INIT: *** Created new config folder '<HOME>/.fweelin'.
+INIT: Copying static files from shared folder...
+INIT: Copying all config files from shared folder...
+CONFIG: Starting with 1024 triggers.
+CONFIG: Starting with 100 max snapshots.
+CONFIG: Library path: 'fw-lib'
+CONFIG: Config sets 4 MIDI outputs.
+CONFIG: Set 1 MIDI sync outputs: 1 
+CONFIG: Starting with 4 external audio input(s)
+        and 0 internal audio input(s)--
+CONFIG: Input #1 is mono
+CONFIG: Input #2 is mono
+CONFIG: Input #3 is stereo
+CONFIG: Input #4 is stereo
+CONFIG: Input #1 is monitored
+CONFIG: Input #2 is monitored
+CONFIG: Input #3 is monitored
+CONFIG: Input #4 is monitored
+CONFIG: Input #1 is not streamed
+CONFIG: Input #2 is streamed
+CONFIG: Input #3 is streamed
+CONFIG: Input #4 is not streamed
+CONFIG: Disable final stream
+CONFIG: Enable loop stream
+CONFIG: No maximum play volume set! Watch your levels!
+CONFIG: Maximum limiter gain set to 100.00%.
+CONFIG: Limiter threshhold set to 75.00%.
+CONFIG: Limiter release rate set to 0.00%.
+CONFIG: Fader max dB set to 6.00.
+CONFIG: Loop out format is: ogg
+CONFIG: Stream out format is: ogg
+CONFIG: OGG Quality: 0.500000
+CONFIG: FreeWheeling is running in stereo.
+        * Please be aware, this significantly increases memory usage. *
+CONFIG: Starting with (640,480) resolution.
+CONFIG: Video delay: 40 ms
+CONFIG: New onscreen font: main: truetype/ttf-bitstream-vera/VeraBd.ttf (20 pt)
+CONFIG: New onscreen font: help: truetype/ttf-bitstream-vera/Vera.ttf (16 pt)
+CONFIG: New onscreen font: small: truetype/ttf-bitstream-vera/VeraBd.ttf (14 pt)
+CONFIG: New onscreen font: tiny: truetype/ttf-bitstream-vera/Vera.ttf (10 pt)
+INIT: Load interface 'coreinterface.xml' [first pass]
+ declare: variable 'DISPLAY_browser_patch' type 'int' value '0'
+ declare: variable 'DISPLAY_browser_loop' type 'int' value '1'
+ declare: variable 'DISPLAY_browser_scene' type 'int' value '2'
+ declare: variable 'DISPLAY_syncpanel' type 'int' value '3'
+ declare: variable 'VAR_max_browser' type 'int' value '2'
+ declare: variable 'VAR_cur_browser' type 'int' value '0'
+ declare: variable 'DISPLAY_loop_tray' type 'int' value '10'
+ declare: variable 'DISPLAY_scenes' type 'int' value '2000'
+ declare: variable 'VAR_syncpanel_show' type 'int' value '0'
+ declare: variable 'VAR_numsync_per_pulse' type 'int' value '1'
+ declare: variable 'VAR_synctype' type 'int' value '0'
+ declare: variable 'VAR_midisync' type 'int' value '0'
+ declare: variable 'VAR_keyheld_up' type 'char' value '0'
+ declare: variable 'VAR_keyheld_down' type 'char' value '0'
+ declare: variable 'VAR_keyheld_shift' type 'char' value '0'
+ declare: variable 'VAR_keyheld_ctrl' type 'char' value '0'
+ declare: variable 'VAR_keyheld_alt' type 'char' value '0'
+ declare: variable 'VAR_keyheld_space' type 'char' value '0'
+ declare: variable 'VAR_switch_on' type 'range' value '64>127'
+ declare: variable 'VAR_switch_off' type 'int' value '0'
+ declare: variable 'VAR_overdubmode' type 'char' value '0'
+ declare: variable 'VAR_overdubfeedback' type 'float' value '0.8'
+ declare: variable 'VAR_inputs' type 'range' value '1>4'
+ declare: variable 'VAR_zero_keysym' type 'int' value '48'
+ declare: variable 'VAR_snaps' type 'range' value '1>9'
+ declare: variable 'VAR_snapid_last1' type 'int' value '-1'
+ declare: variable 'VAR_snapid_last2' type 'int' value '-1'
+ declare: variable 'VAR_switch_metronome' type 'char' value '0'
+ declare: variable 'VAR_cutmode' type 'char' value '0'
+ declare: variable 'VAR_shotmode' type 'char' value '0'
+ declare: variable 'VAR_xferloop' type 'char' value '0'
+ declare: variable 'VAR_xferidx' type 'int' value '0'
+ declare: variable 'VAR_develmode' type 'char' value '0'
+ declare: variable 'VAR_auto_loop_save' type 'char' value '0'
+ add user help:  Keys listed in [] are for laptop keyboard mode :(null)
+ declare: variable 'VAR_laptopkeymode' type 'char' value '1'
+ declare: variable 'VAR_videofullscreen' type 'char' value '0'
+ declare: variable 'VAR_showdebuginfo' type 'char' value '0'
+ declare: variable 'VAR_helppage' type 'char' value '0'
+ declare: variable 'VAR_showinterface' type 'int' value '1'
+ declare: variable 'VAR_loopid_default_range' type 'range' value '600>1000'
+ declare: variable 'VAR_slide_speed' type 'float' value '0.3'
+ declare: variable 'VAR_loopamp_adj' type 'float' value '0.9'
+ declare: variable 'VAR_channelrange' type 'range' value '0>15'
+ add user help:  Esc: Exit 
+ add user help:  / key: Toggle help 
+ add user help:  [Shift + enter] KP enter: Toggle debug info 
+ add user help:  [F3] Pause: Toggle full screen 
+ add user help:  [F4] PrintScreen: Toggle record to disk 
+ add user help:  :(null)
+ add user help:  __ LEVELS __ :(null)
+ add user help:  :(null)
+ add user help:  1-4: Toggle inputs for recording 
+ add user help:  up/down + 1-4: +/- input volumes 
+ add user help:  Alt + \: Stop sliding loop volumes 
+ add user help:  [;'] Ins/Del/Bkspc: +/-/reset master in volume 
+ add user help:  [[]] Home/End/Backslash: +/-/reset master out volume 
+ add user help:  Arrow up/down + click: +/- loop volume 
+ add user help:  CTRL + Mousewheel: +/- volume of all selected loops 
+ add user help:  Mousewheel on loops: +/- loop volume 
+ add user help:  CTRL + up/down arrows: Adjust volume of all selected loops 
+ add user help:  up/down + trigger: +/- loop volume 
+ add user help:  cut mode + trigger/click: Play loops with velocity sensitive volume 
+ add user help:  :(null)
+ add user help:  __ MIDI __ :(null)
+ add user help:  :(null)
+ add user help:  [,.] KP Ins/Del: Transpose MIDI output 
+ add user help:  0/shift-0: Set/reset tuning from MIDI pitchbender 
+ add user help:  :(null)
+ add user help:  __ LOOPS __ :(null)
+ add user help:  :(null)
+ add user help:  shift + 1-9: Create snapshot #1-9 
+ add user help:  ctrl + 1-9: Trigger snapshot #1-9 
+ add user help:  shift/ctrl + ,.: Page through snapshots 
+ add user help:  alt + P: Swap last two triggered snapshots 
+ add user help:  shift + click on loop: Select loop 
+ add user help:  right click on loop: Select loop 
+ add user help:  space + trigger/click: Erase loop 
+ add user help:  overdub mode + trigger: Overdub into loop 
+ add user help:  trigger/click: Toggle Record-Play-Off for loop 
+ add user help:  Keypad asterisk: Select playing loops 
+ add user help:  (shift) Keypad asterisk: Select idle loops 
+ add user help:  (ctrl) Keypad asterisk: Invert selection of loops 
+ add user help:  (alt) Keypad asterisk: Unselect all loops 
+ add user help:  t: Trigger selected loops 
+ add user help:  Tab: Switch interfaces on screen 
+ add user help:  ctrl + click on loop: Rename loop 
+ add user help:  u: Undo last loop record 
+ add user help:  shift + space: Erase selected loops 
+ add user help:  alt + space: Erase all loops 
+ add user help:  shift + `: Toggle loop overdub mode 
+ add user help:  `: Toggle loop cut mode 
+ add user help:  z/x: Prev/Next page of loops on current interface 
+ add user help:  F9: Toggle loop auto-saving 
+ add user help:  F8: Save last recorded loop 
+ add user help:  shift + F7: Force save new scene of all loops 
+ add user help:  F7: Save current scene of all loops 
+ add user help:  F10: Transfer playing loops to QTractor 
+ add user help:  :(null)
+ add user help:  __ BROWSING __ :(null)
+ add user help:  :(null)
+ add user help:  left/right: Change patch bank 
+ add user help:  b: Switch browser- patch, loop, or scene 
+ add user help:  (ctrl) Enter: Rename browser item 
+ add user help:  Enter: Select browser item 
+ add user help:  (shift) [+/-] KP +/-: (Jump)/change browser item 
+ add user help:  :(null)
+ add user help:  __ TIMING __ :(null)
+ add user help:  :(null)
+ add user help:  shift + F1: Toggle sync panel 
+ add user help:  (space) F1: (Delete)/create/select pulse 
+ add user help:  shift/ctrl + S: Adjust transport sync timing 
+ add user help:  alt + S: Switch between bar and beat sync 
+ add user help:  shift + F2: Toggle MIDI sync transmit & sync metronome 
+ add user help:  F2: Tap pulse 
+ add user help:  [F5] F11: Toggle metronome 
+ add user help:  [F6] F12: Select no pulse- free timing 
+INIT: Load interface 'mercury.xml' [first pass]
+ declare: variable 'VAR_midi_modwheel' type 'int' value '1'
+ declare: variable 'VAR_midi_modwheel_val' type 'int' value '0'
+ declare: variable 'VAR_midi_channelpressure' type 'int' value '0'
+ declare: variable 'VAR_b3_patchbank_tag' type 'int' value '999'
+ declare: variable 'VAR_mercurymode' type 'char' value '1'
+ declare: variable 'VAR_midi_breathcontrol' type 'int' value '2'
+ declare: variable 'VAR_midi_breathcontrol_val' type 'int' value '0'
+ declare: variable 'VAR_midi_breathcontrol_hold' type 'int' value '0'
+ declare: variable 'VAR_midi_holdpedal' type 'int' value '64'
+ declare: variable 'VAR_midi_exppedal' type 'int' value '11'
+ declare: variable 'VAR_midi_exppedal_val' type 'int' value '0'
+INIT: Load interface 'browsers.xml' [first pass]
+INIT: Load interface 'midifootswitch.xml' [first pass]
+ declare: variable 'VAR_midi_footswitch' type 'int' value '64'
+ declare: variable 'VAR_loopid_footswitch' type 'int' value '340'
+INIT: Load interface 'pckeyboard.xml' [first pass]
+ declare: variable 'VAR_loopid_pckeystart' type 'int' value '0'
+ declare: variable 'VAR_pckeyfullrange' type 'range' value '0>322'
+ declare: variable 'VAR_pckeyrange' type 'range' value '97>122'
+INIT: Load interface 'midikeyboard.xml' [first pass]
+ declare: variable 'VAR_cur_program' type 'int' value '0'
+ declare: variable 'VAR_loopid_pianostart' type 'int' value '350'
+ declare: variable 'VAR_piano_looppage' type 'int' value '0'
+ declare: variable 'VAR_pianocapture' type 'int' value '0'
+ declare: variable 'VAR_pianocapture_set' type 'char' value '0'
+ declare: variable 'VAR_noterange' type 'range' value '36>47'
+ declare: variable 'VAR_notechan' type 'int' value '0'
+ declare: variable 'VAR_selectoctave' type 'int' value '12'
+ declare: variable 'VAR_noterangechange' type 'int' value '12'
+ declare: variable 'VAR_midikeyboard_interfaceid' type 'int' value '0'
+INIT: Load interface 'bcf2000.xml' [first pass]
+ declare: variable 'VAR_bcf2000_channel' type 'int' value '15'
+ declare: variable 'VAR_bcf2000_outport' type 'int' value '2'
+ declare: variable 'VAR_bcf2000_ate_midicc' type 'int' value '0'
+ declare: variable 'VAR_bcf2000_any_midicc' type 'range' value '0>127'
+ declare: variable 'VAR_bcf2000_looppage' type 'int' value '0'
+ declare: variable 'VAR_loopidrangechange' type 'int' value '8'
+ declare: variable 'VAR_bcf2000_triggerselected_midicontrol' type 'int' value '124'
+ declare: variable 'VAR_bcf2000_selectnone_midicontrol' type 'int' value '122'
+ declare: variable 'VAR_bcf2000_selectallplay_midicontrol' type 'int' value '123'
+ declare: variable 'VAR_bcf2000_pulseselect_midicontrol' type 'int' value '125'
+ declare: variable 'VAR_bcf2000_prevlooppage_midicontrol' type 'int' value '120'
+ declare: variable 'VAR_bcf2000_nextlooppage_midicontrol' type 'int' value '121'
+ declare: variable 'VAR_bcf2000_scenebrowse_fine_midicontrol' type 'int' value '75'
+ declare: variable 'VAR_bcf2000_scenebrowse_coarse_midicontrol' type 'int' value '74'
+ declare: variable 'VAR_bcf2000_scenebrowse_select_midicontrol' type 'int' value '76'
+ declare: variable 'VAR_bcf2000_scenebrowse_save_midicontrol' type 'int' value '77'
+ declare: variable 'VAR_bcf2000_scenemode_midicontrol' type 'int' value '73'
+ declare: variable 'VAR_scene_mode' type 'int' value '0'
+ declare: variable 'VAR_bcf2000_patchselect_midicontrol' type 'int' value '72'
+ declare: variable 'VAR_bcf2000_midishift_midicontrol' type 'int' value '118'
+ declare: variable 'VAR_keyheld_midishift' type 'char' value '0'
+ declare: variable 'VAR_bcf2000_overdubfeedback_midicontrol' type 'int' value '86'
+ declare: variable 'VAR_bcf2000_triggervol_selected_midicontrol' type 'int' value '89'
+ declare: variable 'VAR_bcf2000_patchbank_midicontrol' type 'int' value '31'
+ declare: variable 'VAR_bcf2000_patchbank_back_midicontrol' type 'int' value '32'
+ declare: variable 'VAR_bcf2000_patchbank_forward_midicontrol' type 'int' value '33'
+ declare: variable 'VAR_bcf2000_undo_midicontrol' type 'int' value '119'
+ declare: variable 'VAR_loopid_bcf2000' type 'int' value '350'
+ declare: variable 'VAR_bcf2000range' type 'range' value '0>7'
+ declare: variable 'VAR_bcf2000controlrange1' type 'range' value '0>7'
+ declare: variable 'VAR_bcf2000controlrange2' type 'range' value '8>15'
+ declare: variable 'VAR_damp_speed' type 'float' value '0.04'
+ declare: variable 'VAR_bcf2000_loopamp_adj' type 'float' value '0.05'
+ declare: variable 'VAR_bcf2000selectcc' type 'int' value '40'
+ declare: variable 'VAR_bcf2000miscknobcc' type 'int' value '50'
+ declare: variable 'VAR_bcf2000auxtriggercc' type 'int' value '100'
+ declare: variable 'VAR_bcf2000capturecc' type 'int' value '110'
+ declare: variable 'VAR_bcf2000ampcc' type 'int' value '90'
+ declare: variable 'VAR_bcf2000fadercc' type 'int' value '80'
+ declare: variable 'VAR_fadermode' type 'char' value '1'
+ declare: variable 'VAR_bcf2000_fadermode_midicontrol' type 'int' value '70'
+ declare: variable 'VAR_controlpage' type 'char' value '0'
+ declare: variable 'VAR_bcf2000_interfaceid' type 'int' value '0'
+ add user help:  MIDI CC73: MIDI shift key (like space) 
+INIT: Load interface 'dancemat.xml' [first pass]
+ declare: variable 'VAR_loopid_dancemat' type 'int' value '500'
+ declare: variable 'VAR_dancematrange' type 'range' value '0>15'
+ declare: variable 'VAR_dancemat_joystick' type 'int' value '0'
+CONFIG: # of interfaces: 4 switchable / 4 non-switchable
+INIT: Load interface 'coreinterface.xml' [second pass]
+
+       -> output 'set-auto-loop-saving'
+         -set 'save' = 'VAR_auto_loop_save'[0]
+       -> output 'set-default-loop-placement'
+         -set 'looprange' = 'VAR_loopid_default_range'[600>1000]
+       -> output 'video-switch-interface'
+         -set 'interfaceid' = 'VAR_showinterface'[1]
+
+CONFIG: Create 'sub' parameter hashtable[128] for input event 'go-sub'
+
+         -condition 'sub' == 100
+       -> output 'video-show-display'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'VAR_cur_browser'[0]
+         -set 'show' = 0
+       -> output 'set-variable'
+         -set 'var' = 'VAR_cur_browser'[0]
+         -set 'value' = 'param1'
+       -> output 'video-show-display'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'VAR_cur_browser'[0]
+         -set 'show' = 1
+
+         -condition 'sub' == 101
+       -> output 'trigger-snapshot'
+         -set 'snapid' = 'param1'
+       -> output 'set-variable'
+         -set 'var' = 'VAR_snapid_last2'[-1]
+         -set 'value' = 'VAR_snapid_last1'[-1]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_snapid_last1'[-1]
+         -set 'value' = 'param1'
+
+CONFIG: Create 'key' parameter hashtable[324] for input event 'key'
+
+         -condition 'key' == 27 [escape]
+         -condition 'keydown' == 1
+       -> output 'exit-freewheeling'
+
+         -condition 'key' == 47 [slash]
+         -condition 'keydown' == 1
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_helppage'[0]
+         -set 'maxvalue' = 'SYSTEM_num_help_pages'[0]
+       -> output 'video-show-help'
+         -set 'page' = 'VAR_helppage'[0]
+
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'VAR_keyheld_shift' == 1
+         -condition 'key' == 13 [return]
+         -condition 'keydown' == 1
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_showdebuginfo'[0]
+         -set 'maxvalue' = 1
+       -> output 'show-debug-info'
+         -set 'show' = 'VAR_showdebuginfo'[0]
+
+         -condition 'key' == 271 [enter]
+         -condition 'keydown' == 1
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_showdebuginfo'[0]
+         -set 'maxvalue' = 1
+       -> output 'show-debug-info'
+         -set 'show' = 'VAR_showdebuginfo'[0]
+
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'key' == 284 [f3]
+         -condition 'keydown' == 1
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_videofullscreen'[0]
+         -set 'maxvalue' = 1
+       -> output 'video-full-screen'
+         -set 'fullscreen' = 'VAR_videofullscreen'[0]
+
+         -condition 'key' == 19 [pause]
+         -condition 'keydown' == 1
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_videofullscreen'[0]
+         -set 'maxvalue' = 1
+       -> output 'video-full-screen'
+         -set 'fullscreen' = 'VAR_videofullscreen'[0]
+
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'key' == 285 [f4]
+         -condition 'keydown' == 1
+       -> output 'toggle-disk-output'
+
+         -condition 'key' == 316 [printscreen]
+         -condition 'keydown' == 1
+       -> output 'toggle-disk-output'
+
+         -condition 'VAR_keyheld_ctrl' == 1
+         -condition 'key' == 100 [d]
+         -condition 'keydown' == 1
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_develmode'[0]
+         -set 'maxvalue' = 1
+
+CONFIG: Create 'midichannel' parameter hashtable[17] for input event 'midikey'
+
+         -condition 'notenum' == 47
+         -condition 'VAR_develmode' == 1
+         -condition 'keydown' == 1
+       -> output 'toggle-disk-output'
+
+         -condition 'key' == 100 [d]
+         -condition 'VAR_develmode' == 1
+       -> output 'midikey'
+         -set 'keydown' = 'keydown'
+         -set 'outport' = 1
+         -set 'midichannel' = 0
+         -set 'notenum' = 37
+         -set 'velocity' = 127
+
+         -condition 'VAR_keyheld_shift' == 1
+         -condition 'key' == 'VAR_snaps'[1>9]+'VAR_zero_keysym'[48] [VAR_snaps+VAR_zero_keysym]
+         -condition 'keydown' == 1
+       -> output 'create-snapshot'
+         -set 'snapid' = 'key'-'VAR_zero_keysym'[48]-1+'SYSTEM_snapshot_page_firstidx'[0]
+
+         -condition 'VAR_keyheld_ctrl' == 1
+         -condition 'key' == 'VAR_snaps'[1>9]+'VAR_zero_keysym'[48] [VAR_snaps+VAR_zero_keysym]
+         -condition 'keydown' == 1
+       -> output 'go-sub'
+         -set 'sub' = 101
+         -set 'param1' = 'key'-'VAR_zero_keysym'[48]-1+'SYSTEM_snapshot_page_firstidx'[0]
+
+         -condition 'VAR_keyheld_alt' == 1
+         -condition 'key' == 'VAR_snaps'[1>9]+'VAR_zero_keysym'[48] [VAR_snaps+VAR_zero_keysym]
+         -condition 'keydown' == 1
+       -> output 'rename-snapshot'
+         -set 'snapid' = 'key'-'VAR_zero_keysym'[48]-1+'SYSTEM_snapshot_page_firstidx'[0]
+
+         -condition 'VAR_keyheld_shift' == 1
+         -condition 'key' == 48 [zero]
+         -condition 'keydown' == 1
+       -> output 'create-snapshot'
+         -set 'snapid' = 9+'SYSTEM_snapshot_page_firstidx'[0]
+
+         -condition 'VAR_keyheld_ctrl' == 1
+         -condition 'key' == 48 [zero]
+         -condition 'keydown' == 1
+       -> output 'go-sub'
+         -set 'sub' = 101
+         -set 'param1' = 9+'SYSTEM_snapshot_page_firstidx'[0]
+
+         -condition 'VAR_keyheld_alt' == 1
+         -condition 'key' == 48 [zero]
+         -condition 'keydown' == 1
+       -> output 'rename-snapshot'
+         -set 'snapid' = 9+'SYSTEM_snapshot_page_firstidx'[0]
+
+         -condition 'VAR_keyheld_ctrl' == 1
+         -condition 'key' == 44 [comma]
+         -condition 'keydown' == 1
+       -> output 'video-show-snapshot-page'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'DISPLAY_scenes'[2000]
+         -set 'page' = -1
+
+         -condition 'VAR_keyheld_ctrl' == 1
+         -condition 'key' == 46 [period]
+         -condition 'keydown' == 1
+       -> output 'video-show-snapshot-page'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'DISPLAY_scenes'[2000]
+         -set 'page' = 1
+
+         -condition 'VAR_keyheld_shift' == 1
+         -condition 'key' == 44 [comma]
+         -condition 'keydown' == 1
+       -> output 'video-show-snapshot-page'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'DISPLAY_scenes'[2000]
+         -set 'page' = -1
+
+         -condition 'VAR_keyheld_shift' == 1
+         -condition 'key' == 46 [period]
+         -condition 'keydown' == 1
+       -> output 'video-show-snapshot-page'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'DISPLAY_scenes'[2000]
+         -set 'page' = 1
+
+         -condition 'VAR_keyheld_up' == 1
+         -condition 'key' == 'VAR_inputs'[1>4]+'VAR_zero_keysym'[48] [VAR_inputs+VAR_zero_keysym]
+         -condition 'keydown' == 1
+       -> output 'slide-in-volume'
+         -set 'input' = 'key'-'VAR_zero_keysym'[48]
+         -set 'slide' = 'VAR_slide_speed'[0.30]
+
+         -condition 'VAR_keyheld_down' == 1
+         -condition 'key' == 'VAR_inputs'[1>4]+'VAR_zero_keysym'[48] [VAR_inputs+VAR_zero_keysym]
+         -condition 'keydown' == 1
+       -> output 'slide-in-volume'
+         -set 'input' = 'key'-'VAR_zero_keysym'[48]
+         -set 'slide' = 0-'VAR_slide_speed'[0.30]
+
+         -condition 'key' == 'VAR_inputs'[1>4]+'VAR_zero_keysym'[48] [VAR_inputs+VAR_zero_keysym]
+         -condition 'keydown' == 1
+       -> output 'toggle-input-record'
+         -set 'input' = 'key'-'VAR_zero_keysym'[48]
+
+         -condition 'VAR_keyheld_alt' == 1
+         -condition 'key' == 92 [backslash]
+         -condition 'keydown' == 1
+       -> output 'slide-loop-amplifier-stop-all'
+
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'key' == 59 [semicolon]
+         -condition 'keydown' == 1
+       -> output 'slide-master-in-volume'
+         -set 'slide' = 'VAR_slide_speed'[0.30]
+
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'key' == 39 [backquote]
+         -condition 'keydown' == 1
+       -> output 'slide-master-in-volume'
+         -set 'slide' = 0-'VAR_slide_speed'[0.30]
+
+         -condition 'key' == 277 [insert]
+         -condition 'keydown' == 1
+       -> output 'slide-master-in-volume'
+         -set 'slide' = 'VAR_slide_speed'[0.30]
+
+         -condition 'key' == 127 [delete]
+         -condition 'keydown' == 1
+       -> output 'slide-master-in-volume'
+         -set 'slide' = 0-'VAR_slide_speed'[0.30]
+
+         -condition 'key' == 8 [backspace]
+         -condition 'keydown' == 1
+       -> output 'set-master-in-volume'
+         -set 'vol' = 1.00
+
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'key' == 91 [squarebracketopen]
+         -condition 'keydown' == 1
+       -> output 'slide-master-out-volume'
+         -set 'slide' = 'VAR_slide_speed'[0.30]/2
+
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'key' == 93 [squarebracketclose]
+         -condition 'keydown' == 1
+       -> output 'slide-master-out-volume'
+         -set 'slide' = 0-'VAR_slide_speed'[0.30]/2
+
+         -condition 'key' == 278 [home]
+         -condition 'keydown' == 1
+       -> output 'slide-master-out-volume'
+         -set 'slide' = 'VAR_slide_speed'[0.30]/2
+
+         -condition 'key' == 279 [end]
+         -condition 'keydown' == 1
+       -> output 'slide-master-out-volume'
+         -set 'slide' = 0-'VAR_slide_speed'[0.30]/2
+
+         -condition 'key' == 92 [backslash]
+         -condition 'keydown' == 1
+       -> output 'set-master-out-volume'
+         -set 'vol' = 1.00
+
+         -condition 'VAR_keyheld_up' == 1
+         -condition 'button' == 1
+         -condition 'down' == 1
+       -> output 'slide-loop-amplifier'
+         -set 'loopid' = 'loopid'
+         -set 'slide' = 'VAR_slide_speed'[0.30]/2
+
+         -condition 'VAR_keyheld_down' == 1
+         -condition 'button' == 1
+         -condition 'down' == 1
+       -> output 'slide-loop-amplifier'
+         -set 'loopid' = 'loopid'
+         -set 'slide' = 0-'VAR_slide_speed'[0.30]/2
+
+         -condition 'button' == 4
+         -condition 'VAR_keyheld_ctrl' == 1
+       -> output 'adjust-selected-loops-amp'
+         -set 'setid' = 0
+         -set 'ampfactor' = 1.00/'VAR_loopamp_adj'[0.90]
+
+         -condition 'button' == 5
+         -condition 'VAR_keyheld_ctrl' == 1
+       -> output 'adjust-selected-loops-amp'
+         -set 'setid' = 0
+         -set 'ampfactor' = 'VAR_loopamp_adj'[0.90]
+
+         -condition 'button' == 4
+       -> output 'adjust-loop-amplifier'
+         -set 'loopid' = 'loopid'
+         -set 'ampfactor' = 1.00/'VAR_loopamp_adj'[0.90]
+
+         -condition 'button' == 5
+       -> output 'adjust-loop-amplifier'
+         -set 'loopid' = 'loopid'
+         -set 'ampfactor' = 'VAR_loopamp_adj'[0.90]
+
+         -condition 'VAR_keyheld_ctrl' == 1
+         -condition 'button' == 1
+         -condition 'down' == 1
+       -> output 'rename-loop'
+         -set 'loopid' = 'loopid'
+         -set 'in' = 'in'
+
+         -condition 'VAR_cutmode' == 1
+         -condition 'button' == 1
+       -> output 'set-trigger-volume'
+         -set 'loopid' = 'loopid'
+         -set 'vol' = 1.00*'down'
+
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'key' == 44 [comma]
+         -condition 'keydown' == 1
+       -> output 'adjust-midi-transpose'
+         -set 'adjust' = -12
+
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'key' == 46 [period]
+         -condition 'keydown' == 1
+       -> output 'adjust-midi-transpose'
+         -set 'adjust' = 12
+
+         -condition 'key' == 256 [KP0]
+         -condition 'keydown' == 1
+       -> output 'adjust-midi-transpose'
+         -set 'adjust' = -12
+
+         -condition 'key' == 266 [KPperiod]
+         -condition 'keydown' == 1
+       -> output 'adjust-midi-transpose'
+         -set 'adjust' = 12
+
+         -condition 'key' == 40 [openparen]
+         -condition 'keydown' == 1
+       -> output 'set-midi-tuning'
+         -set 'tuning' = 0
+
+         -condition 'key' == 48 [zero]
+         -condition 'keydown' == 1
+       -> output 'set-midi-tuning'
+         -set 'tuning' = 'SYSTEM_cur_pitchbend'[0]
+
+         -condition 'VAR_keyheld_alt' == 1
+         -condition 'key' == 112 [p]
+         -condition 'keydown' == 1
+       -> output 'swap-snapshots'
+         -set 'snapid1' = 'VAR_snapid_last1'[-1]
+         -set 'snapid2' = 'VAR_snapid_last2'[-1]
+
+         -condition 'VAR_keyheld_shift' == 1
+         -condition 'button' == 1
+         -condition 'down' == 1
+       -> output 'toggle-select-loop'
+         -set 'setid' = 0
+         -set 'loopid' = 'loopid'
+
+         -condition 'button' == 3
+         -condition 'down' == 1
+       -> output 'toggle-select-loop'
+         -set 'setid' = 0
+         -set 'loopid' = 'loopid'
+
+         -condition 'VAR_keyheld_space' == 1
+         -condition 'button' == 1
+         -condition 'down' == 1
+       -> output 'erase-loop'
+         -set 'loopid' = 'loopid'
+
+         -condition 'VAR_xferloop' == 1
+         -condition 'button' == 1
+         -condition 'down' == 1
+       -> output 'move-loop'
+         -set 'oldloopid' = 'VAR_xferidx'[0]
+         -set 'newloopid' = 'loopid'
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferloop'[0]
+         -set 'value' = 0
+
+         -condition 'VAR_overdubmode' == 1
+         -condition 'button' == 1
+         -condition 'down' == 1
+       -> output 'trigger-loop'
+         -set 'overdub' = 1
+         -set 'overdubfeedback' = 'VAR_overdubfeedback'[0.80]
+         -set 'loopid' = 'loopid'
+         -set 'vol' = 1.00
+
+         -condition 'button' == 1
+         -condition 'down' == 1
+       -> output 'trigger-loop'
+         -set 'loopid' = 'loopid'
+         -set 'vol' = 1.00
+
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'VAR_keyheld_shift' == 1
+         -condition 'key' == 60 [lessthan]
+         -condition 'keydown' == 1
+       -> output 'select-only-playing-loops'
+         -set 'setid' = 0
+         -set 'playing' = 0
+
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'VAR_keyheld_alt' == 1
+         -condition 'key' == 60 [lessthan]
+         -condition 'keydown' == 1
+       -> output 'select-all-loops'
+         -set 'setid' = 0
+         -set 'select' = 0
+
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'VAR_keyheld_ctrl' == 1
+         -condition 'key' == 60 [lessthan]
+         -condition 'keydown' == 1
+       -> output 'invert-selection'
+         -set 'setid' = 0
+
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'key' == 60 [lessthan]
+         -condition 'keydown' == 1
+       -> output 'select-only-playing-loops'
+         -set 'setid' = 0
+         -set 'playing' = 1
+
+         -condition 'VAR_keyheld_shift' == 1
+         -condition 'key' == 268 [KPasterisk]
+         -condition 'keydown' == 1
+       -> output 'select-only-playing-loops'
+         -set 'setid' = 0
+         -set 'playing' = 0
+
+         -condition 'VAR_keyheld_alt' == 1
+         -condition 'key' == 268 [KPasterisk]
+         -condition 'keydown' == 1
+       -> output 'select-all-loops'
+         -set 'setid' = 0
+         -set 'select' = 0
+
+         -condition 'VAR_keyheld_ctrl' == 1
+         -condition 'key' == 268 [KPasterisk]
+         -condition 'keydown' == 1
+       -> output 'invert-selection'
+         -set 'setid' = 0
+
+         -condition 'key' == 268 [KPasterisk]
+         -condition 'keydown' == 1
+       -> output 'select-only-playing-loops'
+         -set 'setid' = 0
+         -set 'playing' = 1
+
+         -condition 'key' == 116 [t]
+         -condition 'keydown' == 1
+       -> output 'trigger-selected-loops'
+         -set 'setid' = 0
+         -set 'vol' = 1.00
+         -set 'toggleloops' = 1
+
+         -condition 'key' == 9 [tab]
+         -condition 'keydown' == 1
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_showinterface'[1]
+         -set 'maxvalue' = 'SYSTEM_num_switchable_interfaces'[0]
+         -set 'minvalue' = 1
+       -> output 'video-switch-interface'
+         -set 'interfaceid' = 'VAR_showinterface'[1]
+
+         -condition 'SYSTEM_loopid_lastrecord_0' == 'VAR_loopid_footswitch'[340]
+         -condition 'key' == 117 [u]
+         -condition 'keydown' == 1
+       -> output 'erase-loop'
+         -set 'loopid' = 'SYSTEM_loopid_lastrecord_0'[0]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferloop'[0]
+         -set 'value' = 0
+
+         -condition 'VAR_keyheld_shift' == 1
+         -condition 'key' == 32 [space]
+         -condition 'keydown' == 1
+       -> output 'erase-selected-loops'
+         -set 'setid' = 0
+
+         -condition 'VAR_keyheld_alt' == 1
+         -condition 'key' == 32 [space]
+         -condition 'keydown' == 1
+       -> output 'erase-all-loops'
+
+         -condition 'key' == 117 [u]
+         -condition 'keydown' == 1
+       -> output 'erase-loop'
+         -set 'loopid' = 'SYSTEM_loopid_lastrecord_0'[0]
+
+         -condition 'VAR_keyheld_shift' == 1
+         -condition 'key' == 96 [tilde]
+         -condition 'keydown' == 1
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_overdubmode'[0]
+         -set 'maxvalue' = 1
+
+         -condition 'key' == 96 [tilde]
+         -condition 'keydown' == 1
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_cutmode'[0]
+         -set 'maxvalue' = 1
+
+         -condition 'key' == 290 [f9]
+         -condition 'keydown' == 1
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_auto_loop_save'[0]
+         -set 'maxvalue' = 1
+       -> output 'set-auto-loop-saving'
+         -set 'save' = 'VAR_auto_loop_save'[0]
+
+         -condition 'key' == 289 [f8]
+         -condition 'keydown' == 1
+       -> output 'save-loop'
+         -set 'loopid' = 'SYSTEM_loopid_lastrecord_0'[0]
+
+         -condition 'VAR_keyheld_shift' == 1
+         -condition 'key' == 288 [f7]
+         -condition 'keydown' == 1
+       -> output 'save-new-scene'
+
+         -condition 'key' == 288 [f7]
+         -condition 'keydown' == 1
+       -> output 'save-current-scene'
+
+         -condition 'key' == 291 [f10]
+         -condition 'keydown' == 1
+       -> output 'transmit-playing-loops-to-daw'
+
+         -condition 'key' == 276 [left]
+         -condition 'keydown' == 1
+       -> output 'patchbrowser-move-to-bank'
+         -set 'direction' = -1
+
+         -condition 'key' == 275 [right]
+         -condition 'keydown' == 1
+       -> output 'patchbrowser-move-to-bank'
+         -set 'direction' = 1
+
+         -condition 'key' == 98 [b]
+         -condition 'keydown' == 1
+       -> output 'video-show-display'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'VAR_cur_browser'[0]
+         -set 'show' = 0
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_cur_browser'[0]
+         -set 'maxvalue' = 'VAR_max_browser'[2]
+       -> output 'video-show-display'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'VAR_cur_browser'[0]
+         -set 'show' = 1
+
+         -condition 'VAR_keyheld_ctrl' == 1
+         -condition 'key' == 13 [return]
+         -condition 'keydown' == 1
+       -> output 'browser-rename-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+
+         -condition 'VAR_cur_browser' == 'DISPLAY_browser_loop'[1]
+         -condition 'key' == 13 [return]
+         -condition 'keydown' == 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferloop'[0]
+         -set 'value' = 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferidx'[0]
+         -set 'value' = 'VAR_loopid_footswitch'[340]
+       -> output 'browser-select-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+
+         -condition 'key' == 13 [return]
+         -condition 'keydown' == 1
+       -> output 'browser-select-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+
+         -condition 'VAR_keyheld_shift' == 1
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'key' == 45 [minus]
+         -condition 'keydown' == 1
+       -> output 'browser-move-to-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+         -set 'adjust' = 0
+         -set 'jumpadjust' = -1
+
+         -condition 'VAR_keyheld_shift' == 1
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'key' == 61 [equal]
+         -condition 'keydown' == 1
+       -> output 'browser-move-to-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+         -set 'adjust' = 0
+         -set 'jumpadjust' = 1
+
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'key' == 45 [minus]
+         -condition 'keydown' == 1
+       -> output 'browser-move-to-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+         -set 'adjust' = -1
+         -set 'jumpadjust' = 0
+
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'key' == 61 [equal]
+         -condition 'keydown' == 1
+       -> output 'browser-move-to-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+         -set 'adjust' = 1
+         -set 'jumpadjust' = 0
+
+         -condition 'VAR_keyheld_shift' == 1
+         -condition 'key' == 269 [KPminus]
+         -condition 'keydown' == 1
+       -> output 'browser-move-to-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+         -set 'adjust' = 0
+         -set 'jumpadjust' = -1
+
+         -condition 'VAR_keyheld_shift' == 1
+         -condition 'key' == 270 [KPplus]
+         -condition 'keydown' == 1
+       -> output 'browser-move-to-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+         -set 'adjust' = 0
+         -set 'jumpadjust' = 1
+
+         -condition 'key' == 269 [KPminus]
+         -condition 'keydown' == 1
+       -> output 'browser-move-to-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+         -set 'adjust' = -1
+         -set 'jumpadjust' = 0
+
+         -condition 'key' == 270 [KPplus]
+         -condition 'keydown' == 1
+       -> output 'browser-move-to-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+         -set 'adjust' = 1
+         -set 'jumpadjust' = 0
+
+         -condition 'VAR_keyheld_shift' == 1
+         -condition 'key' == 282 [f1]
+         -condition 'keydown' == 1
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_syncpanel_show'[0]
+         -set 'maxvalue' = 1
+       -> output 'video-show-display'
+         -set 'displayid' = 'DISPLAY_syncpanel'[3]
+         -set 'show' = 'VAR_syncpanel_show'[0]
+         -implicitly set 'interfaceid' = 1000
+
+         -condition 'VAR_keyheld_space' == 1
+         -condition 'key' == 282 [f1]
+         -condition 'keydown' == 1
+       -> output 'delete-pulse'
+         -set 'pulse' = 0
+
+         -condition 'key' == 282 [f1]
+         -condition 'keydown' == 1
+       -> output 'select-pulse'
+         -set 'pulse' = 0
+
+         -condition 'VAR_keyheld_shift' == 1
+         -condition 'key' == 115 [s]
+         -condition 'keydown' == 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_numsync_per_pulse'[1]
+         -set 'value' = 'VAR_numsync_per_pulse'[1]+1
+       -> output 'set-sync-speed'
+         -set 'speed' = 'VAR_numsync_per_pulse'[1]
+
+         -condition 'VAR_keyheld_ctrl' == 1
+         -condition 'key' == 115 [s]
+         -condition 'keydown' == 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_numsync_per_pulse'[1]
+         -set 'value' = 'VAR_numsync_per_pulse'[1]-1
+       -> output 'set-sync-speed'
+         -set 'speed' = 'VAR_numsync_per_pulse'[1]
+
+         -condition 'VAR_keyheld_alt' == 1
+         -condition 'key' == 115 [s]
+         -condition 'keydown' == 1
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_synctype'[0]
+         -set 'maxvalue' = 1
+       -> output 'set-sync-type'
+         -set 'type' = 'VAR_synctype'[0]
+
+         -condition 'VAR_keyheld_shift' == 1
+         -condition 'key' == 283 [f2]
+         -condition 'keydown' == 1
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_midisync'[0]
+         -set 'maxvalue' = 1
+       -> output 'set-midi-sync'
+         -set 'midisync' = 'VAR_midisync'[0]
+
+         -condition 'key' == 283 [f2]
+         -condition 'keydown' == 1
+       -> output 'tap-pulse'
+         -set 'pulse' = 0
+         -set 'newlen' = 1
+
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'key' == 286 [f5]
+         -condition 'keydown' == 1
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_switch_metronome'[0]
+         -set 'maxvalue' = 1
+       -> output 'switch-metronome'
+         -set 'pulse' = 0
+         -set 'metronome' = 'VAR_switch_metronome'[0]
+
+         -condition 'key' == 292 [f11]
+         -condition 'keydown' == 1
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_switch_metronome'[0]
+         -set 'maxvalue' = 1
+       -> output 'switch-metronome'
+         -set 'pulse' = 0
+         -set 'metronome' = 'VAR_switch_metronome'[0]
+
+         -condition 'VAR_laptopkeymode' == 1
+         -condition 'key' == 287 [f6]
+         -condition 'keydown' == 1
+       -> output 'select-pulse'
+         -set 'pulse' = -1
+
+         -condition 'key' == 293 [f12]
+         -condition 'keydown' == 1
+       -> output 'select-pulse'
+         -set 'pulse' = -1
+
+         -condition 'key' == 32 [space]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_keyheld_space'[0]
+         -set 'value' = 'keydown'
+
+         -condition 'key' == 273 [up]
+         -condition 'VAR_keyheld_ctrl' == 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_keyheld_up'[0]
+         -set 'value' = 'keydown'
+       -> output 'adjust-selected-loops-amp'
+         -set 'setid' = 0
+         -set 'ampfactor' = 1.00/'VAR_loopamp_adj'[0.90]
+
+         -condition 'key' == 273 [up]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_keyheld_up'[0]
+         -set 'value' = 'keydown'
+
+         -condition 'key' == 274 [down]
+         -condition 'VAR_keyheld_ctrl' == 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_keyheld_down'[0]
+         -set 'value' = 'keydown'
+       -> output 'adjust-selected-loops-amp'
+         -set 'setid' = 0
+         -set 'ampfactor' = 'VAR_loopamp_adj'[0.90]
+
+         -condition 'key' == 274 [down]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_keyheld_down'[0]
+         -set 'value' = 'keydown'
+
+         -condition 'key' == 304 [leftshift]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_keyheld_shift'[0]
+         -set 'value' = 'keydown'
+       -> output 'video-show-display'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'DISPLAY_scenes'[2000]
+         -set 'show' = 'keydown'
+
+         -condition 'key' == 303 [rightshift]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_keyheld_shift'[0]
+         -set 'value' = 'keydown'
+       -> output 'video-show-display'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'DISPLAY_scenes'[2000]
+         -set 'show' = 'keydown'
+
+         -condition 'key' == 306 [leftctrl]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_keyheld_ctrl'[0]
+         -set 'value' = 'keydown'
+       -> output 'video-show-display'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'DISPLAY_scenes'[2000]
+         -set 'show' = 'keydown'
+
+         -condition 'key' == 305 [rightctrl]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_keyheld_ctrl'[0]
+         -set 'value' = 'keydown'
+       -> output 'video-show-display'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'DISPLAY_scenes'[2000]
+         -set 'show' = 'keydown'
+
+         -condition 'key' == 308 [leftalt]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_keyheld_alt'[0]
+         -set 'value' = 'keydown'
+
+         -condition 'key' == 307 [rightalt]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_keyheld_alt'[0]
+         -set 'value' = 'keydown'
+CONFIG: New onscreen display: (text) 'Xp ' @ (0,432) (font: small) 
+   expression: 'SYSTEM_midi_transpose'[0]
+CONFIG: New onscreen display: (bar) (vertical) barscale 144.00 thickness 19 'CPU' @ (32,384) (font: main) 
+   expression: 'SYSTEM_audio_cpu_load'[0]/100
+CONFIG: New onscreen display: (bar) (vertical) barscale 144.00 thickness 44 (dB scale) (marks) 'IN' @ (156,384) (font: main) 
+   expression: 'SYSTEM_master_in_volume'[0]
+CONFIG: New onscreen display: (bar-switch) (vertical) barscale 144.00 thickness 16 (dB scale)  switch-expression: 'SYSTEM_in_1_record'[0] @ (128,384) 
+   expression: 'SYSTEM_in_1_volume'[0]
+CONFIG: New onscreen display: (bar-switch) (vertical) barscale 144.00 thickness 16 (dB scale)  switch-expression: 'SYSTEM_in_2_record'[0] @ (147,384) 
+   expression: 'SYSTEM_in_2_volume'[0]
+CONFIG: New onscreen display: (bar-switch) (vertical) barscale 144.00 thickness 16 (dB scale)  switch-expression: 'SYSTEM_in_3_record'[0] @ (166,384) 
+   expression: 'SYSTEM_in_3_volume'[0]
+CONFIG: New onscreen display: (bar-switch) (vertical) barscale 144.00 thickness 16 (dB scale)  switch-expression: 'SYSTEM_in_4_record'[0] @ (185,384) 
+   expression: 'SYSTEM_in_4_volume'[0]
+CONFIG: New onscreen display: (bar-switch) (vertical) barscale 144.00 thickness 9 (dB scale)  color 2  calibrate 0.90  switch-expression: 'SYSTEM_in_1_record'[0] @ (128,384) 
+   expression: 'SYSTEM_in_1_peak'[0]
+CONFIG: New onscreen display: (bar-switch) (vertical) barscale 144.00 thickness 9 (dB scale)  color 2  calibrate 0.90  switch-expression: 'SYSTEM_in_2_record'[0] @ (147,384) 
+   expression: 'SYSTEM_in_2_peak'[0]
+CONFIG: New onscreen display: (bar-switch) (vertical) barscale 144.00 thickness 9 (dB scale)  color 2  calibrate 0.90  switch-expression: 'SYSTEM_in_3_record'[0] @ (166,384) 
+   expression: 'SYSTEM_in_3_peak'[0]
+CONFIG: New onscreen display: (bar-switch) (vertical) barscale 144.00 thickness 9 (dB scale)  color 2  calibrate 0.90  switch-expression: 'SYSTEM_in_4_record'[0] @ (185,384) 
+   expression: 'SYSTEM_in_4_peak'[0]
+CONFIG: New onscreen display: (bar) (vertical) barscale 144.00 thickness 19 (dB scale) (marks) 'OUT' @ (288,384) (font: main) 
+   expression: 'SYSTEM_master_out_volume'[0]
+CONFIG: New onscreen display: (bar) (vertical) barscale 144.00 thickness 19 (dB scale) (marks) 'LMT' @ (384,384) (font: main) 
+   expression: 'SYSTEM_cur_limiter_gain'[0]
+CONFIG: New onscreen display: (bar) (vertical) barscale 144.00 thickness 19 'FBK' @ (480,384) (font: main) 
+   expression: 'VAR_overdubfeedback'[0.80]
+CONFIG: New onscreen display: (circle-switch) size1 12 size0 6 @ (608,391) 
+   expression: 'SYSTEM_num_recording_loops_in_map'[0]
+CONFIG: New onscreen display: (switch) 'SYNTH' @ (572,307) (font: small) 
+   expression: 'SYSTEM_fluidsynth_enabled'[0]
+CONFIG: New onscreen display: (switch) 'SAVE' @ (584,326) (font: small) 
+   expression: 'VAR_auto_loop_save'[0]
+CONFIG: New onscreen display: (switch) 'XFR' @ (592,288) (font: small) 
+   expression: 'VAR_xferloop'[0]
+CONFIG: New onscreen display: (switch) 'DUB' @ (592,345) (font: small) 
+   expression: 'VAR_overdubmode'[0]
+CONFIG: New onscreen display: (switch) 'CUT' @ (592,364) (font: small) 
+   expression: 'VAR_cutmode'[0]
+CONFIG: New onscreen display: (panel) size (192,108) 'Sync Panel' @ (441,240) (font: small) (id: 3) 
+CONFIG: New onscreen display: (text) 'sync ' @ (444,276) (font: small) (id: 1000) 
+   expression: 'VAR_numsync_per_pulse'[1]
+CONFIG: New onscreen display: (text-switch) 'beats per pulse' 'bars per pulse' @ (508,276) (font: small) (id: 1001) 
+   expression: 'VAR_synctype'[0]
+CONFIG: New onscreen display: (circle-switch) size1 7 size0 6 'Jack Sync' @ (456,300) (font: small) (id: 1002) 
+   expression: 'SYSTEM_sync_active'[0]
+CONFIG: New onscreen display: (circle-switch) size1 7 size0 6 'Jack Sync XMit' @ (456,319) (font: small) (id: 1003) 
+   expression: 'SYSTEM_sync_transmit'[0]
+CONFIG: New onscreen display: (circle-switch) size1 7 size0 6 'MIDI Sync Xmit' @ (456,339) (font: small) (id: 1004) 
+   expression: 'SYSTEM_midisync_transmit'[0]
+CONFIG: New onscreen display: (interface ID: 0) (snapshots) size (192,140) 'SNAPS' @ (441,72) (font: small) (id: 2000) 
+INIT: Load interface 'mercury.xml' [second pass]
+
+         -implicit condition 'interfaceid' == 1001
+       -> output 'show-debug-info'
+         -set 'show' = 0
+       -> output 'set-variable'
+         -set 'var' = 'VAR_midi_footswitch'[64]
+         -set 'value' = 67
+       -> output 'set-variable'
+         -set 'var' = 'VAR_laptopkeymode'[1]
+         -set 'value' = 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_notechan'[0]
+         -set 'value' = 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_noterange'[36>47]
+         -set 'value' = 48>59
+       -> output 'patchbrowser-move-to-bank'
+         -set 'direction' = -1
+       -> output 'browser-select-item'
+         -set 'browserid' = 'DISPLAY_browser_patch'[0]
+
+CONFIG: Create 'controlnum' parameter hashtable[128] for input event 'midicontroller'
+
+         -condition 'SYSTEM_cur_patchbank_tag' == 'VAR_b3_patchbank_tag'[999]
+         -condition 'controlnum' == 80
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 70
+         -set 'controlval' = 'controlval'
+
+         -condition 'SYSTEM_cur_patchbank_tag' == 'VAR_b3_patchbank_tag'[999]
+         -condition 'controlnum' == 82
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 71
+         -set 'controlval' = 'controlval'
+
+         -condition 'SYSTEM_cur_patchbank_tag' == 'VAR_b3_patchbank_tag'[999]
+         -condition 'controlnum' == 83
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 72
+         -set 'controlval' = 'controlval'
+
+         -condition 'SYSTEM_cur_patchbank_tag' == 'VAR_b3_patchbank_tag'[999]
+         -condition 'controlnum' == 84
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 73
+         -set 'controlval' = 'controlval'
+
+         -condition 'SYSTEM_cur_patchbank_tag' == 'VAR_b3_patchbank_tag'[999]
+         -condition 'controlnum' == 85
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 74
+         -set 'controlval' = 'controlval'
+
+         -condition 'SYSTEM_cur_patchbank_tag' == 'VAR_b3_patchbank_tag'[999]
+         -condition 'controlnum' == 81
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 75
+         -set 'controlval' = 'controlval'
+
+         -condition 'SYSTEM_cur_patchbank_tag' == 'VAR_b3_patchbank_tag'[999]
+         -condition 'controlnum' == 86
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 76
+         -set 'controlval' = 'controlval'
+
+         -condition 'SYSTEM_cur_patchbank_tag' == 'VAR_b3_patchbank_tag'[999]
+         -condition 'controlnum' == 88
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 77
+         -set 'controlval' = 'controlval'
+
+         -condition 'SYSTEM_cur_patchbank_tag' == 'VAR_b3_patchbank_tag'[999]
+         -condition 'controlnum' == 89
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 78
+         -set 'controlval' = 'controlval'
+
+         -condition 'SYSTEM_cur_patchbank_tag' == 'VAR_b3_patchbank_tag'[999]
+         -condition 'controlnum' == 70
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 92
+         -set 'controlval' = 'controlval'
+
+         -condition 'SYSTEM_cur_patchbank_tag' == 'VAR_b3_patchbank_tag'[999]
+         -condition 'controlnum' == 71
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 91
+         -set 'controlval' = 'controlval'
+
+         -condition 'SYSTEM_cur_patchbank_tag' == 'VAR_b3_patchbank_tag'[999]
+         -condition 'controlnum' == 72
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 80
+         -set 'controlval' = 'controlval'
+
+         -condition 'SYSTEM_cur_patchbank_tag' == 'VAR_b3_patchbank_tag'[999]
+         -condition 'controlnum' == 73
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 81
+         -set 'controlval' = 'controlval'
+
+         -condition 'SYSTEM_cur_patchbank_tag' == 'VAR_b3_patchbank_tag'[999]
+         -condition 'controlnum' == 74
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 82
+         -set 'controlval' = 'controlval'
+
+         -condition 'SYSTEM_cur_patchbank_tag' == 'VAR_b3_patchbank_tag'[999]
+         -condition 'controlnum' == 75
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 21
+         -set 'controlval' = 'controlval'
+
+         -condition 'SYSTEM_cur_patchbank_tag' == 'VAR_b3_patchbank_tag'[999]
+         -condition 'controlnum' == 76
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 22
+         -set 'controlval' = 'controlval'
+
+         -condition 'SYSTEM_cur_patchbank_tag' == 'VAR_b3_patchbank_tag'[999]
+         -condition 'controlnum' == 77
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'midiprogramchange'
+         -set 'routethroughpatch' = 1
+         -set 'programval' = 40
+
+         -condition 'SYSTEM_cur_patchbank_tag' == 'VAR_b3_patchbank_tag'[999]
+         -condition 'controlnum' == 77
+       -> output 'midiprogramchange'
+         -set 'routethroughpatch' = 1
+         -set 'programval' = 39
+
+CONFIG: Create 'midichannel' parameter hashtable[17] for input event 'midichannelpressure'
+
+         -condition 'VAR_mercurymode' == 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_midi_channelpressure'[0]
+         -set 'value' = 'pressureval'
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 'VAR_midi_modwheel'[1]
+         -set 'controlval' = 'VAR_midi_channelpressure'[0]+'VAR_midi_modwheel_val'[0]
+
+         -condition 'VAR_mercurymode' == 1
+         -condition 'controlnum' == 'VAR_midi_modwheel'[1]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_midi_modwheel_val'[0]
+         -set 'value' = 'controlval'
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 'VAR_midi_modwheel'[1]
+         -set 'controlval' = 'VAR_midi_channelpressure'[0]+'VAR_midi_modwheel_val'[0]
+
+         -condition 'VAR_mercurymode' == 1
+         -condition 'VAR_midi_breathcontrol_hold' == 0
+         -condition 'controlnum' == 'VAR_midi_breathcontrol'[2]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_midi_breathcontrol_val'[0]
+         -set 'value' = 'controlval'
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 'VAR_midi_exppedal'[11]
+         -set 'controlval' = 'VAR_midi_exppedal_val'[0]+'VAR_midi_breathcontrol_val'[0]
+
+         -condition 'VAR_mercurymode' == 1
+         -condition 'controlnum' == 'VAR_midi_exppedal'[11]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_midi_exppedal_val'[0]
+         -set 'value' = 'controlval'
+       -> output 'midicontroller'
+         -set 'routethroughpatch' = 1
+         -set 'controlnum' = 'VAR_midi_exppedal'[11]
+         -set 'controlval' = 'VAR_midi_exppedal_val'[0]+'VAR_midi_breathcontrol_val'[0]
+
+         -condition 'VAR_mercurymode' == 1
+         -condition 'midichannel' == 'VAR_notechan'[0]
+         -condition 'notenum' == 'VAR_noterange'[36>47]+'VAR_selectoctave'[12]
+         -condition 'keydown' == 1
+       -> output 'toggle-select-loop'
+         -set 'setid' = 0
+         -set 'loopid' = 'notenum'-'VAR_selectoctave'[12]+'VAR_loopid_pianostart'[350]
+CONFIG: New onscreen display: (interface ID: 0) (browser) type: Patch xpand: 1 xdelay: 5.000000 xpand_box: (64,48)-(576,432) @ (0,460) (show) (font: main) (id: 0) 
+INIT: Load interface 'browsers.xml' [second pass]
+CONFIG: New onscreen display: (interface ID: 0) (browser) type: Patch xpand: 1 xdelay: 5.000000 xpand_box: (64,48)-(576,432) [31;1m
+*** INIT: WARNING: Duplicate browser of type: 'Patch'
+[0mCONFIG: New onscreen display: (interface ID: 0) (browser) type: Loop xpand: 1 xdelay: 5.000000 xpand_box: (64,48)-(576,432) @ (0,460) (font: small) (id: 1) 
+CONFIG: New onscreen display: (interface ID: 0) (browser) type: Scene xpand: 1 xdelay: 5.000000 xpand_box: (64,48)-(576,432) @ (0,460) (font: small) (id: 2) 
+CONFIG: New onscreen display: (interface ID: 0) (browser) type: Loop Tray xpand: 0 xpand_box: (32,288)-(608,432) @ (9,441) (show) (font: tiny) (id: 10) 
+INIT: Load interface 'midifootswitch.xml' [second pass]
+
+         -implicit condition 'interfaceid' == 1003
+       -> output 'video-show-loop'
+         -set 'layoutid' = 0
+         -set 'loopid' = 'VAR_loopid_footswitch'[340]
+         -implicitly set 'interfaceid' = 1003
+       -> output 'set-load-loop-id'
+         -set 'loopid' = 'VAR_loopid_footswitch'[340]
+
+         -condition 'VAR_keyheld_up' == 1
+         -condition 'controlnum' == 'VAR_midi_footswitch'[64]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'slide-loop-amplifier'
+         -set 'loopid' = 'VAR_loopid_footswitch'[340]
+         -set 'slide' = 'VAR_slide_speed'[0.30]/2
+
+         -condition 'VAR_keyheld_down' == 1
+         -condition 'controlnum' == 'VAR_midi_footswitch'[64]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'slide-loop-amplifier'
+         -set 'loopid' = 'VAR_loopid_footswitch'[340]
+         -set 'slide' = 0-'VAR_slide_speed'[0.30]/2
+
+         -condition 'VAR_keyheld_space' == 1
+         -condition 'controlnum' == 'VAR_midi_footswitch'[64]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'erase-loop'
+         -set 'loopid' = 'VAR_loopid_footswitch'[340]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferloop'[0]
+         -set 'value' = 0
+
+         -condition 'VAR_overdubmode' == 1
+         -condition 'controlnum' == 'VAR_midi_footswitch'[64]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'trigger-loop'
+         -set 'overdub' = 1
+         -set 'overdubfeedback' = 'VAR_overdubfeedback'[0.80]
+         -set 'loopid' = 'VAR_loopid_footswitch'[340]
+         -set 'vol' = 1.00
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferloop'[0]
+         -set 'value' = 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferidx'[0]
+         -set 'value' = 'VAR_loopid_footswitch'[340]
+
+         -condition 'controlnum' == 'VAR_midi_footswitch'[64]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'trigger-loop'
+         -set 'loopid' = 'VAR_loopid_footswitch'[340]
+         -set 'vol' = 1.00
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferloop'[0]
+         -set 'value' = 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferidx'[0]
+         -set 'value' = 'VAR_loopid_footswitch'[340]
+(label elements) 'Footswitch' scale (1.00,1.30) @ (576,408) Name@ (588,417) 
+  Element: #0 'SW' @ (576,408) Name@ (582,408) looppos (608,439) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (576,408)-(640,470) 
+INIT: Load interface 'pckeyboard.xml' [second pass]
+
+         -implicit condition 'interfaceid' == 1
+       -> output 'video-show-loop'
+         -set 'layoutid' = 0
+         -set 'loopid' = 'VAR_pckeyfullrange'[0>322]+'VAR_loopid_pckeystart'[0]
+         -implicitly set 'interfaceid' = 1
+
+         -condition 'VAR_keyheld_up' == 1
+         -condition 'key' == 'VAR_pckeyrange'[97>122] [VAR_pckeyrange]
+       -> output 'slide-loop-amplifier'
+         -set 'loopid' = 'key'+'VAR_loopid_pckeystart'[0]
+         -set 'slide' = 'keydown'*'VAR_slide_speed'[0.30]/2
+
+         -condition 'VAR_keyheld_down' == 1
+         -condition 'key' == 'VAR_pckeyrange'[97>122] [VAR_pckeyrange]
+       -> output 'slide-loop-amplifier'
+         -set 'loopid' = 'key'+'VAR_loopid_pckeystart'[0]
+         -set 'slide' = 0-'keydown'*'VAR_slide_speed'[0.30]/2
+
+         -condition 'VAR_cutmode' == 1
+         -condition 'key' == 'VAR_pckeyrange'[97>122] [VAR_pckeyrange]
+       -> output 'set-trigger-volume'
+         -set 'loopid' = 'key'+'VAR_loopid_pckeystart'[0]
+         -set 'vol' = 1.00*'keydown'
+
+         -condition 'VAR_keyheld_space' == 1
+         -condition 'key' == 'VAR_pckeyrange'[97>122] [VAR_pckeyrange]
+         -condition 'keydown' == 1
+       -> output 'erase-loop'
+         -set 'loopid' = 'key'+'VAR_loopid_pckeystart'[0]
+
+         -condition 'VAR_xferloop' == 1
+         -condition 'key' == 'VAR_pckeyrange'[97>122] [VAR_pckeyrange]
+         -condition 'keydown' == 1
+       -> output 'move-loop'
+         -set 'oldloopid' = 'VAR_xferidx'[0]
+         -set 'newloopid' = 'key'+'VAR_loopid_pckeystart'[0]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferloop'[0]
+         -set 'value' = 0
+
+         -condition 'VAR_overdubmode' == 1
+         -condition 'key' == 'VAR_pckeyrange'[97>122] [VAR_pckeyrange]
+         -condition 'keydown' == 1
+       -> output 'trigger-loop'
+         -set 'overdub' = 1
+         -set 'overdubfeedback' = 'VAR_overdubfeedback'[0.80]
+         -set 'loopid' = 'key'+'VAR_loopid_pckeystart'[0]
+         -set 'vol' = 1.00
+
+         -condition 'key' == 'VAR_pckeyrange'[97>122] [VAR_pckeyrange]
+         -condition 'keydown' == 1
+       -> output 'trigger-loop'
+         -set 'loopid' = 'key'+'VAR_loopid_pckeystart'[0]
+         -set 'vol' = 1.00
+(label elements) 'PC Keyboard' scale (1.00,1.00) @ (0,0) 
+  Element: #113 'Q' @ (0,0) Name@ (6,0) looppos (32,24) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (0,0)-(64,48) 
+  Element: #119 'W' @ (64,0) Name@ (70,0) looppos (96,24) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (64,0)-(128,48) 
+  Element: #101 'E' @ (128,0) Name@ (134,0) looppos (160,24) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (128,0)-(192,48) 
+  Element: #114 'R' @ (192,0) Name@ (198,0) looppos (224,24) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (192,0)-(256,48) 
+  Element: #116 'T' @ (256,0) Name@ (262,0) looppos (288,24) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (256,0)-(320,48) 
+  Element: #121 'Y' @ (320,0) Name@ (326,0) looppos (352,24) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (320,0)-(384,48) 
+  Element: #117 'U' @ (384,0) Name@ (390,0) looppos (416,24) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (384,0)-(448,48) 
+  Element: #105 'I' @ (448,0) Name@ (454,0) looppos (480,24) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (448,0)-(512,48) 
+  Element: #111 'O' @ (512,0) Name@ (518,0) looppos (544,24) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (512,0)-(576,48) 
+  Element: #112 'P' @ (576,0) Name@ (582,0) looppos (608,24) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (576,0)-(640,48) 
+  Element: #97 'A' @ (19,48) Name@ (26,48) looppos (51,72) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (19,48)-(83,96) 
+  Element: #115 'S' @ (83,48) Name@ (90,48) looppos (115,72) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (83,48)-(147,96) 
+  Element: #100 'D' @ (147,48) Name@ (154,48) looppos (179,72) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (147,48)-(211,96) 
+  Element: #102 'F' @ (211,48) Name@ (218,48) looppos (243,72) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (211,48)-(275,96) 
+  Element: #103 'G' @ (275,48) Name@ (282,48) looppos (307,72) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (275,48)-(339,96) 
+  Element: #104 'H' @ (339,48) Name@ (346,48) looppos (371,72) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (339,48)-(403,96) 
+  Element: #106 'J' @ (403,48) Name@ (410,48) looppos (435,72) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (403,48)-(467,96) 
+  Element: #107 'K' @ (467,48) Name@ (474,48) looppos (499,72) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (467,48)-(531,96) 
+  Element: #108 'L' @ (531,48) Name@ (538,48) looppos (563,72) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (531,48)-(595,96) 
+  Element: #122 'Z' @ (38,96) Name@ (45,96) looppos (70,120) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (38,96)-(102,144) 
+  Element: #120 'X' @ (102,96) Name@ (109,96) looppos (134,120) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (102,96)-(166,144) 
+  Element: #99 'C' @ (166,96) Name@ (173,96) looppos (198,120) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (166,96)-(230,144) 
+  Element: #118 'V' @ (230,96) Name@ (237,96) looppos (262,120) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (230,96)-(294,144) 
+  Element: #98 'B' @ (294,96) Name@ (301,96) looppos (326,120) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (294,96)-(358,144) 
+  Element: #110 'N' @ (358,96) Name@ (365,96) looppos (390,120) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (358,96)-(422,144) 
+  Element: #109 'M' @ (422,96) Name@ (429,96) looppos (454,120) loopsize 48 
+    Box: outline (L1,T1,R1,B1) dim (422,96)-(486,144) 
+INIT: Load interface 'midikeyboard.xml' [second pass]
+
+         -implicit condition 'interfaceid' == 2
+       -> output 'video-show-loop'
+         -set 'layoutid' = 0
+         -set 'loopid' = 'VAR_noterange'[36>47]+'VAR_loopid_pianostart'[350]
+         -implicitly set 'interfaceid' = 2
+       -> output 'set-variable'
+         -set 'var' = 'VAR_midikeyboard_interfaceid'[0]
+         -set 'value' = 'interfaceid'
+
+         -condition 'VAR_pianocapture_set' == 1
+         -condition 'keydown' == 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_pianocapture'[0]
+         -set 'value' = 'notenum'
+       -> output 'set-variable'
+         -set 'var' = 'VAR_pianocapture_set'[0]
+         -set 'value' = 0
+
+         -condition 'VAR_keyheld_up' == 1
+         -condition 'midichannel' == 'VAR_notechan'[0]
+         -condition 'notenum' == 'VAR_noterange'[36>47]
+       -> output 'slide-loop-amplifier'
+         -set 'loopid' = 'notenum'+'VAR_loopid_pianostart'[350]
+         -set 'slide' = 'keydown'*'VAR_slide_speed'[0.30]/2
+
+         -condition 'VAR_keyheld_down' == 1
+         -condition 'midichannel' == 'VAR_notechan'[0]
+         -condition 'notenum' == 'VAR_noterange'[36>47]
+       -> output 'slide-loop-amplifier'
+         -set 'loopid' = 'notenum'+'VAR_loopid_pianostart'[350]
+         -set 'slide' = 0-'keydown'*'VAR_slide_speed'[0.30]/2
+
+         -condition 'VAR_cutmode' == 1
+         -condition 'midichannel' == 'VAR_notechan'[0]
+         -condition 'notenum' == 'VAR_noterange'[36>47]
+         -condition 'keydown' == 1
+       -> output 'set-trigger-volume'
+         -set 'loopid' = 'notenum'+'VAR_loopid_pianostart'[350]
+         -set 'vol' = 'velocity'/127
+
+         -condition 'VAR_cutmode' == 1
+         -condition 'midichannel' == 'VAR_notechan'[0]
+         -condition 'notenum' == 'VAR_noterange'[36>47]
+         -condition 'keydown' == 0
+       -> output 'set-trigger-volume'
+         -set 'loopid' = 'notenum'+'VAR_loopid_pianostart'[350]
+         -set 'vol' = 0
+
+         -condition 'VAR_keyheld_space' == 1
+         -condition 'notenum' == 'VAR_pianocapture'[0]
+         -condition 'keydown' == 1
+       -> output 'erase-loop'
+         -set 'loopid' = 'VAR_loopid_footswitch'[340]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferloop'[0]
+         -set 'value' = 0
+
+         -condition 'VAR_keyheld_space' == 1
+         -condition 'midichannel' == 'VAR_notechan'[0]
+         -condition 'notenum' == 'VAR_noterange'[36>47]
+         -condition 'keydown' == 1
+       -> output 'erase-loop'
+         -set 'loopid' = 'notenum'+'VAR_loopid_pianostart'[350]
+
+         -condition 'VAR_xferloop' == 1
+         -condition 'midichannel' == 'VAR_notechan'[0]
+         -condition 'notenum' == 'VAR_noterange'[36>47]
+         -condition 'keydown' == 1
+       -> output 'move-loop'
+         -set 'oldloopid' = 'VAR_xferidx'[0]
+         -set 'newloopid' = 'notenum'+'VAR_loopid_pianostart'[350]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferloop'[0]
+         -set 'value' = 0
+
+         -condition 'VAR_overdubmode' == 1
+         -condition 'notenum' == 'VAR_pianocapture'[0]
+         -condition 'keydown' == 1
+       -> output 'trigger-loop'
+         -set 'overdub' = 1
+         -set 'overdubfeedback' = 'VAR_overdubfeedback'[0.80]
+         -set 'loopid' = 'VAR_loopid_footswitch'[340]
+         -set 'vol' = 'velocity'/127
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferloop'[0]
+         -set 'value' = 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferidx'[0]
+         -set 'value' = 'VAR_loopid_footswitch'[340]
+
+         -condition 'VAR_overdubmode' == 1
+         -condition 'midichannel' == 'VAR_notechan'[0]
+         -condition 'notenum' == 'VAR_noterange'[36>47]
+         -condition 'keydown' == 1
+       -> output 'trigger-loop'
+         -set 'overdub' = 1
+         -set 'overdubfeedback' = 'VAR_overdubfeedback'[0.80]
+         -set 'loopid' = 'notenum'+'VAR_loopid_pianostart'[350]
+         -set 'vol' = 'velocity'/127
+
+         -condition 'notenum' == 'VAR_pianocapture'[0]
+         -condition 'keydown' == 1
+       -> output 'trigger-loop'
+         -set 'loopid' = 'VAR_loopid_footswitch'[340]
+         -set 'vol' = 'velocity'/127
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferloop'[0]
+         -set 'value' = 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferidx'[0]
+         -set 'value' = 'VAR_loopid_footswitch'[340]
+
+         -condition 'midichannel' == 'VAR_notechan'[0]
+         -condition 'notenum' == 'VAR_noterange'[36>47]
+         -condition 'keydown' == 1
+       -> output 'trigger-loop'
+         -set 'loopid' = 'notenum'+'VAR_loopid_pianostart'[350]
+         -set 'vol' = 'velocity'/127
+
+         -condition 'SYSTEM_cur_switchable_interface' == 'VAR_midikeyboard_interfaceid'[0]
+         -condition 'key' == 120 [x]
+         -condition 'keydown' == 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_loopid_pianostart'[350]
+         -set 'value' = 'VAR_loopid_pianostart'[350]+'VAR_noterangechange'[12]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_piano_looppage'[0]
+         -set 'value' = 'VAR_piano_looppage'[0]+1
+       -> output 'video-show-loop'
+         -set 'layoutid' = 0
+         -set 'loopid' = 'VAR_noterange'[36>47]+'VAR_loopid_pianostart'[350]
+         -implicitly set 'interfaceid' = 2
+
+         -condition 'SYSTEM_cur_switchable_interface' == 'VAR_midikeyboard_interfaceid'[0]
+         -condition 'key' == 122 [z]
+         -condition 'keydown' == 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_loopid_pianostart'[350]
+         -set 'value' = 'VAR_loopid_pianostart'[350]-'VAR_noterangechange'[12]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_piano_looppage'[0]
+         -set 'value' = 'VAR_piano_looppage'[0]-1
+       -> output 'video-show-loop'
+         -set 'layoutid' = 0
+         -set 'loopid' = 'VAR_noterange'[36>47]+'VAR_loopid_pianostart'[350]
+         -implicitly set 'interfaceid' = 2
+'Piano Keyboard' scale (0.35,0.55) @ (0,0) Name@ (12,9) 
+  Element: #0 'C' @ (0,0) Name@ (34,290) looppos (45,224) loopsize 84 
+    Box: outline (L1,T1,R1,B1) dim (0,158)-(90,317) 
+    Box: outline (L1,T1,R1,B0) dim (0,0)-(34,158) 
+  Element: #1 'C#' @ (0,0) Name@ (56,132) looppos (78,66) loopsize 84 
+    Box: outline (L1,T1,R1,B1) dim (34,0)-(123,158) 
+  Element: #2 'D' @ (89,0) Name@ (123,290) looppos (134,224) loopsize 84 
+    Box: outline (L1,T1,R1,B1) dim (90,158)-(179,317) 
+    Box: outline (L1,T1,R1,B0) dim (123,0)-(146,158) 
+  Element: #3 'D#' @ (89,0) Name@ (168,132) looppos (190,66) loopsize 84 
+    Box: outline (L1,T1,R1,B1) dim (146,0)-(235,158) 
+  Element: #4 'E' @ (179,0) Name@ (213,290) looppos (224,224) loopsize 84 
+    Box: outline (L1,T1,R1,B1) dim (179,158)-(269,317) 
+    Box: outline (L1,T1,R1,B0) dim (235,0)-(269,158) 
+  Element: #5 'F' @ (268,0) Name@ (302,290) looppos (314,224) loopsize 84 
+    Box: outline (L1,T1,R1,B1) dim (269,158)-(358,317) 
+    Box: outline (L1,T1,R1,B0) dim (269,0)-(302,158) 
+  Element: #6 'F#' @ (268,0) Name@ (325,132) looppos (347,66) loopsize 84 
+    Box: outline (L1,T1,R1,B1) dim (302,0)-(392,158) 
+  Element: #7 'G' @ (358,0) Name@ (392,290) looppos (403,224) loopsize 84 
+    Box: outline (L1,T1,R1,B1) dim (358,158)-(448,317) 
+    Box: outline (L1,T1,R1,B0) dim (392,0)-(403,158) 
+  Element: #8 'G#' @ (358,0) Name@ (426,132) looppos (448,66) loopsize 84 
+    Box: outline (L1,T1,R1,B1) dim (403,0)-(493,158) 
+  Element: #9 'A' @ (448,0) Name@ (482,290) looppos (493,224) loopsize 84 
+    Box: outline (L1,T1,R1,B1) dim (448,158)-(538,317) 
+    Box: outline (L1,T1,R1,B0) dim (493,0)-(504,158) 
+  Element: #10 'A#' @ (448,0) Name@ (526,132) looppos (549,66) loopsize 84 
+    Box: outline (L1,T1,R1,B1) dim (504,0)-(594,158) 
+  Element: #11 'B' @ (537,0) Name@ (571,290) looppos (582,224) loopsize 84 
+    Box: outline (L1,T1,R1,B1) dim (538,158)-(627,317) 
+    Box: outline (L1,T1,R1,B0) dim (594,0)-(627,158) 
+CONFIG: New onscreen display: [31;1m(invalid display type: 'squares')
+[0mINIT: Load interface 'bcf2000.xml' [second pass]
+
+         -implicit condition 'interfaceid' == 3
+       -> output 'video-show-loop'
+         -set 'layoutid' = 0
+         -set 'loopid' = 'VAR_bcf2000range'[0>7]+'VAR_loopid_bcf2000'[350]
+         -implicitly set 'interfaceid' = 3
+       -> output 'set-variable'
+         -set 'var' = 'VAR_bcf2000_interfaceid'[0]
+         -set 'value' = 'interfaceid'
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000controlrange1'[0>7]+'VAR_bcf2000ampcc'[90]
+         -condition 'controlval' == 0>64
+       -> output 'adjust-loop-amplifier'
+         -set 'loopid' = 'VAR_loopid_bcf2000'[350]+'controlnum'-'VAR_bcf2000ampcc'[90]
+         -set 'ampfactor' = 'controlval'*'VAR_bcf2000_loopamp_adj'[0.05]+1.00
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000controlrange1'[0>7]+'VAR_bcf2000ampcc'[90]
+         -condition 'controlval' == 64>127
+       -> output 'adjust-loop-amplifier'
+         -set 'loopid' = 'VAR_loopid_bcf2000'[350]+'controlnum'-'VAR_bcf2000ampcc'[90]
+         -set 'ampfactor' = 'controlval'-128*'VAR_bcf2000_loopamp_adj'[0.05]+1.00
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_scenebrowse_fine_midicontrol'[75]
+         -condition 'controlval' == 0>64
+       -> output 'go-sub'
+         -set 'sub' = 100
+         -set 'param1' = 'DISPLAY_browser_scene'[2]
+       -> output 'browser-move-to-item'
+         -set 'browserid' = 'DISPLAY_browser_scene'[2]
+         -set 'adjust' = 'controlval'
+         -set 'jumpadjust' = 0
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_scenebrowse_fine_midicontrol'[75]
+         -condition 'controlval' == 64>127
+       -> output 'go-sub'
+         -set 'sub' = 100
+         -set 'param1' = 'DISPLAY_browser_scene'[2]
+       -> output 'browser-move-to-item'
+         -set 'browserid' = 'DISPLAY_browser_scene'[2]
+         -set 'adjust' = 'controlval'-128
+         -set 'jumpadjust' = 0
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_scenebrowse_select_midicontrol'[76]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'go-sub'
+         -set 'sub' = 100
+         -set 'param1' = 'DISPLAY_browser_scene'[2]
+       -> output 'browser-select-item'
+         -set 'browserid' = 'DISPLAY_browser_scene'[2]
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_scenebrowse_save_midicontrol'[77]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'save-current-scene'
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_scenemode_midicontrol'[73]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_scene_mode'[0]
+         -set 'value' = 1
+       -> output 'video-show-display'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'DISPLAY_scenes'[2000]
+         -set 'show' = 'VAR_scene_mode'[0]
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_scenemode_midicontrol'[73]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_scene_mode'[0]
+         -set 'value' = 0
+       -> output 'video-show-display'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'DISPLAY_scenes'[2000]
+         -set 'show' = 'VAR_scene_mode'[0]
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'VAR_scene_mode' == 1
+         -condition 'controlnum' == 'VAR_bcf2000_prevlooppage_midicontrol'[120]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'video-show-snapshot-page'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'DISPLAY_scenes'[2000]
+         -set 'page' = -1
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'VAR_scene_mode' == 1
+         -condition 'controlnum' == 'VAR_bcf2000_nextlooppage_midicontrol'[121]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'video-show-snapshot-page'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'DISPLAY_scenes'[2000]
+         -set 'page' = 1
+
+         -condition 'SYSTEM_cur_switchable_interface' == 'VAR_bcf2000_interfaceid'[0]
+         -condition 'key' == 120 [x]
+         -condition 'keydown' == 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_loopid_bcf2000'[350]
+         -set 'value' = 'VAR_loopid_bcf2000'[350]+'VAR_loopidrangechange'[8]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_bcf2000_looppage'[0]
+         -set 'value' = 'VAR_bcf2000_looppage'[0]+1
+       -> output 'video-show-loop'
+         -set 'layoutid' = 0
+         -set 'loopid' = 'VAR_bcf2000range'[0>7]+'VAR_loopid_bcf2000'[350]
+         -implicitly set 'interfaceid' = 3
+
+         -condition 'SYSTEM_cur_switchable_interface' == 'VAR_bcf2000_interfaceid'[0]
+         -condition 'key' == 122 [z]
+         -condition 'keydown' == 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_loopid_bcf2000'[350]
+         -set 'value' = 'VAR_loopid_bcf2000'[350]-'VAR_loopidrangechange'[8]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_bcf2000_looppage'[0]
+         -set 'value' = 'VAR_bcf2000_looppage'[0]-1
+       -> output 'video-show-loop'
+         -set 'layoutid' = 0
+         -set 'loopid' = 'VAR_bcf2000range'[0>7]+'VAR_loopid_bcf2000'[350]
+         -implicitly set 'interfaceid' = 3
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_prevlooppage_midicontrol'[120]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_loopid_bcf2000'[350]
+         -set 'value' = 'VAR_loopid_bcf2000'[350]-'VAR_loopidrangechange'[8]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_bcf2000_looppage'[0]
+         -set 'value' = 'VAR_bcf2000_looppage'[0]-1
+       -> output 'video-show-loop'
+         -set 'layoutid' = 0
+         -set 'loopid' = 'VAR_bcf2000range'[0>7]+'VAR_loopid_bcf2000'[350]
+         -implicitly set 'interfaceid' = 3
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_nextlooppage_midicontrol'[121]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_loopid_bcf2000'[350]
+         -set 'value' = 'VAR_loopid_bcf2000'[350]+'VAR_loopidrangechange'[8]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_bcf2000_looppage'[0]
+         -set 'value' = 'VAR_bcf2000_looppage'[0]+1
+       -> output 'video-show-loop'
+         -set 'layoutid' = 0
+         -set 'loopid' = 'VAR_bcf2000range'[0>7]+'VAR_loopid_bcf2000'[350]
+         -implicitly set 'interfaceid' = 3
+
+         -condition 'VAR_keyheld_space' == 1
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_pulseselect_midicontrol'[125]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'delete-pulse'
+         -set 'pulse' = 0
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_pulseselect_midicontrol'[125]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'select-pulse'
+         -set 'pulse' = 0
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_fadermode_midicontrol'[70]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_fadermode'[1]
+         -set 'maxvalue' = 1
+
+         -condition 'VAR_fadermode' == 1
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000fadercc'[80]+7
+       -> output 'go-sub'
+         -set 'sub' = 100
+         -set 'param1' = 'DISPLAY_browser_patch'[0]
+       -> output 'browser-move-to-item-absolute'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+         -set 'idx' = 'controlval'/127.00*16
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_patchselect_midicontrol'[72]
+       -> output 'browser-select-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+
+         -condition 'VAR_fadermode' == 1
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000fadercc'[80]+4
+       -> output 'set-master-in-volume'
+         -set 'fadervol' = 'controlval'/127.00
+       -> output 'go-sub'
+         -set 'sub' = 800
+         -set 'param1' = 'controlval'/127.00
+
+         -condition 'VAR_fadermode' == 1
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000fadercc'[80]+5
+       -> output 'set-master-out-volume'
+         -set 'fadervol' = 'controlval'/127.00
+
+         -condition 'VAR_fadermode' == 1
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000fadercc'[80]+0
+       -> output 'set-in-volume'
+         -set 'input' = 1
+         -set 'fadervol' = 'controlval'/127.00
+       -> output 'go-sub'
+         -set 'sub' = 801
+         -set 'param1' = 'controlval'/127.00
+
+         -condition 'VAR_fadermode' == 1
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000fadercc'[80]+1
+       -> output 'set-in-volume'
+         -set 'input' = 2
+         -set 'fadervol' = 'controlval'/127.00
+       -> output 'go-sub'
+         -set 'sub' = 802
+         -set 'param1' = 'controlval'/127.00
+
+         -condition 'VAR_fadermode' == 1
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000fadercc'[80]+2
+       -> output 'set-in-volume'
+         -set 'input' = 3
+         -set 'fadervol' = 'controlval'/127.00
+       -> output 'go-sub'
+         -set 'sub' = 803
+         -set 'param1' = 'controlval'/127.00
+
+         -condition 'VAR_fadermode' == 1
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000fadercc'[80]+3
+       -> output 'set-in-volume'
+         -set 'input' = 4
+         -set 'fadervol' = 'controlval'/127.00
+
+         -condition 'VAR_fadermode' == 0
+         -condition 'VAR_controlpage' == 0
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000controlrange1'[0>7]+'VAR_bcf2000fadercc'[80]
+       -> output 'set-trigger-volume'
+         -set 'loopid' = 'VAR_loopid_bcf2000'[350]+'controlnum'-'VAR_bcf2000fadercc'[80]
+         -set 'vol' = 'controlval'/127.00*2.00
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_overdubfeedback_midicontrol'[86]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_overdubfeedback'[0.80]
+         -set 'value' = 'controlval'/127
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_triggervol_selected_midicontrol'[89]
+       -> output 'set-selected-loops-trigger-volume'
+         -set 'setid' = 0
+         -set 'vol' = 'controlval'*2.00/127
+
+         -condition 'VAR_keyheld_space' == 1
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_undo_midicontrol'[119]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'erase-all-loops'
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_undo_midicontrol'[119]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'erase-loop'
+         -set 'loopid' = 'SYSTEM_loopid_lastrecord_0'[0]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferloop'[0]
+         -set 'value' = 0
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_patchbank_midicontrol'[31]
+       -> output 'video-show-display'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'VAR_cur_browser'[0]
+         -set 'show' = 0
+       -> output 'set-variable'
+         -set 'var' = 'VAR_cur_browser'[0]
+         -set 'value' = 'DISPLAY_browser_patch'[0]
+       -> output 'video-show-display'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'VAR_cur_browser'[0]
+         -set 'show' = 1
+       -> output 'patchbrowser-move-to-bank-by-index'
+         -set 'index' = 'controlval'*'SYSTEM_num_patchbanks'[0]/128
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_patchbank_back_midicontrol'[32]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'video-show-display'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'VAR_cur_browser'[0]
+         -set 'show' = 0
+       -> output 'set-variable'
+         -set 'var' = 'VAR_cur_browser'[0]
+         -set 'value' = 'DISPLAY_browser_patch'[0]
+       -> output 'video-show-display'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'VAR_cur_browser'[0]
+         -set 'show' = 1
+       -> output 'patchbrowser-move-to-bank'
+         -set 'direction' = -1
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_patchbank_forward_midicontrol'[33]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'video-show-display'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'VAR_cur_browser'[0]
+         -set 'show' = 0
+       -> output 'set-variable'
+         -set 'var' = 'VAR_cur_browser'[0]
+         -set 'value' = 'DISPLAY_browser_patch'[0]
+       -> output 'video-show-display'
+         -set 'interfaceid' = 0
+         -set 'displayid' = 'VAR_cur_browser'[0]
+         -set 'show' = 1
+       -> output 'patchbrowser-move-to-bank'
+         -set 'direction' = 1
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_midishift_midicontrol'[118]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_keyheld_midishift'[0]
+         -set 'value' = 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_keyheld_space'[0]
+         -set 'value' = 1
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_midishift_midicontrol'[118]
+         -condition 'controlval' == 'VAR_switch_off'[0]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_keyheld_midishift'[0]
+         -set 'value' = 0
+       -> output 'set-variable'
+         -set 'var' = 'VAR_keyheld_space'[0]
+         -set 'value' = 0
+
+CONFIG: Create 'midichannel' parameter hashtable[17] for input event 'midiprogramchange'
+
+         -condition 'programval' == 'VAR_cur_program'[0]+1
+         -condition 'VAR_keyheld_midishift' == 0
+       -> output 'set-variable'
+         -set 'var' = 'VAR_cur_program'[0]
+         -set 'value' = 'programval'
+       -> output 'browser-move-to-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+         -set 'adjust' = 1
+         -set 'jumpadjust' = 0
+
+         -condition 'VAR_keyheld_midishift' == 0
+         -condition 'VAR_cur_program' == 127
+         -condition 'programval' == 0
+       -> output 'set-variable'
+         -set 'var' = 'VAR_cur_program'[0]
+         -set 'value' = 'programval'
+       -> output 'browser-move-to-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+         -set 'adjust' = 1
+         -set 'jumpadjust' = 0
+
+         -condition 'programval' == 'VAR_cur_program'[0]-1
+         -condition 'VAR_keyheld_midishift' == 0
+       -> output 'set-variable'
+         -set 'var' = 'VAR_cur_program'[0]
+         -set 'value' = 'programval'
+       -> output 'browser-move-to-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+         -set 'adjust' = -1
+         -set 'jumpadjust' = 0
+
+         -condition 'VAR_keyheld_midishift' == 0
+         -condition 'VAR_cur_program' == 0
+         -condition 'programval' == 127
+       -> output 'set-variable'
+         -set 'var' = 'VAR_cur_program'[0]
+         -set 'value' = 'programval'
+       -> output 'browser-move-to-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+         -set 'adjust' = -1
+         -set 'jumpadjust' = 0
+
+         -condition 'programval' == 'VAR_cur_program'[0]+1
+         -condition 'VAR_keyheld_midishift' == 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_cur_program'[0]
+         -set 'value' = 'programval'
+       -> output 'browser-move-to-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+         -set 'adjust' = 0
+         -set 'jumpadjust' = 1
+
+         -condition 'VAR_keyheld_midishift' == 1
+         -condition 'VAR_cur_program' == 127
+         -condition 'programval' == 0
+       -> output 'set-variable'
+         -set 'var' = 'VAR_cur_program'[0]
+         -set 'value' = 'programval'
+       -> output 'browser-move-to-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+         -set 'adjust' = 0
+         -set 'jumpadjust' = 1
+
+         -condition 'programval' == 'VAR_cur_program'[0]-1
+         -condition 'VAR_keyheld_midishift' == 1
+       -> output 'set-variable'
+         -set 'var' = 'VAR_cur_program'[0]
+         -set 'value' = 'programval'
+       -> output 'browser-move-to-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+         -set 'adjust' = 0
+         -set 'jumpadjust' = -1
+
+         -condition 'VAR_keyheld_midishift' == 1
+         -condition 'VAR_cur_program' == 0
+         -condition 'programval' == 127
+       -> output 'set-variable'
+         -set 'var' = 'VAR_cur_program'[0]
+         -set 'value' = 'programval'
+       -> output 'browser-move-to-item'
+         -set 'browserid' = 'VAR_cur_browser'[0]
+         -set 'adjust' = 0
+         -set 'jumpadjust' = -1
+
+       -> output 'set-variable'
+         -set 'var' = 'VAR_cur_program'[0]
+         -set 'value' = 'programval'
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'VAR_scene_mode' == 1
+         -condition 'controlnum' == 'VAR_bcf2000range'[0>7]+'VAR_bcf2000capturecc'[110]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'go-sub'
+         -set 'sub' = 101
+         -set 'param1' = 'controlnum'-'VAR_bcf2000capturecc'[110]+'SYSTEM_snapshot_page_firstidx'[0]
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'VAR_scene_mode' == 1
+         -condition 'controlnum' == 'VAR_bcf2000range'[0>7]+'VAR_bcf2000auxtriggercc'[100]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'create-snapshot'
+         -set 'snapid' = 'controlnum'-'VAR_bcf2000auxtriggercc'[100]+'SYSTEM_snapshot_page_firstidx'[0]
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_triggerselected_midicontrol'[124]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'trigger-selected-loops'
+         -set 'setid' = 0
+         -set 'vol' = 1.00
+         -set 'toggleloops' = 1
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'VAR_keyheld_space' == 1
+         -condition 'controlnum' == 'VAR_bcf2000_selectnone_midicontrol'[122]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'select-all-loops'
+         -set 'setid' = 0
+         -set 'select' = 1
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'VAR_keyheld_space' == 1
+         -condition 'controlnum' == 'VAR_bcf2000_selectallplay_midicontrol'[123]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'invert-selection'
+         -set 'setid' = 0
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_selectnone_midicontrol'[122]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'select-all-loops'
+         -set 'setid' = 0
+         -set 'select' = 0
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_selectallplay_midicontrol'[123]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'select-only-playing-loops'
+         -set 'setid' = 0
+         -set 'playing' = 1
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000range'[0>7]+'VAR_bcf2000selectcc'[40]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'toggle-select-loop'
+         -set 'setid' = 0
+         -set 'loopid' = 'controlnum'-'VAR_bcf2000selectcc'[40]+'VAR_loopid_bcf2000'[350]
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000range'[0>7]+'VAR_bcf2000miscknobcc'[50]
+         -condition 'controlval' == 0>64
+       -> output 'adjust-selected-loops-amp'
+         -set 'setid' = 0
+         -set 'ampfactor' = 'controlval'*'VAR_bcf2000_loopamp_adj'[0.05]+1.00
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000range'[0>7]+'VAR_bcf2000miscknobcc'[50]
+         -condition 'controlval' == 64>127
+       -> output 'adjust-selected-loops-amp'
+         -set 'setid' = 0
+         -set 'ampfactor' = 'controlval'-128*'VAR_bcf2000_loopamp_adj'[0.05]+1.00
+
+         -condition 'VAR_keyheld_space' == 1
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000range'[0>7]+'VAR_bcf2000capturecc'[110]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'erase-loop'
+         -set 'loopid' = 'controlnum'-'VAR_bcf2000capturecc'[110]+'VAR_loopid_bcf2000'[350]
+
+         -condition 'VAR_xferloop' == 1
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000range'[0>7]+'VAR_bcf2000capturecc'[110]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'move-loop'
+         -set 'oldloopid' = 'VAR_xferidx'[0]
+         -set 'newloopid' = 'controlnum'-'VAR_bcf2000capturecc'[110]+'VAR_loopid_bcf2000'[350]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferloop'[0]
+         -set 'value' = 0
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000range'[0>7]+'VAR_bcf2000auxtriggercc'[100]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'trigger-loop'
+         -set 'overdub' = 1
+         -set 'overdubfeedback' = 'VAR_overdubfeedback'[0.80]
+         -set 'loopid' = 'controlnum'-'VAR_bcf2000auxtriggercc'[100]+'VAR_loopid_bcf2000'[350]
+         -set 'vol' = 1.00
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000range'[0>7]+'VAR_bcf2000capturecc'[110]
+         -condition 'controlval' == 'VAR_switch_on'[64>127]
+       -> output 'trigger-loop'
+         -set 'loopid' = 'controlnum'-'VAR_bcf2000capturecc'[110]+'VAR_loopid_bcf2000'[350]
+         -set 'vol' = 1.00
+
+         -condition 'midichannel' == 'VAR_bcf2000_channel'[15]
+         -condition 'controlnum' == 'VAR_bcf2000_any_midicc'[0>127]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_bcf2000_ate_midicc'[0]
+         -set 'value' = 'controlnum'
+(label) 'BCF2000' scale (0.35,0.45) @ (0,48) Name@ (0,124) 
+  Element: #0 'LOOP1' @ (0,48) Name@ (0,124) looppos (38,85) loopsize 58 
+    Box: outline (L1,T1,R1,B1) dim (0,48)-(78,124) 
+  Element: #1 'LOOP2' @ (78,48) Name@ (78,124) looppos (116,85) loopsize 58 
+    Box: outline (L1,T1,R1,B1) dim (78,48)-(157,124) 
+  Element: #2 'LOOP3' @ (156,48) Name@ (157,124) looppos (195,85) loopsize 58 
+    Box: outline (L1,T1,R1,B1) dim (157,48)-(235,124) 
+  Element: #3 'LOOP4' @ (235,48) Name@ (314,156) looppos (273,85) loopsize 58 
+    Box: outline (L1,T1,R1,B1) dim (235,48)-(314,124) 
+  Element: #4 'LOOP5' @ (313,48) Name@ (347,286) looppos (352,85) loopsize 58 
+    Box: outline (L1,T1,R1,B1) dim (314,48)-(392,124) 
+  Element: #5 'LOOP6' @ (392,48) Name@ (426,286) looppos (430,85) loopsize 58 
+    Box: outline (L1,T1,R1,B1) dim (392,48)-(470,124) 
+  Element: #6 'LOOP7' @ (470,48) Name@ (526,156) looppos (508,85) loopsize 58 
+    Box: outline (L1,T1,R1,B1) dim (470,48)-(549,124) 
+  Element: #7 'LOOP8' @ (548,48) Name@ (582,286) looppos (587,85) loopsize 58 
+    Box: outline (L1,T1,R1,B1) dim (549,48)-(638,124) 
+  Element: #8 'LOOP9' @ (0,145) Name@ (0,221) looppos (38,182) loopsize 58 
+    Box: outline (L1,T1,R1,B1) dim (0,145)-(78,221) 
+  Element: #9 'LOOP10' @ (78,145) Name@ (78,221) looppos (116,182) loopsize 58 
+    Box: outline (L1,T1,R1,B1) dim (78,145)-(157,221) 
+  Element: #10 'LOOP11' @ (156,145) Name@ (157,221) looppos (195,182) loopsize 58 
+    Box: outline (L1,T1,R1,B1) dim (157,145)-(235,221) 
+  Element: #11 'LOOP12' @ (235,145) Name@ (314,253) looppos (273,182) loopsize 58 
+    Box: outline (L1,T1,R1,B1) dim (235,145)-(314,221) 
+  Element: #12 'LOOP13' @ (313,145) Name@ (426,437) looppos (352,182) loopsize 58 
+    Box: outline (L1,T1,R1,B1) dim (314,145)-(392,221) 
+  Element: #13 'LOOP14' @ (392,145) Name@ (426,437) looppos (430,182) loopsize 58 
+    Box: outline (L1,T1,R1,B1) dim (392,145)-(470,221) 
+  Element: #14 'LOOP15' @ (470,145) Name@ (526,437) looppos (508,182) loopsize 58 
+    Box: outline (L1,T1,R1,B1) dim (470,145)-(549,221) 
+  Element: #15 'LOOP16' @ (548,145) Name@ (582,437) looppos (587,182) loopsize 58 
+    Box: outline (L1,T1,R1,B1) dim (549,145)-(638,221) 
+INIT: Load interface 'dancemat.xml' [second pass]
+
+         -implicit condition 'interfaceid' == 4
+       -> output 'video-show-loop'
+         -set 'layoutid' = 0
+         -set 'loopid' = 'VAR_dancematrange'[0>15]+'VAR_loopid_dancemat'[500]
+         -implicitly set 'interfaceid' = 4
+
+         -condition 'VAR_keyheld_up' == 1
+         -condition 'joystick' == 'VAR_dancemat_joystick'[0]
+         -condition 'button' == 'VAR_dancematrange'[0>15]
+         -condition 'down' == 1
+       -> output 'slide-loop-amplifier'
+         -set 'loopid' = 'VAR_loopid_dancemat'[500]+'button'
+         -set 'slide' = 'VAR_slide_speed'[0.30]/2
+
+         -condition 'VAR_keyheld_down' == 1
+         -condition 'joystick' == 'VAR_dancemat_joystick'[0]
+         -condition 'button' == 'VAR_dancematrange'[0>15]
+         -condition 'down' == 1
+       -> output 'slide-loop-amplifier'
+         -set 'loopid' = 'VAR_loopid_dancemat'[500]+'button'
+         -set 'slide' = 0-'VAR_slide_speed'[0.30]/2
+
+         -condition 'VAR_cutmode' == 1
+         -condition 'joystick' == 'VAR_dancemat_joystick'[0]
+         -condition 'button' == 'VAR_dancematrange'[0>15]
+       -> output 'set-trigger-volume'
+         -set 'loopid' = 'VAR_loopid_dancemat'[500]+'button'
+         -set 'vol' = 1.00*'down'
+
+         -condition 'joystick' == 'VAR_dancemat_joystick'[0]
+         -condition 'button' == 9
+         -condition 'down' == 1
+       -> output 'select-pulse'
+         -set 'pulse' = 0
+
+         -condition 'SYSTEM_loopid_lastrecord_0' == 'VAR_loopid_footswitch'[340]
+         -condition 'joystick' == 'VAR_dancemat_joystick'[0]
+         -condition 'button' == 8
+         -condition 'down' == 1
+       -> output 'erase-loop'
+         -set 'loopid' = 'SYSTEM_loopid_lastrecord_0'[0]
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferloop'[0]
+         -set 'value' = 0
+
+         -condition 'joystick' == 'VAR_dancemat_joystick'[0]
+         -condition 'button' == 8
+         -condition 'down' == 1
+       -> output 'erase-loop'
+         -set 'loopid' = 'SYSTEM_loopid_lastrecord_0'[0]
+
+         -condition 'joystick' == 'VAR_dancemat_joystick'[0]
+         -condition 'button' == 4
+         -condition 'down' == 1
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_overdubmode'[0]
+         -set 'maxvalue' = 1
+
+         -condition 'joystick' == 'VAR_dancemat_joystick'[0]
+         -condition 'button' == 7
+         -condition 'down' == 1
+       -> output 'toggle-variable'
+         -set 'var' = 'VAR_shotmode'[0]
+         -set 'maxvalue' = 1
+
+         -condition 'VAR_keyheld_space' == 1
+         -condition 'joystick' == 'VAR_dancemat_joystick'[0]
+         -condition 'button' == 'VAR_dancematrange'[0>15]
+         -condition 'down' == 1
+       -> output 'erase-loop'
+         -set 'loopid' = 'VAR_loopid_dancemat'[500]+'button'
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferloop'[0]
+         -set 'value' = 0
+
+         -condition 'VAR_xferloop' == 1
+         -condition 'joystick' == 'VAR_dancemat_joystick'[0]
+         -condition 'button' == 'VAR_dancematrange'[0>15]
+         -condition 'down' == 1
+       -> output 'move-loop'
+         -set 'oldloopid' = 'VAR_xferidx'[0]
+         -set 'newloopid' = 'VAR_loopid_dancemat'[500]+'button'
+       -> output 'set-variable'
+         -set 'var' = 'VAR_xferloop'[0]
+         -set 'value' = 0
+
+         -condition 'VAR_overdubmode' == 1
+         -condition 'joystick' == 'VAR_dancemat_joystick'[0]
+         -condition 'button' == 'VAR_dancematrange'[0>15]
+         -condition 'down' == 1
+       -> output 'trigger-loop'
+         -set 'overdub' = 1
+         -set 'overdubfeedback' = 'VAR_overdubfeedback'[0.80]
+         -set 'loopid' = 'VAR_loopid_dancemat'[500]+'button'
+         -set 'vol' = 1.00*'down'
+
+         -condition 'VAR_shotmode' == 1
+         -condition 'joystick' == 'VAR_dancemat_joystick'[0]
+         -condition 'button' == 'VAR_dancematrange'[0>15]
+       -> output 'trigger-loop'
+         -set 'loopid' = 'VAR_loopid_dancemat'[500]+'button'
+         -set 'vol' = 1.00*'down'
+         -set 'engage' = 'down'
+         -set 'shot' = 1
+
+         -condition 'joystick' == 'VAR_dancemat_joystick'[0]
+         -condition 'button' == 'VAR_dancematrange'[0>15]
+         -condition 'down' == 1
+       -> output 'trigger-loop'
+         -set 'loopid' = 'VAR_loopid_dancemat'[500]+'button'
+         -set 'vol' = 1.00*'down'
+(label) (label elements) 'DANCEMAT' scale (2.00,2.00) @ (12,9) Name@ (140,141) 
+  Element: #2 'TL' @ (12,9) Name@ (25,9) looppos (76,57) loopsize 96 
+    Box: outline (L1,T1,R1,B1) dim (12,9)-(140,105) 
+  Element: #12 'T' @ (140,9) Name@ (153,9) looppos (204,57) loopsize 96 
+    Box: outline (L1,T1,R1,B1) dim (140,9)-(268,105) 
+  Element: #1 'TR' @ (268,9) Name@ (281,9) looppos (332,57) loopsize 96 
+    Box: outline (L1,T1,R1,B1) dim (268,9)-(396,105) 
+  Element: #15 'L' @ (12,105) Name@ (25,105) looppos (76,153) loopsize 96 
+    Box: outline (L1,T1,R1,B1) dim (12,105)-(140,201) 
+  Element: #13 'R' @ (268,105) Name@ (281,105) looppos (332,153) loopsize 96 
+    Box: outline (L1,T1,R1,B1) dim (268,105)-(396,201) 
+  Element: #0 'BL' @ (12,201) Name@ (25,201) looppos (76,249) loopsize 96 
+    Box: outline (L1,T1,R1,B1) dim (12,201)-(140,297) 
+  Element: #14 'B' @ (140,201) Name@ (153,201) looppos (204,249) loopsize 96 
+    Box: outline (L1,T1,R1,B1) dim (140,201)-(268,297) 
+  Element: #3 'BR' @ (268,201) Name@ (281,201) looppos (332,249) loopsize 96 
+    Box: outline (L1,T1,R1,B1) dim (268,201)-(396,297) 
+CONFIG: # of interfaces: 4 switchable / 4 non-switchable
+Start event manager.
+EVENT: Stacksize: 131072.
+CORE: Register ringbuffer writer thread: <addr>
+CORE: RingBuffer <addr>: Update reader and writer threads to 3
+VIDEO: SetVideoMode: Using 24-bit color
+VIDEO: Window logical size 64<addr>, drawable size 64<addr>, scale 1.0<addr>.00
+VIDEO:AUDIO: low-latency macOS path requires matching default input/output devices.
+AUDIO: default input=71 output=76; using output device for full-duplex HAL.
+ Starting handler..
+VIDEO: Stacksize: 131072.
+CORE: Register ringbuffer writer thread: <addr>
+CORE: RingBuffer <addr>: Update reader and writer threads to 4
+VIDEO: Thread start..
+VIDEO: Loading main font: truetype/ttf-bitstream-vera/VeraBd.ttf (20 pt)
+VIDEO: Loading help font: truetype/ttf-bitstream-vera/Vera.ttf (16 pt)
+VIDEO: Loading small font: truetype/ttf-bitstream-vera/VeraBd.ttf (14 pt)
+VIDEO: Loading tiny font: truetype/ttf-bitstream-vera/Vera.ttf (10 pt)
+VIDEO: SDL Ready!
+AUDIO: sample rate 48000, buffer size 128, capture capacity 16384
+AUDIO: preferred buffer request 128 frames, actual device buffer 128
+AUDIO: using 4 external inputs, 4 total inputs
+MAIN: Core block size: 128
+BLOCK: Stacksize: 131072.
+CORE: Register ringbuffer writer thread: <addr>
+CORE: RingBuffer <addr>: Update reader and writer threads to 5
+BROWSER: (Loop) Scanning for loops in library: fw-lib/loop*.ogg
+BROWSER: (Loop) Scanning for loops in library: fw-lib/loop*.wav
+BROWSER: (Loop) Scanning for loops in library: fw-lib/loop*.flac
+BROWSER: (Loop) Scanning for loops in library: fw-lib/loop*.au
+BROWSER: (Scene) Scanning for scenes in library: fw-lib/scene*.xml
+MIDI: Input possible from 2 sources.
+  MIDI: source name: virtual1
+  MIDI: source name: virtual2
+MIDI: Can't find BypassInfo struct for p/c [0/0]
+CONFIG: Link system variable: SYSTEM_num_midi_outs -> <addr>
+CONFIG: Link system variable: SYSTEM_midi_transpose -> <addr>
+CONFIG: Link system variable: SYSTEM_master_in_volume -> <addr>
+CONFIG: Link system variable: SYSTEM_master_out_volume -> <addr>
+CONFIG: Link system variable: SYSTEM_cur_pitchbend -> <addr>
+CONFIG: Link system variable: SYSTEM_bender_tune -> <addr>
+CONFIG: Link system variable: SYSTEM_audio_cpu_load -> <addr>
+CONFIG: Link system variable: SYSTEM_sync_active -> <addr>
+CONFIG: Link system variable: SYSTEM_sync_transmit -> <addr>
+CONFIG: Link system variable: SYSTEM_midisync_transmit -> <addr>
+CONFIG: Link system variable: SYSTEM_num_help_pages -> <addr>
+CONFIG: Link system variable: SYSTEM_num_loops_in_map -> <addr>
+CONFIG: Link system variable: SYSTEM_num_recording_loops_in_map -> <addr>
+CONFIG: Link system variable: SYSTEM_num_patchbanks -> <addr>
+CONFIG: Link system variable: SYSTEM_cur_patchbank_tag -> <addr>
+CONFIG: Link system variable: SYSTEM_num_switchable_interfaces -> <addr>
+CONFIG: Link system variable: SYSTEM_cur_switchable_interface -> <addr>
+CONFIG: Link system variable: SYSTEM_loopid_lastrecord_0 -> <addr>
+CONFIG: Link system variable: SYSTEM_loopid_lastrecord_1 -> <addr>
+CONFIG: Link system variable: SYSTEM_loopid_lastrecord_2 -> <addr>
+CONFIG: Link system variable: SYSTEM_loopid_lastrecord_3 -> <addr>
+CONFIG: Link system variable: SYSTEM_loopid_lastrecord_4 -> <addr>
+CONFIG: Link system variable: SYSTEM_loopid_lastrecord_5 -> <addr>
+CONFIG: Link system variable: SYSTEM_loopid_lastrecord_6 -> <addr>
+CONFIG: Link system variable: SYSTEM_loopid_lastrecord_7 -> <addr>
+CONFIG: Link system variable: SYSTEM_in_1_volume -> <addr>
+CONFIG: Link system variable: SYSTEM_in_1_volume -> <addr>
+CONFIG: Link system variable: SYSTEM_in_1_peak -> <addr>
+CONFIG: Link system variable: SYSTEM_in_1_peak -> <addr>
+CONFIG: Link system variable: SYSTEM_in_1_record -> <addr>
+CONFIG: Link system variable: SYSTEM_in_1_record -> <addr>
+CONFIG: Link system variable: SYSTEM_in_2_volume -> <addr>
+CONFIG: Link system variable: SYSTEM_in_2_volume -> <addr>
+CONFIG: Link system variable: SYSTEM_in_2_peak -> <addr>
+CONFIG: Link system variable: SYSTEM_in_2_peak -> <addr>
+CONFIG: Link system variable: SYSTEM_in_2_record -> <addr>
+CONFIG: Link system variable: SYSTEM_in_2_record -> <addr>
+CONFIG: Link system variable: SYSTEM_in_3_volume -> <addr>
+CONFIG: Link system variable: SYSTEM_in_3_volume -> <addr>
+CONFIG: Link system variable: SYSTEM_in_3_peak -> <addr>
+CONFIG: Link system variable: SYSTEM_in_3_peak -> <addr>
+CONFIG: Link system variable: SYSTEM_in_3_record -> <addr>
+CONFIG: Link system variable: SYSTEM_in_3_record -> <addr>
+CONFIG: Link system variable: SYSTEM_in_4_volume -> <addr>
+CONFIG: Link system variable: SYSTEM_in_4_volume -> <addr>
+CONFIG: Link system variable: SYSTEM_in_4_peak -> <addr>
+CONFIG: Link system variable: SYSTEM_in_4_peak -> <addr>
+CONFIG: Link system variable: SYSTEM_in_4_record -> <addr>
+CONFIG: Link system variable: SYSTEM_in_4_record -> <addr>
+CONFIG: Link system variable: SYSTEM_snapshot_page_firstidx -> <addr>
+CORE: Register ringbuffer writer thread: <addr>
+CORE: RingBuffer <addr>: Update reader and writer threads to 6
+FILESTREAMER: Stacksize: 131072.
+CORE: Register ringbuffer writer thread: <addr>
+CORE: RingBuffer <addr>: Update reader and writer threads to 7
+CORE: Creating disk streamers for 4 inputs
+FILESTREAMER: Stacksize: 131072.
+CORE: Register ringbuffer writer thread: <addr>
+CORE: RingBuffer <addr>: Update reader and writer threads to 8
+FILESTREAMER: Stacksize: 131072.
+CORE: Register ringbuffer writer thread: <addr>
+CORE: RingBuffer <addr>: Update reader and writer threads to 9
+EVENT: Create ringbuffers and begin.
+CORE: Register ringbuffer #1: <addr>
+RP: Create ringbuffers and begin.
+CONFIG: Link system variable: SYSTEM_cur_limiter_gain -> <addr>
+CONFIG: Start non-switchable interface 1000
+CONFIG: Start non-switchable interface 1001
+CONFIG: Start non-switchable interface 1002
+CONFIG: Start non-switchable interface 1003
+CONFIG: Start switchable interface 1
+CONFIG: Start switchable interface 2
+CONFIG: Start switchable interface 3
+CONFIG: Start switchable interface 4
+SDLIO: SDL Input thread start.
+SDLIO: Detected 0 joysticks..
+VIDEO: Creating temporary buffers at 32 bits
+VIDEO: Generating planar->circular map @ size 48
+VIDEO: Generating planar->circular map @ size 84
+VIDEO: Generating planar->circular map @ size 58
+VIDEO: Generating planar->circular map @ size 96
+VIDEO: Generating planar->circular map @ size 32
+Closing joysticks.
+SDLIO: SDL Input thread done.
+VIDEO: thread done
+VIDEO: end
+SDLIO: end
+MIDI: begin close...
+MIDI: end
+AUDIO: end
+MAIN: end stage 1
+ 1
+ 2
+ 3
+ 4
+MAIN: end stage 2
+MAIN: end stage 3
+MAIN: end stage 4
+ 1
+Event Manager: end dispatch thread
+CORE: Unregister ringbuffer #1: <addr>
+EVENT: manager end.
+ 2
+MEM: Begin cleanup.
+MEM: End cleanup.
+CORE: Unregister ringbuffer #0: <addr>
+MEM: End manager thread.
+MAIN: end
