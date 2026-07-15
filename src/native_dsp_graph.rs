@@ -1673,15 +1673,14 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
             self.stop_recording(notify);
             return;
         }
-        if self.recording_waiting_start {
-            self.stop_recording(notify);
-            return;
-        }
-
         let index = self.recording.expect("recording checked above");
         let pulse = self.pulse_frames.max(1) as usize;
         let position = self.pulse_position as usize % pulse;
-        if position < pulse / 2 {
+        // Match RecordProcessor::End exactly: `GetPct() >= 0.5 ||
+        // GetPos() < REC_TAIL_LEN` schedules the delayed end-sync. The
+        // second term matters just after a downbeat, even though that phase
+        // is in the first half.
+        if position * 2 < pulse && position >= REC_TAIL_FRAMES {
             self.recording_end_justify = false;
             // `LoopManager::Deactivate` preserves the current completed
             // callback count, but never creates a zero-beat loop.
@@ -1754,7 +1753,11 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                     self.recording_pulse_beats = 0;
                     self.recording_pulse_extension_applied = false;
                     if self.pulse_sync_active {
-                        if self.pulse_position >= self.pulse_frames / 2 {
+                        // C++ compares `GetPct() >= 0.5`; use a widened
+                        // integer comparison so odd-length pulses make the
+                        // same boundary decision without floating-point
+                        // rounding.
+                        if u64::from(self.pulse_position) * 2 >= u64::from(self.pulse_frames) {
                             self.recording_waiting_start = true;
                         } else {
                             let requested = self.pulse_position as usize;
@@ -2316,6 +2319,9 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                     // C++ schedules `EndNow` at REC_TAIL_LEN after this
                     // downbeat rather than ending at the downbeat itself.
                     self.recording_waiting_stop = false;
+                    // A stop requested before the start downbeat still
+                    // starts at that downbeat in the C++ implementation.
+                    self.recording_waiting_start = false;
                     self.recording_tail_remaining = Some(REC_TAIL_FRAMES);
                 } else if self.recording_waiting_start {
                     self.recording_waiting_start = false;
@@ -2981,24 +2987,74 @@ mod tests {
     }
 
     #[test]
-    fn synced_stop_in_first_half_keeps_the_current_pulse_phase() {
+    fn synced_stop_just_after_downbeat_keeps_the_cpp_record_tail_pending() {
         let (mut processor, _controls) = processor(0.0);
         processor.pulse_sync_active = true;
-        processor.pulse_frames = 4;
+        processor.pulse_frames = 4096;
         processor.pulse_position = 1;
+        processor.recording = Some(0);
+        let slot = &mut processor.loops[0];
+        slot.left = vec![0.0; 32];
+        slot.right = vec![0.0; 32];
+        slot.mode = LoopMode::Recording;
+        slot.len = 6;
+
+        // C++ RecordProcessor::End uses `GetPos() < REC_TAIL_LEN` as an
+        // additional delayed-end condition, even though this is the first
+        // half of the pulse. The recording therefore remains live until the
+        // next downbeat plus the crossfade tail.
+        processor.request_stop_recording(false);
+
+        assert_eq!(processor.loops[0].len, 6);
+        assert!(processor.recording_waiting_stop);
+        assert!(processor.recording_tail_remaining.is_none());
+    }
+
+    #[test]
+    fn synced_stop_far_enough_into_first_half_keeps_the_current_pulse_phase() {
+        let (mut processor, _controls) = processor(0.0);
+        processor.pulse_sync_active = true;
+        processor.pulse_frames = 4096;
+        processor.pulse_position = REC_TAIL_FRAMES as u32;
         processor.recording = Some(0);
         let slot = &mut processor.loops[0];
         slot.mode = LoopMode::Recording;
         slot.len = 6;
 
-        // This follows the C++ "close to previous downbeat" path.  Its
-        // proposed partial-beat crop is commented out in the source, so the
-        // loop keeps all six recorded frames and starts at the master phase.
         processor.request_stop_recording(false);
 
         assert_eq!(processor.loops[0].len, 6);
         assert_eq!(processor.loops[0].mode, LoopMode::Playing);
-        assert_eq!(processor.loops[0].position, 1);
+        assert_eq!(processor.loops[0].position, REC_TAIL_FRAMES % 6);
+    }
+
+    #[test]
+    fn stopping_before_a_synced_start_downbeat_records_the_cpp_tail() {
+        let (mut processor, _controls) = processor(0.0);
+        processor.pulse_sync_active = true;
+        processor.pulse_frames = 4096;
+        processor.pulse_position = 3000;
+        processor.recording = Some(0);
+        processor.recording_waiting_start = true;
+        let slot = &mut processor.loops[0];
+        slot.left = vec![0.0; 32];
+        slot.right = vec![0.0; 32];
+        slot.mode = LoopMode::Recording;
+        slot.pulse_synced = true;
+
+        processor.request_stop_recording(false);
+
+        assert!(processor.recording_waiting_start);
+        assert!(processor.recording_waiting_stop);
+        assert_eq!(processor.loops[0].pulse_beats, 1);
+
+        // Enter the downbeat. The waiting recorder must become active and
+        // capture the same post-downbeat tail as the C++ implementation.
+        processor.pulse_position = 0;
+        run(&mut processor, &[0.25], &[0.25]);
+        assert!(!processor.recording_waiting_start);
+        assert!(processor.recording_tail_remaining.is_some());
+        assert_eq!(processor.loops[0].len, 1);
     }
 
     #[test]
