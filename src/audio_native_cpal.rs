@@ -443,6 +443,7 @@ impl AudioBackend for CpalAudioBackend {
                     callback_sender,
                     output_channels,
                     info.sample_rate,
+                    info.buffer_size as usize,
                     Arc::clone(&output_metrics),
                     self.realtime_metrics.clone(),
                 ),
@@ -474,11 +475,24 @@ impl AudioBackend for CpalAudioBackend {
         {
             thread::sleep(Duration::from_millis(1));
         }
+        let playback_callbacks_before_start = self.metrics.callbacks.load(Ordering::Acquire);
         if let Err(error) = output_stream.play() {
             let _ = input_stream.pause();
             drop(output_stream);
             self.reclaim_callback();
             return Err(format!("cannot start audio playback stream: {error}"));
+        }
+        // C++ `AudioIO::activate` busy-waits for its single duplex callback
+        // to run at least once before returning, so callers can trust the
+        // realtime path is live. CPAL's split streams mean capture and
+        // playback need separate confirmation; only capture was awaited
+        // above, so `callback_health()` could pass on a backend whose
+        // playback callback had never actually run yet.
+        let playback_deadline = Instant::now() + Duration::from_millis(100);
+        while self.metrics.callbacks.load(Ordering::Acquire) == playback_callbacks_before_start
+            && Instant::now() < playback_deadline
+        {
+            thread::sleep(Duration::from_millis(1));
         }
         self.input_stream = Some(input_stream);
         self.output_stream = Some(output_stream);
@@ -775,6 +789,7 @@ fn playback_callback(
     callback_sender: Producer<AudioCallbackFn>,
     channels: usize,
     sample_rate: u32,
+    expected_frames: usize,
     metrics: Arc<SharedMetrics>,
     realtime_metrics: Option<Arc<RealtimeMetrics>>,
 ) -> impl FnMut(&mut [f32], &cpal::OutputCallbackInfo) + Send + 'static {
@@ -814,6 +829,15 @@ fn playback_callback(
             return;
         }
         let frame_count = data.len() / channels;
+        // C++ `AudioIO::process` treats any callback whose frame count
+        // differs from the negotiated fixed buffer size as fatal, since
+        // every downstream buffer assumes a constant fragment size. CPAL
+        // gives no such guarantee across host/device changes; surface a
+        // mismatch as a counted condition instead of silently chunking
+        // through it unnoticed.
+        if frame_count != expected_frames {
+            metrics.xruns.fetch_add(1, Ordering::Relaxed);
+        }
         // Capture and playback are separate CPAL streams.  Capture is started
         // first and can fill several ring periods while playback starts.  If
         // retained, that startup backlog becomes permanent monitor latency.
@@ -821,8 +845,19 @@ fn playback_callback(
         // allowing the ring's safety capacity to become audible delay.
         let queued = consumer.slots();
         let max_queued = frame_count;
-        for _ in 0..queued.saturating_sub(max_queued) {
+        let trimmed = queued.saturating_sub(max_queued);
+        for _ in 0..trimmed {
             let _ = consumer.pop();
+        }
+        // Capture and playback run on independent hardware clocks with no
+        // drift compensation, unlike C++'s single duplex callback which has
+        // none. This periodic trim is an implicit, uncontrolled resampler:
+        // count what it discards so clock drift is observable rather than
+        // silently glitching audio.
+        if trimmed != 0 {
+            metrics
+                .capture_overruns
+                .fetch_add(trimmed as u64, Ordering::Relaxed);
         }
         for output in data.chunks_mut(channels * MAX_CALLBACK_FRAMES) {
             let frames = output.len() / channels;
@@ -963,6 +998,7 @@ mod tests {
             callback_sender,
             2,
             48_000,
+            1,
             metrics,
             Some(Arc::clone(&realtime)),
         );
@@ -996,6 +1032,7 @@ mod tests {
             callback_sender,
             2,
             48_000,
+            2,
             Arc::new(SharedMetrics::default()),
             None,
         );
