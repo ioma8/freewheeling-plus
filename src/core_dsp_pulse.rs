@@ -153,12 +153,11 @@ impl<A: PulseApp, E: PulseEvents> Pulse<A, E> {
         }
     }
     pub fn quantize_length(&self, src: u32) -> u32 {
-        if self.len == 0 {
-            src
-        } else {
-            let f = src as f32 / self.len as f32;
-            (if f < 0.5 { 1. } else { f.round() }) as u32 * self.len
-        }
+        // Matches the C++ `Pulse::QuantizeLength` exactly, including its
+        // division by `len` with no zero-length guard: a zero-length pulse
+        // is not expected to occur in practice.
+        let f = src as f32 / self.len as f32;
+        (if f < 0.5 { 1. } else { f.round() }) as u32 * self.len
     }
     pub fn set_midi_clock(&mut self, start: bool) {
         if self.app.midi_sync_transmit() {
@@ -236,7 +235,10 @@ impl<A: PulseApp, E: PulseEvents> Processor for Pulse<A, E> {
             return;
         }
         if self.app.transport_rolling() && !self.app.timebase_master() {
-            let speed = self.app.sync_speed().max(1) as i32;
+            // Matches C++ `Pulse::process`: `sync_speed` is used unclamped,
+            // so a transient `GetSyncSpeed() == 0` wraps on every beat/bar
+            // change and `clocksperpulse` degenerates, exactly as upstream.
+            let speed = self.app.sync_speed() as i32;
             let kind = self.app.sync_type();
             if kind != self.prev_sync_type || speed != self.prev_sync_speed {
                 self.prev_bpm = 0.;
@@ -245,7 +247,7 @@ impl<A: PulseApp, E: PulseEvents> Processor for Pulse<A, E> {
                 self.prev_sync_speed = speed;
             }
             let bpm = self.app.transport_bpm();
-            if bpm != self.prev_bpm && bpm > 0. {
+            if bpm != self.prev_bpm {
                 let multiplier = if kind {
                     speed as f64
                 } else {
@@ -277,7 +279,7 @@ impl<A: PulseApp, E: PulseEvents> Processor for Pulse<A, E> {
             let remaining = self.len.saturating_sub(self.curpos);
             self.curpos = self.curpos.saturating_add((l as u32).min(remaining));
             if self.clockrun != SyncState::None && self.app.midi_sync_transmit() {
-                let speed = self.app.sync_speed().max(1);
+                let speed = self.app.sync_speed();
                 let clocks_per_pulse = MIDI_CLOCK_FREQUENCY
                     * speed
                     * if self.app.sync_type() {
