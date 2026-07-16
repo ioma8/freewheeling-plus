@@ -38,6 +38,7 @@ pub struct BrowserSceneState {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UiSceneState {
     pub values: HashMap<String, f32>,
+    pub stream_output_name: String,
     pub snapshots: Vec<Option<String>>,
     pub browsers: HashMap<String, BrowserSceneState>,
     pub waveforms: HashMap<i32, Vec<f32>>,
@@ -241,6 +242,7 @@ struct LogoOverlay {
 #[derive(Clone, Debug)]
 struct StaticStatusOverlay {
     base: FloDisplay,
+    state: SharedUiSceneState,
 }
 
 fn cpp_logo_y(drawable_height: i32, logo_height: i32, elapsed: f32) -> i32 {
@@ -388,6 +390,22 @@ impl Display for StaticStatusOverlay {
         &mut self.base
     }
     fn render(&mut self, renderer: &mut dyn Renderer, metrics: &RenderMetrics) {
+        let state = self.state.read().expect("UI state poisoned");
+        let streaming = state.values.get("streaming").copied().unwrap_or(0.0) != 0.0;
+        let stream_bytes = state.values.get("stream-bytes").copied().unwrap_or(0.0);
+        let status = if streaming {
+            let name = if state.stream_output_name.is_empty() {
+                "stream"
+            } else {
+                state.stream_output_name.as_str()
+            };
+            format!(
+                "{name}   {:.1} mb  (1 streams)",
+                stream_bytes / (1024.0 * 1024.0)
+            )
+        } else {
+            "stream off".to_string()
+        };
         renderer.draw(DrawOp::FilledPie(
             metrics.x(18),
             metrics.y(450),
@@ -403,7 +421,7 @@ impl Display for StaticStatusOverlay {
             Color(40, 40, 40, 255),
         ));
         renderer.draw(DrawOp::StyledText(
-            "stream off".into(),
+            status,
             "main".into(),
             20.0 * metrics.scale_y,
             metrics.x(35),
@@ -1318,6 +1336,7 @@ pub fn load_production_scene_at(
     }));
     scene.displays.push(Box::new(StaticStatusOverlay {
         base: FloDisplay::new(0),
+        state: Arc::clone(&state),
     }));
     scene.displays.push(Box::new(PulseOverlay {
         base: FloDisplay::new(0),
@@ -1814,6 +1833,39 @@ mod tests {
                 .count()
                 > 1_000
         );
+    }
+
+    #[test]
+    fn stream_status_overlay_reports_active_output_and_size() {
+        let state = Arc::new(RwLock::new(UiSceneState::default()));
+        let mut display = StaticStatusOverlay {
+            base: FloDisplay::new(0),
+            state: Arc::clone(&state),
+        };
+        let metrics = RenderMetrics::new(640, 480, 640, 480);
+
+        let mut renderer = RecordingRenderer::default();
+        display.render(&mut renderer, &metrics);
+        assert!(renderer.0.iter().any(|op| matches!(
+            op,
+            DrawOp::StyledText(text, _, _, _, _, _, _, _) if text == "stream off"
+        )));
+
+        {
+            let mut state = state.write().unwrap();
+            state.values.insert("streaming".into(), 1.0);
+            state
+                .values
+                .insert("stream-bytes".into(), 2.0 * 1024.0 * 1024.0);
+            state.stream_output_name = "stream-7".into();
+        }
+        let mut renderer = RecordingRenderer::default();
+        display.render(&mut renderer, &metrics);
+        assert!(renderer.0.iter().any(|op| matches!(
+            op,
+            DrawOp::StyledText(text, _, _, _, _, _, _, _)
+                if text == "stream-7   2.0 mb  (1 streams)"
+        )));
     }
 
     #[test]

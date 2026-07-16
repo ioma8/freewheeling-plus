@@ -6,6 +6,8 @@
 
 use std::fmt::Write;
 
+use md5::{Digest, Md5};
+
 pub const HASH_LENGTH: usize = 16;
 pub const LOOP_FORMAT_VERSION: u32 = 1;
 
@@ -192,61 +194,12 @@ fn xml_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-// Small dependency-free MD5 implementation.
-fn md5(input: &[u8]) -> [u8; 16] {
-    let mut a: u32 = 0x67452301;
-    let mut b: u32 = 0xefcdab89;
-    let mut c: u32 = 0x98badcfe;
-    let mut d: u32 = 0x10325476;
-    let mut m = input.to_vec();
-    let bits = (m.len() as u64) * 8;
-    m.push(0x80);
-    while m.len() % 64 != 56 {
-        m.push(0)
-    }
-    m.extend_from_slice(&bits.to_le_bytes());
-    let s = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
-    let mut k = [0u32; 64];
-    for (i, value) in k.iter_mut().enumerate() {
-        *value = ((f64::sin((i + 1) as f64).abs() * (1u64 << 32) as f64) as u64) as u32;
-    }
-    for ch in m.chunks(64) {
-        let mut q = [0u32; 16];
-        for (value, bytes) in q.iter_mut().zip(ch.chunks_exact(4)) {
-            *value = u32::from_le_bytes(bytes.try_into().unwrap())
-        }
-        let (aa, bb, cc, dd) = (a, b, c, d);
-        let mut f;
-        let mut g;
-        for i in 0..64 {
-            if i < 16 {
-                f = (b & c) | (!b & d);
-                g = i
-            } else if i < 32 {
-                f = (d & b) | (!d & c);
-                g = (5 * i + 1) % 16
-            } else if i < 48 {
-                f = b ^ c ^ d;
-                g = (3 * i + 5) % 16
-            } else {
-                f = c ^ (b | !d);
-                g = (7 * i) % 16
-            }
-            let t = a.wrapping_add(f).wrapping_add(k[i]).wrapping_add(q[g]);
-            a = d;
-            d = c;
-            c = b;
-            b = b.wrapping_add(t.rotate_left(s[i % 4 + (i / 16) * 4]));
-        }
-        a = a.wrapping_add(aa);
-        b = b.wrapping_add(bb);
-        c = c.wrapping_add(cc);
-        d = d.wrapping_add(dd);
-    }
-    let mut out = [0; 16];
-    for (i, v) in [a, b, c, d].iter().enumerate() {
-        out[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes())
-    }
+fn md5(input: &[u8]) -> [u8; HASH_LENGTH] {
+    let mut hasher = Md5::new();
+    hasher.update(input);
+    let digest = hasher.finalize();
+    let mut out = [0; HASH_LENGTH];
+    out.copy_from_slice(&digest);
     out
 }
 

@@ -433,6 +433,7 @@ struct RuntimeResources {
     stream_state: StreamState,
     stream_codec: Codec,
     stream_bytes: u64,
+    stream_output_name: String,
     cached_loops: Vec<LoopSnapshot>,
     latest_snapshot: RuntimeSnapshot,
     last_snapshot_request: Instant,
@@ -564,6 +565,7 @@ impl NativeRuntime {
         state
             .values
             .insert("stream-bytes".into(), r.stream_bytes as f32);
+        state.stream_output_name = r.stream_output_name.clone();
         state.values.insert(
             "recording-slot".into(),
             snapshot.recording_slot.max(-1) as f32,
@@ -745,6 +747,7 @@ impl NativeRuntime {
                 stream_state: StreamState::Stopped,
                 stream_codec: Codec::Vorbis,
                 stream_bytes: 0,
+                stream_output_name: String::new(),
                 cached_loops: Vec::new(),
                 latest_snapshot: RuntimeSnapshot::default(),
                 last_snapshot_request: Instant::now() - UI_SNAPSHOT_INTERVAL,
@@ -2561,6 +2564,7 @@ impl NativeRuntime {
                 if let Some(mut encoder) = r.stream_encoder.take() {
                     let _ = encoder.prepare_file_for_closing();
                 }
+                r.stream_output_name.clear();
                 if let Some(audio) = r.audio.as_mut() {
                     audio.close();
                 }
@@ -3187,19 +3191,46 @@ impl NativeComponentAdapter for NativeRuntime {
             fs::create_dir_all(&r.library_dir)
                 .map_err(|e| format!("create stream directory: {e}"))?;
             let extension = codec_extension(r.stream_codec)?;
-            let path = r.library_dir.join(format!("stream-{sequence}{extension}"));
-            let file = fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&path)
-                .map_err(|e| format!("create stream {}: {e}", path.display()))?;
-            let mut encoder = SndFileEncoder::new(r.sample_rate, true, r.stream_codec)
-                .map_err(|e| e.to_string())?;
-            encoder
-                .setup_file_for_writing(file)
-                .map_err(|e| format!("open stream encoder: {e}"))?;
+            let (path, file) = {
+                let mut candidate = sequence;
+                loop {
+                    let path = r.library_dir.join(format!("stream-{candidate}{extension}"));
+                    match fs::OpenOptions::new()
+                        .create_new(true)
+                        .write(true)
+                        .open(&path)
+                    {
+                        Ok(file) => break (path, file),
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                            candidate = candidate
+                                .checked_add(1)
+                                .ok_or("no available stream filename")?;
+                        }
+                        Err(error) => {
+                            return Err(format!("create stream {}: {error}", path.display()));
+                        }
+                    }
+                }
+            };
+            let output_name = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("stream")
+                .to_owned();
+            let mut encoder = match SndFileEncoder::new(r.sample_rate, true, r.stream_codec) {
+                Ok(encoder) => encoder,
+                Err(error) => {
+                    let _ = fs::remove_file(&path);
+                    return Err(error.to_string());
+                }
+            };
+            if let Err(error) = encoder.setup_file_for_writing(file) {
+                let _ = fs::remove_file(&path);
+                return Err(format!("open stream encoder: {error}"));
+            }
             r.stream_bytes = 0;
             r.stream_encoder = Some(encoder);
+            r.stream_output_name = output_name;
             r.stream_enabled.store(true, Ordering::Release);
             r.stream_state = StreamState::Writing;
         } else if !enabled && r.stream_state == StreamState::Writing {
@@ -3209,6 +3240,7 @@ impl NativeComponentAdapter for NativeRuntime {
                     .prepare_file_for_closing()
                     .map_err(|e| format!("finalize stream: {e}"))?;
             }
+            r.stream_output_name.clear();
             r.stream_state = StreamState::Stopped;
         }
         Ok(())
