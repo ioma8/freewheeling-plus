@@ -825,6 +825,7 @@ unsafe extern "C" fn render_callback(
                 frame_rate: state.sample_rate,
                 ..JackPosition::default()
             },
+            transport_rolling: false,
         };
         if let Some(processor) = state.processor.as_mut() {
             processor(&mut audio);

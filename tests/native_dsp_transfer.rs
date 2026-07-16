@@ -37,6 +37,7 @@ fn process(processor: &mut impl AudioProcessor, frames: usize) -> ([f32; 4], [f3
         outputs: [&mut left[..frames], &mut right[..frames]],
         nframes: frames as u32,
         position: JackPosition::default(),
+        transport_rolling: false,
     });
     (left, right)
 }

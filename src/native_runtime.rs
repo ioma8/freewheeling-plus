@@ -1109,6 +1109,19 @@ impl NativeRuntime {
                     .map_err(|_| "DSP command queue is full")?;
                 r.pulse_selected = false;
             }
+            ApplicationAction::TapPulse { new_len } => {
+                r.controls
+                    .as_mut()
+                    .ok_or("DSP controls are closed")?
+                    .try_command(RuntimeCommand::TapPulse { new_len })
+                    .map_err(|_| "DSP command queue is full")?;
+                // C++ `TapPulse` sets `curpulseindex` when it creates the
+                // tapped pulse, so a later F1 reselects instead of deriving
+                // a new pulse from the last recorded loop.
+                if new_len {
+                    r.pulse_selected = true;
+                }
+            }
             ApplicationAction::CreateSnapshot { snapshot } => {
                 r.pending_snapshot_id = Some(snapshot);
             }
@@ -1556,10 +1569,27 @@ impl NativeRuntime {
             }
             ApplicationAction::SetMidiSync(enabled) => {
                 r.midi.as_mut().ok_or("MIDI is closed")?.sync_transmit = enabled != 0;
+                r.controls
+                    .as_mut()
+                    .ok_or("DSP controls are closed")?
+                    .try_command(RuntimeCommand::SetMidiSyncTransmit(enabled != 0))
+                    .map_err(|_| "DSP command queue is full")?;
             }
-            ApplicationAction::SetSyncType(sync_type) => r.sync_type = sync_type != 0,
+            ApplicationAction::SetSyncType(sync_type) => {
+                r.sync_type = sync_type != 0;
+                r.controls
+                    .as_mut()
+                    .ok_or("DSP controls are closed")?
+                    .try_command(RuntimeCommand::SetSyncType(sync_type != 0))
+                    .map_err(|_| "DSP command queue is full")?;
+            }
             ApplicationAction::SetSyncSpeed(sync_speed) => {
-                r.sync_speed = u32::try_from(sync_speed).unwrap_or(1).max(1)
+                r.sync_speed = u32::try_from(sync_speed).unwrap_or(1).max(1);
+                r.controls
+                    .as_mut()
+                    .ok_or("DSP controls are closed")?
+                    .try_command(RuntimeCommand::SetSyncSpeed(sync_speed))
+                    .map_err(|_| "DSP command queue is full")?;
             }
             ApplicationAction::TransmitPlayingLoopsToDaw => {
                 let snapshot = Self::playing_loops(r);
@@ -2940,6 +2970,11 @@ impl NativeComponentAdapter for NativeRuntime {
             let mut imported = Vec::new();
             let mut completed_loops = Vec::new();
             let mut transfer_failure = None;
+            // MIDI output needs the runtime's MIDI/config fields, while the
+            // status receiver is mutably borrowed below. Queue just these
+            // small realtime notifications and fan them out once that borrow
+            // ends, retaining their order.
+            let mut midi_sync_events = Vec::new();
             if let Some(controls) = r.controls.as_mut() {
                 while let Some(status) = controls.try_status() {
                     match status {
@@ -2994,8 +3029,27 @@ impl NativeComponentAdapter for NativeRuntime {
                         RuntimeStatus::TransferError { handle, error, .. } => {
                             transfer_failure = Some((handle, error));
                         }
+                        RuntimeStatus::MidiClockTick => {
+                            midi_sync_events.push(None);
+                        }
+                        RuntimeStatus::MidiTransportOutput { running } => {
+                            midi_sync_events.push(Some(running));
+                        }
                         _ => {}
                     }
+                }
+            }
+            for event in midi_sync_events {
+                let sync_outputs = r.config.borrow().midi_sync_outputs.clone();
+                let midi = r.midi.as_ref().ok_or("MIDI is closed")?;
+                if let Some(running) = event {
+                    if running {
+                        midi.output_start_to_ports(&sync_outputs)?;
+                    } else {
+                        midi.output_stop_to_ports(&sync_outputs)?;
+                    }
+                } else {
+                    midi.output_clock_to_ports(&sync_outputs)?;
                 }
             }
             if let Some(snapshot) = completed_snapshot

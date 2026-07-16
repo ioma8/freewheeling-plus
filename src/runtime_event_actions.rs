@@ -94,6 +94,11 @@ pub enum ApplicationAction {
     /// C++ `LoopManager::DeletePulse`: distinct from deselecting the pulse
     /// (`SelectPulse(-1)`) -- it also erases every loop attached to it.
     DeletePulse,
+    /// C++ `LoopManager::TapPulse`: creates a pulse on the first tap,
+    /// defines its length from the tap gap, and re-anchors the downbeat.
+    TapPulse {
+        new_len: bool,
+    },
     MidiClock,
     MidiTransport {
         running: bool,
@@ -757,6 +762,9 @@ impl<const N: usize> RuntimeEventDispatcher<N> {
                 out.push(app(ApplicationAction::SelectPulse(int(p, "pulse")?)))?
             }
             EventType::DeletePulse => out.push(app(ApplicationAction::DeletePulse))?,
+            EventType::TapPulse => out.push(app(ApplicationAction::TapPulse {
+                new_len: bool_param(p, "newlen")?,
+            }))?,
             EventType::TransmitPlayingLoopsToDAW => {
                 out.push(app(ApplicationAction::TransmitPlayingLoopsToDaw))?
             }

@@ -72,6 +72,7 @@ impl AudioIoPlatform {
             outputs,
             nframes,
             position,
+            transport_rolling: false,
         };
         let started = Instant::now();
         callback(&mut cb);

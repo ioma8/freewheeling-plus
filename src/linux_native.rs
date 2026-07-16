@@ -270,6 +270,7 @@ mod native {
                 outputs: [output_l, output_r],
                 nframes,
                 position,
+                transport_rolling: rolling,
             };
             (self.callback)(&mut callback);
 

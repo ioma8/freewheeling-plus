@@ -888,6 +888,7 @@ fn playback_callback(
                     frame_rate: sample_rate,
                     ..JackPosition::default()
                 },
+                transport_rolling: false,
             };
             (returned.callback.as_mut().expect("callback retained"))(&mut callback);
             for (frame, destination) in output.chunks_exact_mut(channels).enumerate() {

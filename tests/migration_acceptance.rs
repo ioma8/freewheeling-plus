@@ -2,9 +2,6 @@ use freewheeling_plus::audioio::AudioBackend;
 use freewheeling_plus::audioio_platform::AudioIoPlatform;
 use freewheeling_plus::block::Codec;
 use freewheeling_plus::core::{Core, CoreEvent, CoreServices, LoopSnapshot, Snapshot, StreamState};
-use freewheeling_plus::core_dsp::{Processor, SS_START};
-use freewheeling_plus::core_dsp_audio_buffers::AudioBuffers;
-use freewheeling_plus::core_dsp_processors::{LoopSource, PlayProcessor, StreamWriter};
 use freewheeling_plus::core_persistence::{LoopMeta, Scene, SnapshotMeta, scene_xml};
 use freewheeling_plus::core_persistence_parse::{parse_loop_metadata_xml, parse_scene};
 use freewheeling_plus::file_codecs::{IFileEncoder, SndFileEncoder};
@@ -62,62 +59,6 @@ impl CoreServices for Lifecycle {
     fn restore_snapshot(&mut self, _: &Snapshot) -> Result<(), String> {
         Ok(())
     }
-}
-
-struct Loop(Vec<f32>);
-impl LoopSource for Loop {
-    fn frames(&self) -> usize {
-        self.0.len()
-    }
-    fn read(&self, pos: usize, left: &mut [f32], _: Option<&mut [f32]>) -> usize {
-        let n = left.len().min(self.0.len() - pos);
-        left[..n].copy_from_slice(&self.0[pos..pos + n]);
-        n
-    }
-    fn write(&mut self, _: usize, _: &[f32], _: Option<&[f32]>) -> usize {
-        0
-    }
-}
-
-#[test]
-fn dsp_processor_and_managed_stream_cross_module_state_is_deterministic() {
-    let mut p = PlayProcessor::new(Loop(vec![1.0, 2.0, 3.0, 4.0]), 0.5, 0);
-    p.sync_up();
-    assert_eq!(p.sync_state, SS_START);
-    p.pulse_sync();
-    let mut b = AudioBuffers::new(0, 0, 1);
-    b.set_output(0, 0, vec![0.0; 6]);
-    p.process(false, 6, &mut b);
-    assert_eq!(b.output(0, 0).unwrap(), &[0.5, 1.0, 1.5, 2.0, 0.5, 1.0]);
-    assert_eq!(p.played_length(), 2);
-
-    #[derive(Default)]
-    struct W {
-        started: bool,
-        writes: Vec<Vec<f32>>,
-        stopped: bool,
-    }
-    impl StreamWriter for W {
-        fn start(&mut self, _: &str) -> bool {
-            self.started = true;
-            true
-        }
-        fn write(&mut self, l: &[f32], _: Option<&[f32]>) {
-            self.writes.push(l.to_vec());
-        }
-        fn stop(&mut self) {
-            self.stopped = true;
-        }
-    }
-    let mut s = freewheeling_plus::core_dsp_processors::FileStreamer::new(W::default(), 0, false);
-    let mut inb = AudioBuffers::new(1, 0, 0);
-    inb.set_input(0, 0, vec![9.0, 8.0]);
-    assert!(s.start_writing("memory"));
-    s.process(false, 2, &mut inb);
-    s.stop_writing();
-    s.process(false, 2, &mut inb);
-    assert_eq!(s.writer.writes, vec![vec![9.0, 8.0]]);
-    assert!(s.writer.stopped);
 }
 
 #[test]

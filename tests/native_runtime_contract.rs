@@ -3,8 +3,10 @@ mod support;
 use freewheeling_plus::application_services::Components;
 use freewheeling_plus::audioio::{AudioCallback, AudioProcessor, JackPosition};
 use freewheeling_plus::core::{CoreEvent, LoopStatus, StreamState};
+use freewheeling_plus::fluidsynth::FluidSynthBackend;
 use freewheeling_plus::native_dsp_graph::{
-    LoopMode, RuntimeCommand, RuntimeStatus, runtime_audio_processor_with_backend,
+    LoopMode, RuntimeAudioProcessor, RuntimeCommand, RuntimeControls, RuntimeSnapshot,
+    RuntimeStatus, runtime_audio_processor_with_backend,
 };
 use freewheeling_plus::native_startup::{NativeStartupServices, StartupPhase};
 use freewheeling_plus::production_app::ProductionApp;
@@ -32,16 +34,28 @@ fn temp_root(name: &str) -> std::path::PathBuf {
     root
 }
 
+fn boxed_dsp(
+    calls: Arc<Mutex<Vec<SynthCall>>>,
+    max_callback_frames: usize,
+) -> (Box<RuntimeAudioProcessor<FakeFluid>>, Box<RuntimeControls>) {
+    let (dsp, controls) =
+        runtime_audio_processor_with_backend(FakeFluid { calls }, 48_000, 16, max_callback_frames);
+    (Box::new(dsp), Box::new(controls))
+}
+
+fn next_snapshot(controls: &mut RuntimeControls) -> Box<RuntimeSnapshot> {
+    loop {
+        match controls.try_status().expect("snapshot status expected") {
+            RuntimeStatus::Snapshot(snapshot) => return Box::new(snapshot),
+            RuntimeStatus::LoopCompleted { slot: 0 } => {}
+            other => panic!("unexpected status: {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn input_and_output_slides_are_callback_safe_and_metronome_uses_selected_pulse() {
-    let (mut dsp, mut controls) = runtime_audio_processor_with_backend(
-        FakeFluid {
-            calls: Arc::new(Mutex::new(Vec::new())),
-        },
-        48_000,
-        16,
-        16,
-    );
+    let (mut dsp, mut controls) = boxed_dsp(Arc::new(Mutex::new(Vec::new())), 16);
     controls
         .try_command(RuntimeCommand::SetInputMonitor(0.5))
         .unwrap();
@@ -80,7 +94,11 @@ fn input_and_output_slides_are_callback_safe_and_metronome_uses_selected_pulse()
     assert_eq!(hit[0], hit[1]);
 }
 
-fn process<P: AudioProcessor>(processor: &mut P, left: &[f32], right: &[f32]) -> [Vec<f32>; 2] {
+fn process<B: FluidSynthBackend>(
+    processor: &mut RuntimeAudioProcessor<B>,
+    left: &[f32],
+    right: &[f32],
+) -> [Vec<f32>; 2] {
     let mut out_l = vec![0.0; left.len()];
     let mut out_r = vec![0.0; right.len()];
     let mut callback = AudioCallback {
@@ -88,6 +106,7 @@ fn process<P: AudioProcessor>(processor: &mut P, left: &[f32], right: &[f32]) ->
         outputs: [&mut out_l, &mut out_r],
         nframes: left.len() as u32,
         position: JackPosition::default(),
+        transport_rolling: false,
     };
     processor.process(&mut callback);
     [out_l, out_r]
@@ -181,14 +200,7 @@ fn failed_native_phase_rolls_back_only_completed_phases() {
 #[test]
 fn dsp_workflow_records_overdubs_triggers_mutes_erases_and_routes_fluid_commands() {
     let synth_calls = Arc::new(Mutex::new(Vec::new()));
-    let (mut dsp, mut controls) = runtime_audio_processor_with_backend(
-        FakeFluid {
-            calls: synth_calls.clone(),
-        },
-        48_000,
-        16,
-        16,
-    );
+    let (mut dsp, mut controls) = boxed_dsp(synth_calls.clone(), 16);
     controls
         .try_command(RuntimeCommand::Record { slot: 0 })
         .unwrap();
@@ -251,13 +263,7 @@ fn dsp_workflow_records_overdubs_triggers_mutes_erases_and_routes_fluid_commands
         .try_command(RuntimeCommand::RequestSnapshot)
         .unwrap();
     process(&mut dsp, &[], &[]);
-    let snapshot = loop {
-        match controls.try_status().expect("snapshot status expected") {
-            RuntimeStatus::Snapshot(snapshot) => break snapshot,
-            RuntimeStatus::LoopCompleted { slot: 0 } => {}
-            other => panic!("unexpected status: {other:?}"),
-        }
-    };
+    let snapshot = next_snapshot(&mut controls);
     assert_eq!(snapshot.loops[0].mode, LoopMode::Empty);
     controls.try_command(RuntimeCommand::Shutdown).unwrap();
     process(&mut dsp, &[1.0], &[1.0]);
@@ -277,14 +283,7 @@ fn dsp_workflow_records_overdubs_triggers_mutes_erases_and_routes_fluid_commands
 
 #[test]
 fn loop_gain_and_move_are_callback_safe_and_preserve_recording_identity() {
-    let (mut dsp, mut controls) = runtime_audio_processor_with_backend(
-        FakeFluid {
-            calls: Arc::new(Mutex::new(Vec::new())),
-        },
-        48_000,
-        16,
-        16,
-    );
+    let (mut dsp, mut controls) = boxed_dsp(Arc::new(Mutex::new(Vec::new())), 16);
     controls
         .try_command(RuntimeCommand::Record { slot: 0 })
         .unwrap();
@@ -307,13 +306,7 @@ fn loop_gain_and_move_are_callback_safe_and_preserve_recording_identity() {
         .unwrap();
     process(&mut dsp, &[], &[]);
 
-    let snapshot = loop {
-        match controls.try_status().expect("snapshot status expected") {
-            RuntimeStatus::Snapshot(snapshot) => break snapshot,
-            RuntimeStatus::LoopCompleted { slot: 0 } => {}
-            other => panic!("unexpected status: {other:?}"),
-        }
-    };
+    let snapshot = next_snapshot(&mut controls);
     assert_eq!(snapshot.recording_slot, 1);
     assert_eq!(snapshot.loops[0].mode, LoopMode::Empty);
     assert_eq!(snapshot.loops[1].mode, LoopMode::Recording);
@@ -323,14 +316,7 @@ fn loop_gain_and_move_are_callback_safe_and_preserve_recording_identity() {
 
 #[test]
 fn set_trigger_gain_scales_current_playback_without_retriggering() {
-    let (mut dsp, mut controls) = runtime_audio_processor_with_backend(
-        FakeFluid {
-            calls: Arc::new(Mutex::new(Vec::new())),
-        },
-        48_000,
-        16,
-        16,
-    );
+    let (mut dsp, mut controls) = boxed_dsp(Arc::new(Mutex::new(Vec::new())), 16);
     controls
         .try_command(RuntimeCommand::Record { slot: 0 })
         .unwrap();
@@ -350,13 +336,7 @@ fn set_trigger_gain_scales_current_playback_without_retriggering() {
         .try_command(RuntimeCommand::RequestSnapshot)
         .unwrap();
     process(&mut dsp, &[], &[]);
-    let snapshot = loop {
-        match controls.try_status().expect("snapshot status expected") {
-            RuntimeStatus::Snapshot(snapshot) => break snapshot,
-            RuntimeStatus::LoopCompleted { slot: 0 } => {}
-            other => panic!("unexpected status: {other:?}"),
-        }
-    };
+    let snapshot = next_snapshot(&mut controls);
     assert_eq!(snapshot.loops[0].mode, LoopMode::Playing);
     assert_eq!(snapshot.loops[0].position, 2);
     assert_eq!(snapshot.loops[0].trigger_gain, 0.5);
@@ -364,14 +344,7 @@ fn set_trigger_gain_scales_current_playback_without_retriggering() {
 
 #[test]
 fn changing_selected_trigger_volume_preserves_the_active_playback_cursor() {
-    let (mut dsp, mut controls) = runtime_audio_processor_with_backend(
-        FakeFluid {
-            calls: Arc::new(Mutex::new(Vec::new())),
-        },
-        48_000,
-        16,
-        16,
-    );
+    let (mut dsp, mut controls) = boxed_dsp(Arc::new(Mutex::new(Vec::new())), 16);
     controls
         .try_command(RuntimeCommand::Record { slot: 0 })
         .unwrap();
@@ -392,13 +365,7 @@ fn changing_selected_trigger_volume_preserves_the_active_playback_cursor() {
         .try_command(RuntimeCommand::RequestSnapshot)
         .unwrap();
     process(&mut dsp, &[], &[]);
-    let snapshot = loop {
-        match controls.try_status().expect("snapshot status expected") {
-            RuntimeStatus::Snapshot(snapshot) => break snapshot,
-            RuntimeStatus::LoopCompleted { slot: 0 } => {}
-            other => panic!("unexpected status: {other:?}"),
-        }
-    };
+    let snapshot = next_snapshot(&mut controls);
     assert_eq!(snapshot.loops[0].mode, LoopMode::Playing);
     assert_eq!(snapshot.loops[0].position, 2);
     assert_eq!(snapshot.loops[0].trigger_gain, 0.5);
@@ -406,14 +373,7 @@ fn changing_selected_trigger_volume_preserves_the_active_playback_cursor() {
 
 #[test]
 fn export_rejects_mutation_of_source_or_move_destination() {
-    let (mut dsp, mut controls) = runtime_audio_processor_with_backend(
-        FakeFluid {
-            calls: Arc::new(Mutex::new(Vec::new())),
-        },
-        48_000,
-        16,
-        1,
-    );
+    let (mut dsp, mut controls) = boxed_dsp(Arc::new(Mutex::new(Vec::new())), 1);
     controls
         .try_command(RuntimeCommand::Record { slot: 0 })
         .unwrap();
@@ -448,14 +408,7 @@ fn export_rejects_mutation_of_source_or_move_destination() {
 
 #[test]
 fn gain_and_move_commands_allocate_nothing_in_the_callback() {
-    let (mut dsp, mut controls) = runtime_audio_processor_with_backend(
-        FakeFluid {
-            calls: Arc::new(Mutex::new(Vec::new())),
-        },
-        48_000,
-        16,
-        4,
-    );
+    let (mut dsp, mut controls) = boxed_dsp(Arc::new(Mutex::new(Vec::new())), 4);
     controls
         .try_command(RuntimeCommand::Record { slot: 0 })
         .unwrap();
@@ -488,6 +441,7 @@ fn gain_and_move_commands_allocate_nothing_in_the_callback() {
         outputs: [&mut output_left, &mut output_right],
         nframes: 2,
         position: JackPosition::default(),
+        transport_rolling: false,
     };
     reset_violation_counters();
     {

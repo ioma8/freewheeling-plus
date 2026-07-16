@@ -75,6 +75,7 @@ fn boxed_processor_runs_without_callback_allocation() {
                 outputs: [&mut left, &mut right],
                 nframes: 4,
                 position: JackPosition::default(),
+                transport_rolling: false,
             };
             let metrics = RealtimeMetrics::new(48_000, 4).unwrap();
             reset_violation_counters();

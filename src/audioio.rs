@@ -32,6 +32,10 @@ pub struct AudioCallback<'a> {
     pub outputs: [&'a mut [Sample]; NUM_CHANNELS],
     pub nframes: NFrames,
     pub position: JackPosition,
+    /// C++ `AudioIO::IsTransportRolling()`: whether an external transport
+    /// (JACK) is rolling this callback. Backends without a transport
+    /// (CPAL, CoreAudio) always pass `false`.
+    pub transport_rolling: bool,
 }
 
 pub trait AudioProcessor: Send {
@@ -283,6 +287,7 @@ mod tests {
                 outputs: [&mut left, &mut right],
                 nframes: 4,
                 position: JackPosition::default(),
+                transport_rolling: false,
             };
             callback(&mut cb);
             assert_eq!(left, vec![2.0; 4]);

@@ -88,20 +88,25 @@ fn memory_manager_recycles_deferred_items_before_shutdown() {
 #[test]
 fn rcu_waits_for_reader_from_before_update() {
     let registry = RcuRegistry::new();
-    let rcu = Arc::new(Rcu::<u32>::new(registry));
+    registry.register_current().unwrap();
     let slot = Arc::new(AtomicPtr::new(Box::into_raw(Box::new(1))));
     let gate = Arc::new(Barrier::new(2));
+    let (reader_id_tx, reader_id_rx) = mpsc::channel();
+    let (rcu_tx, rcu_rx) = mpsc::channel();
     let (tx, rx) = mpsc::channel();
-    let r = rcu.clone();
     let g = gate.clone();
     let reader = thread::spawn(move || {
+        reader_id_tx.send(thread::current().id()).unwrap();
+        let r: Arc<Rcu<u32>> = rcu_rx.recv().unwrap();
         r.registry().register_current().unwrap();
         r.read_lock().unwrap();
         g.wait();
         rx.recv().unwrap();
         r.read_unlock().unwrap();
     });
-    rcu.registry().register_current().unwrap();
+    registry.register(reader_id_rx.recv().unwrap()).unwrap();
+    let rcu = Arc::new(Rcu::<u32>::new(registry));
+    rcu_tx.send(rcu.clone()).unwrap();
     gate.wait();
     let old = unsafe { rcu.update(&slot, Box::into_raw(Box::new(2))) };
     let r = rcu.clone();
@@ -162,6 +167,7 @@ impl AudioBackend for FakeAudio {
             outputs: [&mut l, &mut r],
             nframes: 4,
             position: Default::default(),
+            transport_rolling: false,
         };
         cb(&mut c);
         assert_eq!(l, [2.; 4]);

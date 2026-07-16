@@ -11,7 +11,6 @@ pub mod config;
 pub mod core;
 pub mod core_dsp;
 pub mod core_dsp_audio_buffers;
-pub mod core_dsp_pulse;
 pub mod core_dsp_root;
 pub mod core_persistence;
 pub mod core_persistence_parse;

@@ -184,6 +184,7 @@ fn imported_scene_loop_transfer_reaches_dsp_and_publishes_state() {
         outputs: [&mut output_left, &mut output_right],
         nframes: 4,
         position: JackPosition::default(),
+        transport_rolling: false,
     });
     assert_eq!(
         controls.try_status(),

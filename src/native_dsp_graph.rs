@@ -96,6 +96,16 @@ impl Default for DspSettings {
     }
 }
 
+/// C++ `Pulse::clockrun` states (`SS_NONE`, `SS_START`, `SS_BEAT`): whether
+/// MIDI clock transmission is off, waiting for the first downbeat to send
+/// MIDI start, or running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClockRun {
+    None,
+    Start,
+    Beat,
+}
+
 fn gcd_u32(mut left: u32, mut right: u32) -> u32 {
     while right != 0 {
         let remainder = left % right;
@@ -413,8 +423,22 @@ pub enum RuntimeCommand {
     SetRecordingAlignmentFrames {
         frames: u32,
     },
+    /// C++ `MidiIO::SetMIDISyncTransmit`: only sets the flag; an already
+    /// selected pulse does not start clocking until the next select/tap.
+    SetMidiSyncTransmit(bool),
+    /// C++ `Fweelin::SetSyncSpeed` -- raw, unclamped, exactly as upstream.
+    SetSyncSpeed(i32),
+    /// C++ `Fweelin::SetSyncType`: false = bar sync, true = beat sync.
+    SetSyncType(bool),
     SetPulseFromLoop {
         slot: u8,
+    },
+    /// C++ `LoopManager::TapPulse` with `pulse` fixed to the single runtime
+    /// pulse: the first tap arms a zero-length stopped pulse, the second
+    /// defines its length from the gap between taps, and later taps retune
+    /// the length (within the timeout) and re-anchor the downbeat.
+    TapPulse {
+        new_len: bool,
     },
     ClearPulse,
     /// C++ `LoopManager::DeletePulse`: unlike `ClearPulse`/deselect, this
@@ -599,6 +623,14 @@ pub enum RuntimeStatus {
         slot: u8,
         handle: PcmTransferHandle,
         error: PcmTransferError,
+    },
+    /// C++ `Pulse::process` broadcasting `MIDIClockInputEvent`: one MIDI
+    /// clock boundary elapsed; the runtime transmits 0xF8 to the sync ports.
+    MidiClockTick,
+    /// C++ broadcasting `MIDIStartStopInputEvent` from the pulse clock:
+    /// the runtime transmits MIDI start or stop to the sync ports.
+    MidiTransportOutput {
+        running: bool,
     },
     ShutdownComplete,
 }
@@ -1312,6 +1344,36 @@ pub struct RuntimeAudioProcessor<B: FluidSynthBackend = FluidLiteBackend> {
     pulse_long_length: u32,
     pulse_subdivide: u32,
     pulse_sync_active: bool,
+    /// C++ `Pulse::prevtap`: the sample-clock reading at the previous tap.
+    /// Zero mirrors the C++ constructor default, so a pulse created from a
+    /// loop (F1) rejects its first tap-length measurement via the timeout.
+    pulse_prev_tap: u64,
+    /// A first tap created C++'s zero-length, `stopped` pulse; the next
+    /// `new_len` tap defines the length and starts it.
+    pulse_tap_armed: bool,
+    /// `Pulse::SetPos(0)` repositions without wrap side effects, unlike
+    /// `Pulse::Wrap()`. Set when a tap lands in the first half of the pulse
+    /// so the next position-zero frame skips its downbeat handling once.
+    pulse_downbeat_suppressed: bool,
+    /// C++ `MidiIO::midisyncxmit`: whether the pulse transmits MIDI sync.
+    midi_sync_transmit: bool,
+    /// C++ `Pulse::clockrun` (SS_NONE / SS_START / SS_BEAT).
+    clock_run: ClockRun,
+    /// C++ `Pulse::process` statics `midi_clock_count` / `midi_beat_count`.
+    midi_clock_count: i32,
+    midi_beat_count: i32,
+    /// C++ `Fweelin::GetSyncSpeed` / `GetSyncType`, used raw (unclamped)
+    /// exactly like the original.
+    sync_speed: i32,
+    sync_type: bool,
+    /// C++ `Pulse` transport-slave state: `prevbpm`, `prev_sync_bb`,
+    /// `prev_sync_speed`, `prev_sync_type`, `sync_cnt`.
+    prev_bpm: f64,
+    prev_sync_bb: i32,
+    prev_sync_speed: i32,
+    prev_sync_type: bool,
+    sync_cnt: i32,
+    sample_rate: u32,
     recording_alignment_frames: u32,
     metro_enabled: bool,
     metro_gain: f32,
@@ -1474,6 +1536,21 @@ pub fn runtime_audio_processor_with_backend_settings<B: FluidSynthBackend>(
             pulse_long_length: 1,
             pulse_subdivide: 1,
             pulse_sync_active: false,
+            pulse_prev_tap: 0,
+            pulse_tap_armed: false,
+            pulse_downbeat_suppressed: false,
+            midi_sync_transmit: false,
+            clock_run: ClockRun::None,
+            midi_clock_count: 0,
+            midi_beat_count: 0,
+            sync_speed: 1,
+            sync_type: false,
+            prev_bpm: 0.0,
+            prev_sync_bb: 0,
+            prev_sync_speed: -1,
+            prev_sync_type: false,
+            sync_cnt: 0,
+            sample_rate,
             recording_alignment_frames: 0,
             metro_enabled: false,
             metro_gain: 0.1,
@@ -2075,6 +2152,11 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
             RuntimeCommand::SetRecordingAlignmentFrames { frames } => {
                 self.recording_alignment_frames = frames;
             }
+            RuntimeCommand::SetMidiSyncTransmit(enabled) => {
+                self.midi_sync_transmit = enabled;
+            }
+            RuntimeCommand::SetSyncSpeed(speed) => self.sync_speed = speed,
+            RuntimeCommand::SetSyncType(kind) => self.sync_type = kind,
             RuntimeCommand::SetPulseFromLoop { slot } => {
                 // C++ `LoopManager::SelectPulse` reselects an existing pulse
                 // when F1 is pressed again; it does not recreate the pulse
@@ -2108,11 +2190,117 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 self.loops[slot as usize].pulse_beats = beats;
                 self.loops[slot as usize].capture_alignment_frames = 0;
                 self.loops[slot as usize].boundary_fade_position = None;
+                // `LoopManager::CreatePulse` ends with `SetMIDIClock(1)`:
+                // MIDI start goes out at the pulse's next downbeat.
+                if self.midi_sync_transmit {
+                    self.clock_run = ClockRun::Start;
+                }
+            }
+            RuntimeCommand::TapPulse { new_len } => {
+                // Constants from `LoopManager::TapPulse`. With graduation 0
+                // and tolerance 1 every measurement under the timeout is
+                // accepted verbatim as the new length.
+                const TAP_NEWLEN_TIMEOUT_RATIO: f32 = 5.0;
+                const TAP_NEWLEN_GRADUATION: f32 = 0.0;
+                const TAP_NEWLEN_REJECT_TOLERANCE: f32 = 1.0;
+                if !self.pulse_sync_active && !self.pulse_tap_armed {
+                    // C++: no pulse yet -- a `new_len` tap creates a
+                    // zero-length, stopped pulse and records the tap time.
+                    if new_len {
+                        self.pulse_tap_armed = true;
+                        self.pulse_prev_tap = self.sample_clock;
+                        self.pulse_long_count = 0;
+                        self.pulse_long_length = 1;
+                    }
+                } else if !self.pulse_sync_active {
+                    // C++ "refresh sync" on an existing pulse:
+                    // `SelectPulse(-1); SelectPulse(idx)` sends MIDI stop and
+                    // re-arms MIDI start for the next downbeat.
+                    if self.midi_sync_transmit {
+                        let _ = self
+                            .statuses
+                            .try_send(RuntimeStatus::MidiTransportOutput { running: false });
+                        self.clock_run = ClockRun::Start;
+                    }
+                    // Armed zero-length pulse: `oldlen < 64` always holds,
+                    // so a `new_len` tap sets the measured length
+                    // unconditionally and unstops the pulse.
+                    if new_len {
+                        let new_tap = self.sample_clock;
+                        let measured = new_tap.wrapping_sub(self.pulse_prev_tap);
+                        // C++ `SetLength` accepts 0 for a same-fragment
+                        // double tap; the engine's pulse arithmetic assumes
+                        // a nonzero length, so clamp to one frame.
+                        self.pulse_frames = measured.clamp(1, u64::from(u32::MAX)) as u32;
+                        self.pulse_prev_tap = new_tap;
+                        self.pulse_tap_armed = false;
+                        self.pulse_sync_active = true;
+                    }
+                    // `GetPct()` on a zero-length pulse is NaN, never >= 0.5,
+                    // so C++ always takes the `SetPos(0)` branch here.
+                    self.pulse_position = 0;
+                    self.pulse_downbeat_suppressed = true;
+                } else {
+                    // C++ "refresh sync": stop and re-arm the MIDI clock
+                    // before retuning, exactly like the armed branch above.
+                    if self.midi_sync_transmit {
+                        let _ = self
+                            .statuses
+                            .try_send(RuntimeStatus::MidiTransportOutput { running: false });
+                        self.clock_run = ClockRun::Start;
+                    }
+                    // Existing running pulse: optionally retune the length
+                    // from the tap gap, then re-anchor the downbeat.
+                    let next_downbeat =
+                        u64::from(self.pulse_position) * 2 >= u64::from(self.pulse_frames);
+                    if new_len {
+                        let old_len = self.pulse_frames;
+                        let new_tap = self.sample_clock;
+                        let measured = new_tap.wrapping_sub(self.pulse_prev_tap);
+                        if old_len < 64 {
+                            self.pulse_frames = measured.clamp(1, u64::from(u32::MAX)) as u32;
+                        } else if (measured as f32) < old_len as f32 * TAP_NEWLEN_TIMEOUT_RATIO {
+                            let low = (measured.min(u64::from(old_len))) as f32;
+                            let high = (measured.max(u64::from(old_len))) as f32;
+                            if low / high > 1.0 - TAP_NEWLEN_REJECT_TOLERANCE {
+                                self.pulse_frames = (old_len as f32 * TAP_NEWLEN_GRADUATION
+                                    + measured as f32 * (1.0 - TAP_NEWLEN_GRADUATION))
+                                    .max(1.0)
+                                    as u32;
+                            }
+                        }
+                        self.pulse_prev_tap = new_tap;
+                    }
+                    if next_downbeat {
+                        // `Pulse::Wrap()`: the wrap fires at the start of the
+                        // next process pass -- advance the long count, arm the
+                        // metronome hit, and let the next position-zero frame
+                        // run the full downbeat handling.
+                        self.pulse_position = 0;
+                        let long_length = self.pulse_long_length.max(1);
+                        self.pulse_long_count = (self.pulse_long_count + 1) % long_length;
+                        self.metro_noise_offset = 0;
+                    } else {
+                        // `Pulse::SetPos(0)`: silent reposition.
+                        self.pulse_position = 0;
+                        self.pulse_downbeat_suppressed = true;
+                    }
+                }
             }
             RuntimeCommand::ClearPulse => {
+                // `LoopManager::SelectPulse(-1)` calls `SetMIDIClock(0)` on
+                // the current pulse: MIDI stop goes out, gated on transmit.
+                if (self.pulse_sync_active || self.pulse_tap_armed) && self.midi_sync_transmit {
+                    let _ = self
+                        .statuses
+                        .try_send(RuntimeStatus::MidiTransportOutput { running: false });
+                    self.clock_run = ClockRun::None;
+                }
                 self.pulse_sync_active = false;
                 self.pulse_long_count = 0;
                 self.pulse_long_length = 1;
+                self.pulse_tap_armed = false;
+                self.pulse_prev_tap = 0;
             }
             RuntimeCommand::DeletePulse => {
                 for index in 0..self.loops.len() {
@@ -2142,6 +2330,11 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 self.pulse_sync_active = false;
                 self.pulse_long_count = 0;
                 self.pulse_long_length = 1;
+                self.pulse_tap_armed = false;
+                self.pulse_prev_tap = 0;
+                // `LoopManager::DeletePulse` frees the pulse without a MIDI
+                // stop message; its clock state simply dies with it.
+                self.clock_run = ClockRun::None;
             }
             RuntimeCommand::SetMetronome { enabled, gain } => {
                 self.metro_enabled = enabled;
@@ -2449,6 +2642,50 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
     fn process(&mut self, callback: &mut AudioCallback<'_>) {
         self.drain_commands();
         self.advance_export();
+        // C++ `Pulse::process` transport-slave block: when an external
+        // transport (JACK) rolls and we are not the timebase master (the
+        // port never registers as one), the pulse length follows the
+        // transport BPM and the pulse wraps once every `sync_speed`
+        // bar/beat changes. Runs before any samples, exactly as upstream,
+        // and also adjusts a stopped (tap-armed) pulse.
+        if (self.pulse_sync_active || self.pulse_tap_armed) && callback.transport_rolling {
+            let speed = self.sync_speed;
+            let kind = self.sync_type;
+            if kind != self.prev_sync_type || speed != self.prev_sync_speed {
+                self.prev_bpm = 0.0;
+                self.prev_sync_bb = -1;
+                self.prev_sync_type = kind;
+                self.prev_sync_speed = speed;
+            }
+            let bpm = callback.position.beats_per_minute;
+            if bpm != self.prev_bpm {
+                let multiplier = if kind {
+                    speed as f64
+                } else {
+                    f64::from(callback.position.beats_per_bar) * speed as f64
+                };
+                self.pulse_frames = (60.0 * f64::from(self.sample_rate) * multiplier / bpm) as u32;
+                self.prev_bpm = bpm;
+            }
+            let sync_bb = if kind {
+                callback.position.beat
+            } else {
+                callback.position.bar
+            };
+            if sync_bb != self.prev_sync_bb {
+                self.sync_cnt += 1;
+                if self.sync_cnt >= speed {
+                    self.sync_cnt = 0;
+                    // `Pulse::Wrap()`: the wrap fires before this fragment's
+                    // first sample.
+                    self.pulse_position = 0;
+                    let long_length = self.pulse_long_length.max(1);
+                    self.pulse_long_count = (self.pulse_long_count + 1) % long_length;
+                    self.metro_noise_offset = 0;
+                }
+                self.prev_sync_bb = sync_bb;
+            }
+        }
         let frames = callback.nframes as usize;
         let frames = frames
             .min(callback.inputs[0].len())
@@ -2484,7 +2721,14 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
         let mut output_peak = [0.0_f32; 2];
 
         for frame in 0..frames {
-            if self.pulse_sync_active && self.pulse_position == 0 {
+            if self.pulse_sync_active
+                && self.pulse_position == 0
+                && std::mem::take(&mut self.pulse_downbeat_suppressed)
+            {
+                // `Pulse::SetPos(0)` (tap in the first half of the pulse)
+                // moved the position without wrapping; C++ fires no
+                // PulseSync callbacks, so skip the downbeat handling once.
+            } else if self.pulse_sync_active && self.pulse_position == 0 {
                 if self.recording_waiting_stop {
                     // C++ schedules `EndNow` at REC_TAIL_LEN after this
                     // downbeat rather than ending at the downbeat itself.
@@ -2525,8 +2769,21 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                             // already-captured tail on every later stop.
                             self.recording_started_late = false;
                         }
+                        // `PlayProcessor::PulseSync` and the overdub branch of
+                        // `RecordProcessor::PulseSync` only act when `curbeat`
+                        // reaches `nbeats` -- the loop's own wrap beat. On
+                        // intermediate downbeats C++ merely increments the
+                        // beat counter, so a drifting loop keeps playing
+                        // linearly until its cycle boundary. The global
+                        // `pulse_long_count % pulse_beats` is exactly C++'s
+                        // `curbeat` phase because `PlayProcessor` initialises
+                        // `curbeat = GetLongCount_Cur() % nbeats` and both
+                        // advance once per downbeat.
                         LoopMode::Playing | LoopMode::Overdubbing
-                            if slot.pulse_synced && slot.pulse_beats != 0 && slot.len != 0 =>
+                            if slot.pulse_synced
+                                && slot.pulse_beats != 0
+                                && slot.len != 0
+                                && self.pulse_long_count % slot.pulse_beats == 0 =>
                         {
                             let expected = pulse_synced_loop_position(
                                 self.pulse_frames,
@@ -2537,15 +2794,10 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                                 slot.capture_alignment_frames,
                             );
                             if slot.position != expected {
-                                // `PlayProcessor::PulseSync` calls
-                                // `dopreprocess()` before its iterator jump.
-                                // This precomputed tail/head blend is the
-                                // native equivalent only when `curbeat`
-                                // wraps back to beat zero. Intermediate beat
-                                // jumps merely skip the retained record tail.
-                                if matches!(slot.mode, LoopMode::Playing)
-                                    && self.pulse_long_count % slot.pulse_beats == 0
-                                {
+                                if matches!(slot.mode, LoopMode::Playing) {
+                                    // `PlayProcessor::PulseSync` calls
+                                    // `dopreprocess()` before its iterator
+                                    // jump to fade to the loop point.
                                     slot.boundary_fade_position = Some(0);
                                 }
                                 if matches!(slot.mode, LoopMode::Overdubbing) {
@@ -2800,7 +3052,44 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
             if self.recording.is_some() {
                 self.recording_elapsed_frames = self.recording_elapsed_frames.saturating_add(1);
             }
+            let old_position = self.pulse_position;
             self.pulse_position += 1;
+            // C++ `Pulse::process` MIDI sync transmission, evaluated with
+            // the same arithmetic at frame granularity: `sync_speed` stays
+            // raw/unclamped, clock boundaries come from float division of
+            // the pulse length, and a wrap always fires the pending
+            // START/clock regardless of boundary crossing.
+            if self.pulse_sync_active && self.clock_run != ClockRun::None && self.midi_sync_transmit
+            {
+                let clocks_per_pulse = 24 * self.sync_speed * if self.sync_type { 1 } else { 4 };
+                let frames_per_clock = self.pulse_frames as f32 / clocks_per_pulse as f32;
+                let old_clock = (old_position as f32 / frames_per_clock) as i32;
+                let new_clock = (self.pulse_position as f32 / frames_per_clock) as i32;
+                let crossed_clock = self.clock_run == ClockRun::Beat && new_clock != old_clock;
+                let wrapping = self.pulse_position >= self.pulse_frames;
+                if (crossed_clock || wrapping) && self.clock_run == ClockRun::Start {
+                    self.metro_hi_offset = 0;
+                    self.midi_clock_count = 0;
+                    self.midi_beat_count = 0;
+                    let _ = self
+                        .statuses
+                        .try_send(RuntimeStatus::MidiTransportOutput { running: true });
+                    self.clock_run = ClockRun::Beat;
+                } else if crossed_clock || wrapping {
+                    self.midi_clock_count += 1;
+                    if self.midi_clock_count >= 24 {
+                        self.midi_clock_count = 0;
+                        self.midi_beat_count += 1;
+                        if self.midi_beat_count >= clocks_per_pulse / 24 {
+                            self.midi_beat_count = 0;
+                            self.metro_hi_offset = 0;
+                        } else {
+                            self.metro_lo_offset = 0;
+                        }
+                    }
+                    let _ = self.statuses.try_send(RuntimeStatus::MidiClockTick);
+                }
+            }
             if self.pulse_position >= self.pulse_frames {
                 self.pulse_position = 0;
                 let long_length = self.pulse_long_length.max(1);
@@ -2875,8 +3164,8 @@ mod tests {
         }
     }
 
-    fn processor(render_value: f32) -> (RuntimeAudioProcessor<FakeSynth>, RuntimeControls) {
-        runtime_audio_processor_with_backend(
+    fn processor(render_value: f32) -> (Box<RuntimeAudioProcessor<FakeSynth>>, RuntimeControls) {
+        let (processor, controls) = runtime_audio_processor_with_backend(
             FakeSynth {
                 render_value,
                 ..FakeSynth::default()
@@ -2884,7 +3173,15 @@ mod tests {
             48_000,
             8,
             32,
-        )
+        );
+        (Box::new(processor), controls)
+    }
+
+    fn boxed_processor(
+        render_value: f32,
+    ) -> (Box<RuntimeAudioProcessor<FakeSynth>>, Box<RuntimeControls>) {
+        let (processor, controls) = processor(render_value);
+        (processor, Box::new(controls))
     }
 
     fn run<B: FluidSynthBackend>(
@@ -2892,13 +3189,24 @@ mod tests {
         left: &[f32],
         right: &[f32],
     ) -> [Vec<f32>; 2] {
+        run_with_transport(processor, left, right, JackPosition::default(), false)
+    }
+
+    fn run_with_transport<B: FluidSynthBackend>(
+        processor: &mut RuntimeAudioProcessor<B>,
+        left: &[f32],
+        right: &[f32],
+        position: JackPosition,
+        transport_rolling: bool,
+    ) -> [Vec<f32>; 2] {
         let mut out_l = vec![0.0; left.len()];
         let mut out_r = vec![0.0; left.len()];
         let mut callback = AudioCallback {
             inputs: [left, right],
             outputs: [&mut out_l, &mut out_r],
             nframes: left.len() as u32,
-            position: JackPosition::default(),
+            position,
+            transport_rolling,
         };
         processor.process(&mut callback);
         [out_l, out_r]
@@ -3095,6 +3403,231 @@ mod tests {
         assert_eq!(processor.loops[0].mode, LoopMode::Empty);
         assert_eq!(processor.loops[1].mode, LoopMode::Empty);
         assert!(!processor.pulse_sync_active);
+    }
+
+    #[test]
+    fn tap_pulse_arms_then_defines_length_and_reanchors_the_downbeat() {
+        let (mut processor, mut controls) = processor(0.0);
+        // First tap: C++ creates a zero-length, stopped pulse and records
+        // the tap time. Nothing runs yet.
+        controls
+            .try_command(RuntimeCommand::TapPulse { new_len: true })
+            .unwrap();
+        run(&mut processor, &[0.0; 32], &[0.0; 32]);
+        assert!(!processor.pulse_sync_active);
+        assert!(processor.pulse_tap_armed);
+
+        // The second tap, 96 frames after the first, defines the length
+        // (`oldlen < 64` accepts it unconditionally) and starts the pulse
+        // via the silent `SetPos(0)` branch.
+        run(&mut processor, &[0.0; 32], &[0.0; 32]);
+        run(&mut processor, &[0.0; 32], &[0.0; 32]);
+        controls
+            .try_command(RuntimeCommand::TapPulse { new_len: true })
+            .unwrap();
+        run(&mut processor, &[0.0; 1], &[0.0; 1]);
+        assert!(processor.pulse_sync_active);
+        assert_eq!(processor.pulse_frames, 96);
+        assert_eq!(processor.pulse_position, 1);
+        assert_eq!(processor.pulse_long_count, 0);
+
+        // A tap in the first half retunes the length from the tap gap and
+        // repositions silently: no long-count advance, no metronome hit.
+        run(&mut processor, &[0.0; 9], &[0.0; 9]);
+        controls
+            .try_command(RuntimeCommand::TapPulse { new_len: true })
+            .unwrap();
+        run(&mut processor, &[0.0; 1], &[0.0; 1]);
+        assert_eq!(processor.pulse_frames, 10);
+        assert_eq!(processor.pulse_long_count, 0);
+        assert_eq!(processor.pulse_position, 1);
+
+        // A tap in the second half is C++ `Pulse::Wrap()`: the long count
+        // advances and the metronome hit is armed for the new downbeat.
+        processor.pulse_long_length = 2;
+        run(&mut processor, &[0.0; 5], &[0.0; 5]);
+        controls
+            .try_command(RuntimeCommand::TapPulse { new_len: false })
+            .unwrap();
+        run(&mut processor, &[0.0; 1], &[0.0; 1]);
+        assert_eq!(processor.pulse_frames, 10);
+        assert_eq!(processor.pulse_long_count, 1);
+        assert_eq!(processor.pulse_position, 1);
+    }
+
+    #[test]
+    fn tap_pulse_rejects_a_new_length_beyond_the_cpp_timeout() {
+        let (mut processor, mut controls) = processor(0.0);
+        controls
+            .try_command(RuntimeCommand::SetPulse { frames: 64 })
+            .unwrap();
+        // `prevtap` is 0 (the C++ constructor default), so after 352 frames
+        // the measured gap exceeds `oldlen * 5` and the length is rejected;
+        // the tap still re-anchors the downbeat.
+        for _ in 0..11 {
+            run(&mut processor, &[0.0; 32], &[0.0; 32]);
+        }
+        controls
+            .try_command(RuntimeCommand::TapPulse { new_len: true })
+            .unwrap();
+        run(&mut processor, &[0.0; 1], &[0.0; 1]);
+        assert_eq!(processor.pulse_frames, 64);
+        assert_eq!(processor.pulse_position, 1);
+
+        // A later tap inside the timeout window is accepted verbatim
+        // (graduation 0, tolerance 1).
+        for _ in 0..3 {
+            run(&mut processor, &[0.0; 32], &[0.0; 32]);
+        }
+        run(&mut processor, &[0.0; 4], &[0.0; 4]);
+        controls
+            .try_command(RuntimeCommand::TapPulse { new_len: true })
+            .unwrap();
+        run(&mut processor, &[0.0; 1], &[0.0; 1]);
+        assert_eq!(processor.pulse_frames, 101);
+    }
+
+    #[test]
+    fn midi_clock_starts_at_the_first_wrap_and_ticks_24_ppqn() {
+        std::thread::Builder::new()
+            .name("midi-clock-parity-test".into())
+            .stack_size(4 * 1024 * 1024)
+            .spawn(midi_clock_starts_at_the_first_wrap_and_ticks_24_ppqn_inner)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn midi_clock_starts_at_the_first_wrap_and_ticks_24_ppqn_inner() {
+        // RuntimeStatus is intentionally large because snapshots are
+        // allocation-free. Keep the processor on the heap in this status-
+        // intensive test so Cargo's default 2 MiB test stack is sufficient.
+        let (mut processor, mut controls) = boxed_processor(0.0);
+        controls
+            .try_command(RuntimeCommand::SetMidiSyncTransmit(true))
+            .unwrap();
+        controls
+            .try_command(RuntimeCommand::SetPulse { frames: 960 })
+            .unwrap();
+        // Refreshing an active pulse is the C++ SelectPulse(-1)/SelectPulse
+        // path: it arms START for the next downbeat.
+        controls
+            .try_command(RuntimeCommand::TapPulse { new_len: false })
+            .unwrap();
+
+        let mut first_start = 0;
+        let mut first_clocks = 0;
+        for _ in 0..30 {
+            run(&mut processor, &[0.0; 32], &[0.0; 32]);
+            while let Some(status) = controls.try_status() {
+                match status {
+                    RuntimeStatus::MidiTransportOutput { running: true } => first_start += 1,
+                    RuntimeStatus::MidiClockTick => first_clocks += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(first_start, 1);
+        assert_eq!(first_clocks, 0);
+        assert_eq!(processor.pulse_position, 0);
+        assert_eq!(processor.metro_hi_offset, 0);
+
+        // The next pulse has 96 clocks: 24 PPQN times four beats per bar.
+        // Stop exactly at the first beat boundary to verify the low tone is
+        // re-armed there, then finish exactly at the bar boundary to verify
+        // the high tone is re-armed with the pulse.
+        let mut second_clocks = 0;
+        let mut second_transport = 0;
+        for _ in 0..7 {
+            run(&mut processor, &[0.0; 32], &[0.0; 32]);
+            while let Some(status) = controls.try_status() {
+                match status {
+                    RuntimeStatus::MidiClockTick => second_clocks += 1,
+                    RuntimeStatus::MidiTransportOutput { .. } => second_transport += 1,
+                    _ => {}
+                }
+            }
+        }
+        run(&mut processor, &[0.0; 15], &[0.0; 15]);
+        while let Some(status) = controls.try_status() {
+            match status {
+                RuntimeStatus::MidiClockTick => second_clocks += 1,
+                RuntimeStatus::MidiTransportOutput { .. } => second_transport += 1,
+                _ => {}
+            }
+        }
+        run(&mut processor, &[0.0; 1], &[0.0; 1]);
+        while let Some(status) = controls.try_status() {
+            match status {
+                RuntimeStatus::MidiClockTick => second_clocks += 1,
+                RuntimeStatus::MidiTransportOutput { .. } => second_transport += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(processor.pulse_position, 240);
+        assert_eq!(processor.metro_lo_offset, 0);
+
+        for _ in 0..22 {
+            run(&mut processor, &[0.0; 32], &[0.0; 32]);
+            while let Some(status) = controls.try_status() {
+                match status {
+                    RuntimeStatus::MidiClockTick => second_clocks += 1,
+                    RuntimeStatus::MidiTransportOutput { .. } => second_transport += 1,
+                    _ => {}
+                }
+            }
+        }
+        run(&mut processor, &[0.0; 15], &[0.0; 15]);
+        while let Some(status) = controls.try_status() {
+            match status {
+                RuntimeStatus::MidiClockTick => second_clocks += 1,
+                RuntimeStatus::MidiTransportOutput { .. } => second_transport += 1,
+                _ => {}
+            }
+        }
+        run(&mut processor, &[0.0; 1], &[0.0; 1]);
+        while let Some(status) = controls.try_status() {
+            match status {
+                RuntimeStatus::MidiClockTick => second_clocks += 1,
+                RuntimeStatus::MidiTransportOutput { .. } => second_transport += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(processor.pulse_position, 0);
+        assert_eq!(processor.metro_hi_offset, 0);
+        assert_eq!(second_clocks, 96);
+        assert_eq!(second_transport, 0);
+    }
+
+    #[test]
+    fn transport_slave_sets_pulse_length_and_wraps_on_the_selected_bar() {
+        let (mut processor, mut controls) = processor(0.0);
+        controls
+            .try_command(RuntimeCommand::SetPulse { frames: 4 })
+            .unwrap();
+
+        let position = JackPosition {
+            bar: 0,
+            beat: 0,
+            beats_per_minute: 120.0,
+            beats_per_bar: 4.0,
+            ..JackPosition::default()
+        };
+        run_with_transport(&mut processor, &[0.0; 32], &[0.0; 32], position, true);
+        assert_eq!(processor.pulse_frames, 96_000);
+        assert_eq!(processor.pulse_long_count, 0);
+        assert_eq!(processor.pulse_position, 32);
+
+        // Keep the wrap visible in the long-count state while retaining the
+        // normal single-bar default from SetPulse.
+        processor.pulse_long_length = 2;
+        run_with_transport(&mut processor, &[0.0; 32], &[0.0; 32], position, true);
+        assert_eq!(processor.pulse_position, 64);
+
+        let next_bar = JackPosition { bar: 1, ..position };
+        run_with_transport(&mut processor, &[0.0; 32], &[0.0; 32], next_bar, true);
+        assert_eq!(processor.pulse_long_count, 1);
+        assert_eq!(processor.pulse_position, 32);
     }
 
     #[test]
@@ -3672,7 +4205,11 @@ mod tests {
     }
 
     #[test]
-    fn synced_playback_skips_the_record_tail_at_each_pulse_boundary() {
+    fn synced_playback_jumps_only_at_the_loop_wrap_beat_like_pulse_sync() {
+        // C++ `PlayProcessor::PulseSync` does nothing on an intermediate
+        // downbeat of a multi-beat loop (`curbeat++` only); it jumps -- and
+        // thereby skips the retained record tail -- exclusively when
+        // `curbeat >= nbeats`, the loop's own cycle boundary.
         let (mut processor, _controls) = processor(0.0);
         processor.pulse_sync_active = true;
         processor.pulse_frames = 4;
@@ -3690,14 +4227,23 @@ mod tests {
         slot.pulse_synced = true;
         slot.pulse_beats = 2;
 
-        let output = run(&mut processor, &[0.0; 2], &[0.0; 2]);
-        // First sample completes beat zero. On the following downbeat C++
-        // `PlayProcessor::PulseSync` jumps to beat one (offset 4), rather
-        // than allowing the iterator to enter the 1,024-frame record tail.
-        for channel in output {
-            assert!((channel[0] - 0.07).abs() < 0.000_01);
-            assert!((channel[1] - 0.04).abs() < 0.000_01);
-        }
+        // Crossing into long count 1 is an intermediate beat for a 2-beat
+        // loop (1 % 2 != 0): no jump, playback continues linearly even
+        // though the artificially desynced iterator enters the record tail.
+        run(&mut processor, &[0.0; 2], &[0.0; 2]);
+        assert_eq!(processor.pulse_long_count, 1);
+        assert_eq!(processor.loops[0].position, 9);
+        assert!(processor.loops[0].boundary_fade_position.is_none());
+
+        // Crossing back to long count 0 is the wrap beat (0 % 2 == 0): the
+        // loop jumps to its cycle start with the restart crossfade, exactly
+        // like `dopreprocess()` + `Jump(sync->GetPos())`. The final frame of
+        // this run lands on the downbeat, snaps 12 -> 0, and renders one
+        // faded sample.
+        run(&mut processor, &[0.0; 4], &[0.0; 4]);
+        assert_eq!(processor.pulse_long_count, 0);
+        assert_eq!(processor.loops[0].position, 1);
+        assert!(processor.loops[0].boundary_fade_position.is_some());
     }
 
     #[test]
