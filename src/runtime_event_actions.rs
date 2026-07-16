@@ -91,6 +91,9 @@ pub enum ApplicationAction {
     SetSyncType(i32),
     SetSyncSpeed(i32),
     SelectPulse(i32),
+    /// C++ `LoopManager::DeletePulse`: distinct from deselecting the pulse
+    /// (`SelectPulse(-1)`) -- it also erases every loop attached to it.
+    DeletePulse,
     MidiClock,
     MidiTransport {
         running: bool,
@@ -753,7 +756,7 @@ impl<const N: usize> RuntimeEventDispatcher<N> {
             EventType::SelectPulse => {
                 out.push(app(ApplicationAction::SelectPulse(int(p, "pulse")?)))?
             }
-            EventType::DeletePulse => out.push(app(ApplicationAction::SelectPulse(-1)))?,
+            EventType::DeletePulse => out.push(app(ApplicationAction::DeletePulse))?,
             EventType::TransmitPlayingLoopsToDAW => {
                 out.push(app(ApplicationAction::TransmitPlayingLoopsToDaw))?
             }

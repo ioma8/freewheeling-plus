@@ -1101,6 +1101,14 @@ impl NativeRuntime {
                     r.pulse_selected = true;
                 }
             }
+            ApplicationAction::DeletePulse => {
+                r.controls
+                    .as_mut()
+                    .ok_or("DSP controls are closed")?
+                    .try_command(RuntimeCommand::DeletePulse)
+                    .map_err(|_| "DSP command queue is full")?;
+                r.pulse_selected = false;
+            }
             ApplicationAction::CreateSnapshot { snapshot } => {
                 r.pending_snapshot_id = Some(snapshot);
             }

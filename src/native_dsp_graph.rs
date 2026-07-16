@@ -417,6 +417,10 @@ pub enum RuntimeCommand {
         slot: u8,
     },
     ClearPulse,
+    /// C++ `LoopManager::DeletePulse`: unlike `ClearPulse`/deselect, this
+    /// erases every loop attached to the pulse before removing it, so
+    /// pulse-synced loops don't keep playing free-running afterward.
+    DeletePulse,
     SetMetronome {
         enabled: bool,
         gain: f32,
@@ -2110,6 +2114,35 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 self.pulse_long_count = 0;
                 self.pulse_long_length = 1;
             }
+            RuntimeCommand::DeletePulse => {
+                for index in 0..self.loops.len() {
+                    if !self.loops[index].pulse_synced {
+                        continue;
+                    }
+                    if self.recording == Some(index) {
+                        self.recording = None;
+                    }
+                    let target = &mut self.loops[index];
+                    self.loop_storage.release_blocks(target);
+                    target.data_offset = 0;
+                    target.len = 0;
+                    target.position = 0;
+                    target.mode = LoopMode::Empty;
+                    target.gain = 1.0;
+                    target.trigger_gain = 1.0;
+                    target.gain_delta = 1.0;
+                    target.pulse_synced = false;
+                    target.pulse_beats = 0;
+                    target.capture_alignment_frames = 0;
+                    target.boundary_fade_position = None;
+                    target.recent_peak = 0.0;
+                    target.overdub_jump.reset();
+                    target.scope.reset();
+                }
+                self.pulse_sync_active = false;
+                self.pulse_long_count = 0;
+                self.pulse_long_length = 1;
+            }
             RuntimeCommand::SetMetronome { enabled, gain } => {
                 self.metro_enabled = enabled;
                 self.metro_gain = gain.max(0.0);
@@ -2480,6 +2513,17 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                         {
                             self.recording_pulse_beats =
                                 self.recording_pulse_beats.saturating_add(1);
+                            // `recording_started_late` only exists to keep a
+                            // late-started recording's *first* beat from
+                            // rounding a short gesture into two pulses (see
+                            // `request_stop_recording`). Once a full beat has
+                            // actually been captured, defer to the exact
+                            // C++ `RecordProcessor::End` boundary rule for
+                            // every later stop -- otherwise this flag stays
+                            // set for the recording's entire remaining
+                            // lifetime and silently truncates a real,
+                            // already-captured tail on every later stop.
+                            self.recording_started_late = false;
                         }
                         LoopMode::Playing | LoopMode::Overdubbing
                             if slot.pulse_synced && slot.pulse_beats != 0 && slot.len != 0 =>
@@ -3015,6 +3059,45 @@ mod tests {
     }
 
     #[test]
+    fn delete_pulse_erases_every_synced_loop_unlike_clear_pulse() {
+        let (mut processor, mut controls) = processor(0.0);
+        controls
+            .try_command(RuntimeCommand::Record { slot: 0 })
+            .unwrap();
+        run(&mut processor, &[1.0; 4], &[0.0; 4]);
+        controls.try_command(RuntimeCommand::StopRecord).unwrap();
+        run(&mut processor, &[], &[]);
+        controls
+            .try_command(RuntimeCommand::SetPulseFromLoop { slot: 0 })
+            .unwrap();
+        run(&mut processor, &[], &[]);
+
+        controls
+            .try_command(RuntimeCommand::Record { slot: 1 })
+            .unwrap();
+        run(&mut processor, &[0.5; 4], &[0.0; 4]);
+        controls.try_command(RuntimeCommand::StopRecord).unwrap();
+        // A synced stop can continue through the upcoming downbeat plus its
+        // crossfade tail before the loop actually reaches `Playing`.
+        for _ in 0..(REC_TAIL_FRAMES / 32 + 1) {
+            run(&mut processor, &[0.0; 32], &[0.0; 32]);
+        }
+        assert_eq!(processor.loops[0].mode, LoopMode::Playing);
+        assert_eq!(processor.loops[1].mode, LoopMode::Playing);
+
+        // C++ `LoopManager::DeletePulse` erases every loop attached to the
+        // pulse before removing it, unlike deselecting via `ClearPulse`
+        // (F12/`SelectPulse(-1)`), which only unsyncs and leaves loops
+        // playing free-running.
+        controls.try_command(RuntimeCommand::DeletePulse).unwrap();
+        run(&mut processor, &[], &[]);
+
+        assert_eq!(processor.loops[0].mode, LoopMode::Empty);
+        assert_eq!(processor.loops[1].mode, LoopMode::Empty);
+        assert!(!processor.pulse_sync_active);
+    }
+
+    #[test]
     fn capture_alignment_advances_synced_loop_source_without_moving_pulse() {
         let (mut processor, mut controls) = processor(0.0);
         controls
@@ -3256,6 +3339,57 @@ mod tests {
         assert_eq!(processor.loops[0].len, 6);
         assert_eq!(processor.loops[0].mode, LoopMode::Playing);
         assert_eq!(processor.loops[0].position, REC_TAIL_FRAMES % 6);
+    }
+
+    #[test]
+    fn late_started_synced_recording_is_not_truncated_after_completing_a_beat() {
+        let (mut processor, mut controls) =
+            runtime_audio_processor_with_backend(FakeSynth::default(), 48_000, 8192, 64);
+        controls
+            .try_command(RuntimeCommand::SetPulse { frames: 4000 })
+            .unwrap();
+        // Advance the pulse just past its midpoint so the upcoming Record
+        // command is a "late start" that must wait for the next downbeat.
+        let silence = vec![0.0; 64];
+        for _ in 0..(3800 / 64) {
+            run(&mut processor, &silence, &silence);
+        }
+        run(&mut processor, &vec![0.0; 3800 % 64], &vec![0.0; 3800 % 64]);
+        assert_eq!(processor.pulse_position, 3800);
+
+        controls
+            .try_command(RuntimeCommand::Record { slot: 0 })
+            .unwrap();
+        run(&mut processor, &[0.0], &[0.0]);
+        assert!(processor.recording_waiting_start);
+        assert!(processor.recording_started_late);
+
+        // Record through the late-start downbeat, one full completed beat,
+        // and 1,200 frames into the following beat: 200 (wait) + 4,000
+        // (first beat) + 1,200 = 5,400 elapsed frames, 5,200 of them
+        // actually captured. The command-applying run above already
+        // advanced one of those 5,400 frames.
+        let signal = vec![0.5; 64];
+        for _ in 0..(5399 / 64) {
+            run(&mut processor, &signal, &signal);
+        }
+        run(&mut processor, &vec![0.5; 5399 % 64], &vec![0.5; 5399 % 64]);
+        assert_eq!(processor.loops[0].len, 5200);
+        // A full beat has completed since the actual (post-wait) start, so
+        // the late-start heuristic must no longer apply.
+        assert!(!processor.recording_started_late);
+        assert_eq!(processor.pulse_position, 1200);
+
+        // C++ `RecordProcessor::End`: GetPct() = 1200/4000 = 0.3 < 0.5 and
+        // GetPos() = 1200 >= REC_TAIL_LEN(1024) -> immediate `EndNow()`,
+        // keeping every already-captured sample. Before this fix, the
+        // still-set `recording_started_late` flag routed every later stop
+        // through the elapsed-time heuristic instead and silently cropped
+        // the loop to 5,024 frames, discarding real captured audio.
+        controls.try_command(RuntimeCommand::StopRecord).unwrap();
+        run(&mut processor, &[0.0], &[0.0]);
+        assert_eq!(processor.loops[0].len, 5200);
+        assert_eq!(processor.loops[0].mode, LoopMode::Playing);
     }
 
     #[test]
