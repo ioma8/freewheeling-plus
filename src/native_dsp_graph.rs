@@ -776,6 +776,9 @@ struct LoopSlot {
     trigger_gain: f32,
     gain_delta: f32,
     feedback: f32,
+    /// C++ `RecordProcessor::od_feedback_lastval`: the feedback gain most
+    /// recently reached by the per-sample ramp toward `feedback`.
+    feedback_last: f32,
     /// A loop recorded against the selected pulse uses PlayProcessor's
     /// restart crossfade instead of permanently smoothing its endpoint.
     pulse_synced: bool,
@@ -827,6 +830,7 @@ impl LoopSlot {
             trigger_gain: 1.0,
             gain_delta: 1.0,
             feedback: 0.5,
+            feedback_last: 0.5,
             pulse_synced: false,
             pulse_beats: 0,
             capture_alignment_frames: 0,
@@ -1914,6 +1918,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                         0
                     };
                     target.feedback = feedback.clamp(0.0, 1.0);
+                    target.feedback_last = target.feedback;
                     target.trigger_gain = gain.max(0.0);
                     target.overdub_fade_out = None;
                     target.overdub_jump.reset();
@@ -2574,6 +2579,17 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                         let (old_left, old_right) = slot.sample_at(pos);
                         let mut output_left = old_left;
                         let mut output_right = old_right;
+                        // C++ `RecordProcessor::process` computes
+                        // `fb_delta = (new_fb - old_fb) / len` once per
+                        // callback and ramps `old_fb += fb_delta` per sample,
+                        // so a live change to the feedback target is
+                        // click-free rather than stepped.
+                        let fb_delta = if frames > 0 {
+                            (slot.feedback - slot.feedback_last) / frames as f32
+                        } else {
+                            0.0
+                        };
+                        let fb = slot.feedback_last + fb_delta * frame as f32;
                         let jump_fade = slot.overdub_jump.fade_position.and_then(|progress| {
                             (progress < slot.overdub_jump.count).then_some(progress)
                         });
@@ -2587,10 +2603,9 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                             // signal and unity feedback.
                             slot.set_sample(
                                 previous_position,
-                                input_l * (1.0 - ramp)
-                                    + previous_left * (ramp + (1.0 - ramp) * slot.feedback),
+                                input_l * (1.0 - ramp) + previous_left * (ramp + (1.0 - ramp) * fb),
                                 input_r * (1.0 - ramp)
-                                    + previous_right * (ramp + (1.0 - ramp) * slot.feedback),
+                                    + previous_right * (ramp + (1.0 - ramp) * fb),
                             );
                             // `dopreprocess` rendered this old raw fragment
                             // before `Jump`; mix it into the new position's
@@ -2607,15 +2622,15 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                         let (new_left, new_right, ends_fade) = if let Some(progress) = jump_fade {
                             let ramp = progress as f32 / LOOP_SMOOTH_FRAMES as f32;
                             (
-                                input_l * ramp + old_left * (1.0 - ramp + ramp * slot.feedback),
-                                input_r * ramp + old_right * (1.0 - ramp + ramp * slot.feedback),
+                                input_l * ramp + old_left * (1.0 - ramp + ramp * fb),
+                                input_r * ramp + old_right * (1.0 - ramp + ramp * fb),
                                 false,
                             )
                         } else if let Some((progress, total)) = slot.overdub_fade_out {
                             let total = total.max(frames);
                             let ramp = progress as f32 / total as f32;
                             let input_gain = 1.0 - ramp;
-                            let loop_gain = ramp + input_gain * slot.feedback;
+                            let loop_gain = ramp + input_gain * fb;
                             slot.overdub_fade_out =
                                 (progress + 1 < total).then_some((progress + 1, total));
                             (
@@ -2624,11 +2639,7 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                                 progress + 1 == total,
                             )
                         } else {
-                            (
-                                old_left * slot.feedback + input_l,
-                                old_right * slot.feedback + input_r,
-                                false,
-                            )
+                            (old_left * fb + input_l, old_right * fb + input_r, false)
                         };
                         slot.set_sample(pos, new_left, new_right);
                         slot.overdub_jump.push(pos, old_left, old_right);
@@ -2751,6 +2762,14 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                 let long_length = self.pulse_long_length.max(1);
                 self.pulse_long_count = (self.pulse_long_count + 1) % long_length;
                 self.metro_noise_offset = 0;
+            }
+        }
+        // C++ `RecordProcessor::process` sets `od_feedback_lastval = new_fb`
+        // once per non-`pre` callback, after the fragment has been ramped
+        // through the delta computed at the top of `process`.
+        for slot in &mut self.loops {
+            if slot.mode == LoopMode::Overdubbing {
+                slot.feedback_last = slot.feedback;
             }
         }
         let (left_output, right_output) = callback.outputs.split_at_mut(1);
@@ -3566,6 +3585,7 @@ mod tests {
         slot.pulse_synced = true;
         slot.pulse_beats = 1;
         slot.feedback = 0.5;
+        slot.feedback_last = 0.5;
 
         // Cache raw positions 2 and 3, then cross the downbeat. The next
         // process sample makes `RecordProcessor::Jump` revise old position 2
