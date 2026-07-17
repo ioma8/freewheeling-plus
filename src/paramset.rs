@@ -76,7 +76,7 @@ impl ParamSetBank {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FloDisplayParamSet {
     pub name: String,
     pub iid: i32,
@@ -137,7 +137,9 @@ impl FloDisplayParamSet {
             return;
         };
         let proposed = bank.firstparamidx as isize + page_size as isize * page;
-        bank.firstparamidx = if proposed < 0 || proposed >= bank.numparams as isize {
+        bank.firstparamidx = if proposed < 0 {
+            0
+        } else if proposed >= bank.numparams as isize {
             bank.firstparamidx
         } else {
             proposed as usize

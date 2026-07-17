@@ -83,6 +83,8 @@ pub struct DspSettings {
     pub max_limiter_gain: f32,
     pub limiter_threshold: f32,
     pub limiter_release_rate: f32,
+    pub fader_max_db: f32,
+    pub input_monitoring: [bool; 2],
 }
 
 impl Default for DspSettings {
@@ -92,6 +94,8 @@ impl Default for DspSettings {
             max_limiter_gain: LIMITER_MAX_GAIN,
             limiter_threshold: LIMITER_THRESHOLD,
             limiter_release_rate: LIMITER_RELEASE_RATE,
+            fader_max_db: 12.0,
+            input_monitoring: [true; 2],
         }
     }
 }
@@ -408,6 +412,18 @@ pub enum RuntimeCommand {
     },
     SetInputMonitor(f32),
     AdjustInputMonitor(f32),
+    SetInputVolume {
+        input: u8,
+        volume: f32,
+        fader_volume: f32,
+    },
+    AdjustInputVolume {
+        input: u8,
+        amount: f32,
+    },
+    ToggleInputRecord {
+        input: u8,
+    },
     SetMasterGain(f32),
     AdjustMasterGain(f32),
     SetPulse {
@@ -568,6 +584,8 @@ pub struct RuntimeSnapshot {
     pub input_peak: [f32; 2],
     pub output_peak: [f32; 2],
     pub monitor_gain: f32,
+    pub input_volume: [f32; 2],
+    pub input_selected: [bool; 2],
     pub master_gain: f32,
     pub limiter_gain: f32,
     pub scope_count: u8,
@@ -588,6 +606,8 @@ impl Default for RuntimeSnapshot {
             input_peak: [0.0; 2],
             output_peak: [0.0; 2],
             monitor_gain: 0.0,
+            input_volume: [1.0; 2],
+            input_selected: [true; 2],
             master_gain: 1.0,
             limiter_gain: 1.0,
             scope_count: 0,
@@ -1384,6 +1404,11 @@ pub struct RuntimeAudioProcessor<B: FluidSynthBackend = FluidLiteBackend> {
     metro_hi_offset: usize,
     metro_lo_offset: usize,
     monitor_gain: f32,
+    input_volume: [f32; 2],
+    input_fader_volume: [f32; 2],
+    input_volume_delta: [f32; 2],
+    input_selected: [bool; 2],
+    input_monitoring: [bool; 2],
     master_gain: f32,
     master_limiter: MasterLimiter,
     dsp_settings: DspSettings,
@@ -1563,6 +1588,11 @@ pub fn runtime_audio_processor_with_backend_settings<B: FluidSynthBackend>(
             metro_hi_offset: METRONOME_TONE_LEN,
             metro_lo_offset: METRONOME_TONE_LEN,
             monitor_gain: 0.0,
+            input_volume: [1.0; 2],
+            input_fader_volume: [1.0; 2],
+            input_volume_delta: [1.0; 2],
+            input_selected: [true; 2],
+            input_monitoring: dsp_settings.input_monitoring,
             master_gain: 1.0,
             master_limiter: MasterLimiter::with_settings(dsp_settings),
             dsp_settings,
@@ -1624,6 +1654,8 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
             input_peak: self.input_peak,
             output_peak: self.output_peak,
             monitor_gain: self.monitor_gain,
+            input_volume: self.input_volume,
+            input_selected: self.input_selected,
             master_gain: self.master_gain,
             limiter_gain: self.master_limiter.current_gain,
             ..RuntimeSnapshot::default()
@@ -2135,6 +2167,37 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
             RuntimeCommand::AdjustInputMonitor(amount) => {
                 self.monitor_gain = (self.monitor_gain + amount).max(0.0)
             }
+            RuntimeCommand::SetInputVolume {
+                input,
+                volume,
+                fader_volume,
+            } => {
+                if let Some(slot) = self.input_volume.get_mut(input as usize) {
+                    if volume >= 0.0 {
+                        *slot = volume.max(0.0);
+                    } else if fader_volume >= 0.0 {
+                        let db = crate::core_dsp::AudioLevel::fader_to_db(
+                            fader_volume,
+                            self.dsp_settings.fader_max_db,
+                        );
+                        *slot = 10.0_f32.powf(db / 20.0);
+                    }
+                    self.input_volume_delta[input as usize] = 1.0;
+                    if fader_volume >= 0.0 {
+                        self.input_fader_volume[input as usize] = fader_volume.clamp(0.0, 1.0);
+                    }
+                }
+            }
+            RuntimeCommand::AdjustInputVolume { input, amount } => {
+                if let Some(delta) = self.input_volume_delta.get_mut(input as usize) {
+                    *delta = (*delta + amount).clamp(0.0, 1.5);
+                }
+            }
+            RuntimeCommand::ToggleInputRecord { input } => {
+                if let Some(selected) = self.input_selected.get_mut(input as usize) {
+                    *selected = !*selected;
+                }
+            }
             RuntimeCommand::SetMasterGain(gain) => self.master_gain = gain.max(0.0),
             RuntimeCommand::AdjustMasterGain(amount) => {
                 self.master_gain = (self.master_gain + amount).max(0.0)
@@ -2619,6 +2682,17 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
             }
         }
     }
+
+    fn apply_input_volume_deltas(&mut self) {
+        for (volume, delta) in self.input_volume.iter_mut().zip(self.input_volume_delta) {
+            if delta > 1.0 && *volume < 0.01 {
+                *volume = 0.01;
+            }
+            if *volume < 5.0 {
+                *volume *= delta;
+            }
+        }
+    }
 }
 
 impl RuntimeCommand {
@@ -2719,6 +2793,9 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
 
         let mut input_peak = [0.0_f32; 2];
         let mut output_peak = [0.0_f32; 2];
+        // C++ RootProcessor applies the persistent input-volume deltas once
+        // per audio callback, not once for every frame in the callback.
+        self.apply_input_volume_deltas();
 
         for frame in 0..frames {
             if self.pulse_sync_active
@@ -2814,12 +2891,34 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                     }
                 }
             }
-            let input_l = callback.inputs[0][frame];
-            let input_r = callback.inputs[1][frame];
+            let raw_input_l = callback.inputs[0][frame];
+            let raw_input_r = callback.inputs[1][frame];
+            let scaled_input_l = raw_input_l * self.input_volume[0];
+            let scaled_input_r = raw_input_r * self.input_volume[1];
+            let input_l = if self.input_selected[0] {
+                scaled_input_l
+            } else {
+                0.0
+            };
+            let input_r = if self.input_selected[1] {
+                scaled_input_r
+            } else {
+                0.0
+            };
+            let monitor_input_l = if self.input_monitoring[0] {
+                scaled_input_l
+            } else {
+                0.0
+            };
+            let monitor_input_r = if self.input_monitoring[1] {
+                scaled_input_r
+            } else {
+                0.0
+            };
             input_peak[0] = input_peak[0].max(input_l.abs());
             input_peak[1] = input_peak[1].max(input_r.abs());
-            let mut left = input_l * self.monitor_gain;
-            let mut right = input_r * self.monitor_gain;
+            let mut left = monitor_input_l * self.monitor_gain;
+            let mut right = monitor_input_r * self.monitor_gain;
 
             let mut finished_overdub = None;
             let mut finished_quantized_recording = None;
@@ -3042,8 +3141,8 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
             callback.outputs[0][frame] = left * self.master_gain;
             callback.outputs[1][frame] = right * self.master_gain;
             if !self.input_history_left.is_empty() {
-                self.input_history_left[self.input_history_position] = input_l;
-                self.input_history_right[self.input_history_position] = input_r;
+                self.input_history_left[self.input_history_position] = raw_input_l;
+                self.input_history_right[self.input_history_position] = raw_input_r;
                 self.input_history_position =
                     (self.input_history_position + 1) % self.input_history_left.len();
                 self.input_history_len =
@@ -3261,6 +3360,38 @@ mod tests {
             }
         };
         assert_eq!(snapshot.loops[0].mode, LoopMode::Empty);
+    }
+
+    #[test]
+    fn input_volume_slide_is_applied_once_per_callback() {
+        let (mut processor, mut controls) = processor(0.0);
+        controls
+            .try_command(RuntimeCommand::AdjustInputVolume {
+                input: 0,
+                amount: 0.1,
+            })
+            .unwrap();
+
+        run(&mut processor, &[1.0; 4], &[0.0; 4]);
+
+        assert!((processor.input_volume[0] - 1.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn toggling_input_record_excludes_that_input_from_new_recordings() {
+        let (mut processor, mut controls) = processor(0.0);
+        controls
+            .try_command(RuntimeCommand::ToggleInputRecord { input: 0 })
+            .unwrap();
+        controls
+            .try_command(RuntimeCommand::Record { slot: 0 })
+            .unwrap();
+
+        run(&mut processor, &[1.0], &[2.0]);
+        controls.try_command(RuntimeCommand::StopRecord).unwrap();
+        run(&mut processor, &[], &[]);
+
+        assert_eq!(processor.loops[0].sample_at(0), (0.0, 2.0));
     }
 
     #[test]

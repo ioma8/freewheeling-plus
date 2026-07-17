@@ -13,6 +13,27 @@ use crate::native_dsp_graph::{LoopMode, MAX_RUNTIME_LOOPS, RuntimeCommand};
 /// Non-audio work emitted by [`RuntimeEventDispatcher`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum ApplicationAction {
+    ExitSession,
+    RenameLoop {
+        loop_id: i32,
+    },
+    AlsamixerControlSet {
+        hwid: i32,
+        numid: i32,
+        values: [i32; 4],
+    },
+    VideoShowDisplay {
+        interface_id: i32,
+        display_id: i32,
+        show: bool,
+    },
+    VideoShowSnapshotPage {
+        interface_id: i32,
+        display_id: i32,
+        page: i32,
+    },
+    VideoShowHelp(i32),
+    ShowDebugInfo(bool),
     SaveLoop {
         loop_id: i32,
         codec: CodecSelection,
@@ -186,6 +207,8 @@ pub enum DispatchOutput {
 pub enum DispatchError {
     OutputFull { capacity: usize },
     InvalidLoopId(i32),
+    InvalidInputId(i32),
+    RecursionLimit { depth: usize },
     MissingParameter(&'static str),
     InvalidParameter(&'static str),
 }
@@ -229,6 +252,14 @@ impl<const N: usize> ActionBatch<N> {
         self.len += 1;
         Ok(())
     }
+
+    fn append(&mut self, other: Self) -> Result<(), DispatchError> {
+        let len = other.len;
+        for output in other.entries.into_iter().take(len).flatten() {
+            self.push(output)?;
+        }
+        Ok(())
+    }
 }
 
 /// Read-only audio state needed to preserve trigger-loop's C++ state machine.
@@ -243,6 +274,8 @@ impl RuntimeLoopState for [LoopMode; MAX_RUNTIME_LOOPS] {
 }
 
 pub struct RuntimeEventDispatcher<const N: usize = 32>;
+
+const MAX_GOSUB_DEPTH: usize = 32;
 
 impl<const N: usize> Default for RuntimeEventDispatcher<N> {
     fn default() -> Self {
@@ -265,6 +298,20 @@ impl<const N: usize> RuntimeEventDispatcher<N> {
         input: &dyn Event,
         loops: &impl RuntimeLoopState,
     ) -> Result<ActionBatch<N>, DispatchError> {
+        self.dispatch_at_depth(config, registry, input, loops, 0)
+    }
+
+    fn dispatch_at_depth(
+        &self,
+        config: &mut FloConfig,
+        registry: &BindingRegistry,
+        input: &dyn Event,
+        loops: &impl RuntimeLoopState,
+        depth: usize,
+    ) -> Result<ActionBatch<N>, DispatchError> {
+        if depth > MAX_GOSUB_DEPTH {
+            return Err(DispatchError::RecursionLimit { depth });
+        }
         let resolved = config.dispatch_registered_event_bindings(input, registry);
         let mut batch = ActionBatch::new(resolved.echo);
         let had_binding = !resolved.matched.is_empty();
@@ -275,7 +322,7 @@ impl<const N: usize> RuntimeEventDispatcher<N> {
             if self.apply_variable_output(config, &binding)? {
                 continue;
             }
-            self.map_binding(config, &binding, loops, &mut batch)?;
+            self.map_binding(config, registry, &binding, loops, &mut batch, depth)?;
         }
         if !had_binding {
             self.map_unbound_native_input(input, &mut batch)?;
@@ -403,16 +450,26 @@ impl<const N: usize> RuntimeEventDispatcher<N> {
                 config.set_int_variable(variable_ref(p, "lsb")?, raw & 0x7f);
                 Ok(true)
             }
+            Some(EventType::LogFaderVolToLinear) => {
+                let name = variable_ref(p, "var")?;
+                let fader = variable(p, "fadervol")?.as_f32();
+                let scale = float(p, "scale")?;
+                let db = crate::core_dsp::AudioLevel::fader_to_db(fader, config.fader_max_db());
+                config.set_float_variable(name, 10.0_f32.powf(db / 20.0) * scale);
+                Ok(true)
+            }
             _ => Ok(false),
         }
     }
 
     fn map_binding(
         &self,
-        config: &FloConfig,
+        config: &mut FloConfig,
+        registry: &BindingRegistry,
         binding: &ResolvedBinding,
         loops: &impl RuntimeLoopState,
         out: &mut ActionBatch<N>,
+        depth: usize,
     ) -> Result<(), DispatchError> {
         let Some(typ) = binding.binding.output_event else {
             return Ok(());
@@ -423,12 +480,111 @@ impl<const N: usize> RuntimeEventDispatcher<N> {
         match typ {
             // These event names are part of the XML action vocabulary, but
             // their native runtime representation is already a command.
+            EventType::StartSession | EventType::StartInterface => {}
+            EventType::ExitSession => out.push(app(ApplicationAction::ExitSession))?,
+            EventType::GoSub => {
+                let event = crate::event::GoSubEvent::new(
+                    int(p, "sub")?,
+                    float(p, "param1")?,
+                    float(p, "param2")?,
+                    float(p, "param3")?,
+                );
+                let nested = self.dispatch_at_depth(config, registry, &event, loops, depth + 1)?;
+                out.append(nested)?;
+            }
+            EventType::ALSAMixerControlSet => {
+                out.push(app(ApplicationAction::AlsamixerControlSet {
+                    hwid: int(p, "hwid")?,
+                    numid: int(p, "numid")?,
+                    values: [
+                        int(p, "val1")?,
+                        int(p, "val2")?,
+                        int(p, "val3")?,
+                        int(p, "val4")?,
+                    ],
+                }))?
+            }
+            EventType::ParamSetGetAbsoluteParamIdx => {
+                let key = (int(p, "interfaceid")?, int(p, "displayid")?);
+                let relative = int(p, "paramidx")? as isize;
+                let target = variable_ref(p, "absidx")?;
+                if let Some(paramset) = config.paramsets.get(&key) {
+                    if let Some(index) = paramset.absolute_param_index(relative) {
+                        config.set_int_variable(target, index as i32);
+                    }
+                }
+            }
+            EventType::ParamSetGetParam => {
+                let key = (int(p, "interfaceid")?, int(p, "displayid")?);
+                let relative = int(p, "paramidx")? as isize;
+                let target = variable_ref(p, "var")?;
+                let value = config
+                    .paramsets
+                    .get(&key)
+                    .map_or(0.0, |paramset| paramset.get_param(relative));
+                config.set_float_variable(target, value);
+            }
+            EventType::ParamSetSetParam => {
+                let key = (int(p, "interfaceid")?, int(p, "displayid")?);
+                let relative = int(p, "paramidx")? as isize;
+                let value = float(p, "value")?;
+                if let Some(paramset) = config.paramsets.get_mut(&key) {
+                    paramset.set_param(relative, value);
+                    paramset.link_active_params();
+                }
+            }
+            EventType::VideoShowParamSetBank => {
+                let key = (int(p, "interfaceid")?, int(p, "displayid")?);
+                if let Some(paramset) = config.paramsets.get_mut(&key) {
+                    paramset.show_bank(int(p, "bank")? as isize);
+                    paramset.link_active_params();
+                }
+            }
+            EventType::VideoShowParamSetPage => {
+                let key = (int(p, "interfaceid")?, int(p, "displayid")?);
+                if let Some(paramset) = config.paramsets.get_mut(&key) {
+                    paramset.show_page(int(p, "page")? as isize);
+                    paramset.link_active_params();
+                }
+            }
             EventType::EndRecord => out.push(runtime(RuntimeCommand::StopRecord))?,
             EventType::SetMasterInVolume => {
-                out.push(runtime(RuntimeCommand::SetInputMonitor(float(p, "vol")?)))?
+                let vol = float_or(p, "vol", -1.0)?;
+                let gain = if vol >= 0.0 {
+                    vol
+                } else if let Some(fader) = p.iter().find(|(key, _)| key == "fadervol") {
+                    let fader = match &fader.1 {
+                        StoredParameterValue::Float(value) => *value,
+                        StoredParameterValue::Int(value) => *value as f32,
+                        _ => return Err(DispatchError::InvalidParameter("fadervol")),
+                    };
+                    let db = crate::core_dsp::AudioLevel::fader_to_db(fader, config.fader_max_db());
+                    10.0_f32.powf(db / 20.0)
+                } else {
+                    -1.0
+                };
+                if gain >= 0.0 {
+                    out.push(runtime(RuntimeCommand::SetInputMonitor(gain)))?;
+                }
             }
             EventType::SetMasterOutVolume => {
-                out.push(runtime(RuntimeCommand::SetMasterGain(float(p, "vol")?)))?
+                let vol = float_or(p, "vol", -1.0)?;
+                let gain = if vol >= 0.0 {
+                    vol
+                } else if let Some(fader) = p.iter().find(|(key, _)| key == "fadervol") {
+                    let fader = match &fader.1 {
+                        StoredParameterValue::Float(value) => *value,
+                        StoredParameterValue::Int(value) => *value as f32,
+                        _ => return Err(DispatchError::InvalidParameter("fadervol")),
+                    };
+                    let db = crate::core_dsp::AudioLevel::fader_to_db(fader, config.fader_max_db());
+                    10.0_f32.powf(db / 20.0)
+                } else {
+                    -1.0
+                };
+                if gain >= 0.0 {
+                    out.push(runtime(RuntimeCommand::SetMasterGain(gain)))?;
+                }
             }
             EventType::SlideMasterInVolume => out.push(runtime(
                 RuntimeCommand::AdjustInputMonitor(float(p, "slide")?),
@@ -621,6 +777,24 @@ impl<const N: usize> RuntimeEventDispatcher<N> {
                 show: bool_param(p, "show")?,
                 hide_others: bool_param(p, "hideothers")?,
             }))?,
+            EventType::VideoShowDisplay => out.push(app(ApplicationAction::VideoShowDisplay {
+                interface_id: int(p, "interfaceid")?,
+                display_id: int(p, "displayid")?,
+                show: bool_param(p, "show")?,
+            }))?,
+            EventType::VideoShowSnapshotPage => {
+                out.push(app(ApplicationAction::VideoShowSnapshotPage {
+                    interface_id: int(p, "interfaceid")?,
+                    display_id: int(p, "displayid")?,
+                    page: int(p, "page")?,
+                }))?
+            }
+            EventType::VideoShowHelp => {
+                out.push(app(ApplicationAction::VideoShowHelp(int(p, "page")?)))?
+            }
+            EventType::ShowDebugInfo => out.push(app(ApplicationAction::ShowDebugInfo(
+                bool_param(p, "show")?,
+            )))?,
             EventType::VideoSwitchInterface => out.push(app(
                 ApplicationAction::VideoSwitchInterface(int(p, "interfaceid")?),
             ))?,
@@ -649,6 +823,27 @@ impl<const N: usize> RuntimeEventDispatcher<N> {
                     out.push(runtime(RuntimeCommand::SynthOff))?;
                 }
                 out.push(app(ApplicationAction::SetSynthEnabled(enabled)))?;
+            }
+            EventType::SlideInVolume => out.push(runtime(RuntimeCommand::AdjustInputVolume {
+                input: input_slot(int(p, "input")?)?,
+                amount: float(p, "slide")?,
+            }))?,
+            EventType::SetInVolume => out.push(runtime(RuntimeCommand::SetInputVolume {
+                input: input_slot(int(p, "input")?)?,
+                volume: float_or(p, "vol", -1.0)?,
+                fader_volume: float_or(p, "fadervol", -1.0)?,
+            }))?,
+            EventType::ToggleInputRecord => {
+                out.push(runtime(RuntimeCommand::ToggleInputRecord {
+                    input: input_slot(int(p, "input")?)?,
+                }))?
+            }
+            EventType::RenameLoop => {
+                if bool_param(p, "in")? {
+                    out.push(app(ApplicationAction::RenameLoop {
+                        loop_id: int(p, "loopid")?,
+                    }))?;
+                }
             }
             EventType::SetMidiTuning => out.push(runtime(RuntimeCommand::SynthTuning {
                 cents: float(p, "tuning")?,
@@ -878,6 +1073,14 @@ fn loop_slot(id: i32) -> Result<u8, DispatchError> {
         Ok(id as u8)
     } else {
         Err(DispatchError::InvalidLoopId(id))
+    }
+}
+
+fn input_slot(id: i32) -> Result<u8, DispatchError> {
+    if (1..=2).contains(&id) {
+        Ok((id - 1) as u8)
+    } else {
+        Err(DispatchError::InvalidInputId(id))
     }
 }
 

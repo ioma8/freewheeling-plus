@@ -12,6 +12,7 @@ pub const MAX_NAME_BYTES: usize = 511;
 pub enum RenameTarget {
     Browser { browser: i32, item: usize },
     Snapshot { slot: i32 },
+    Loop { slot: i32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

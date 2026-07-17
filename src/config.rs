@@ -287,6 +287,11 @@ pub struct FloConfig {
     /// Interface files in configured order, with their C++ compatible IDs.
     pub interfaces: Vec<InterfaceConfig>,
     pub video: VideoConfig,
+    /// Runtime state for XML `paramset` displays.  Keeping this next to the
+    /// binding registry lets paramset get/set events take effect in-order,
+    /// including when a continued binding reads the value immediately after
+    /// a `paramset-get-param` output.
+    pub paramsets: HashMap<(i32, i32), crate::paramset::FloDisplayParamSet>,
     pub patch_banks: Vec<PatchBankConfig>,
     /// C++ `<fluidsynth>` declarations from the primary configuration file.
     pub fluidsynth: FluidSynthConfig,
@@ -414,6 +419,7 @@ impl FloConfig {
             binding_registry: BindingRegistry::default(),
             interfaces: Vec::new(),
             video: VideoConfig::default(),
+            paramsets: HashMap::new(),
             patch_banks: Vec::new(),
             fluidsynth: FluidSynthConfig::default(),
         }
@@ -741,6 +747,7 @@ impl FloConfig {
     fn load_documents(&mut self, documents: Vec<(i32, PathBuf, String)>) -> Result<(), String> {
         let mut registry = BindingRegistry::default();
         self.video = VideoConfig::default();
+        self.paramsets.clear();
         self.patch_banks.clear();
         self.fluidsynth = FluidSynthConfig::default();
         // C++ performs a declaration pass over every interface before bindings.
@@ -932,6 +939,9 @@ impl FloConfig {
                 });
             } else if node.has_tag_name("display") {
                 self.video.display_count += 1;
+                if node.attribute("type") == Some("paramset") {
+                    self.parse_paramset_node(iid, node)?;
+                }
             } else if node.has_tag_name("fluidsynth") {
                 if let Some(name) = node.attribute("param") {
                     let setting = if let Some(value) = node.attribute("setint") {
@@ -1009,6 +1019,66 @@ impl FloConfig {
                 });
             }
         }
+        Ok(())
+    }
+
+    fn parse_paramset_node(
+        &mut self,
+        iid: i32,
+        node: roxmltree::Node<'_, '_>,
+    ) -> Result<(), String> {
+        let display_id = node
+            .attribute("id")
+            .map(|value| self.parse_expression(value, false).evaluate(self).as_i32())
+            .unwrap_or(-1);
+        let name = node.attribute("name").unwrap_or("NONAME");
+        let num_active = node
+            .attribute("numactiveparams")
+            .unwrap_or("8")
+            .parse::<usize>()
+            .map_err(|_| format!("invalid paramset numactiveparams for {name}"))?;
+        let banks = node
+            .children()
+            .filter(|child| child.has_tag_name("bank"))
+            .collect::<Vec<_>>();
+        let mut display = crate::paramset::FloDisplayParamSet::new(
+            name,
+            iid,
+            display_id,
+            num_active,
+            banks.len(),
+            100,
+            100,
+        );
+        for (bank_index, bank_node) in banks.into_iter().enumerate() {
+            let params = bank_node
+                .children()
+                .filter(|child| child.has_tag_name("param"))
+                .collect::<Vec<_>>();
+            let max_value = bank_node
+                .attribute("maxvalue")
+                .unwrap_or("1.0")
+                .parse::<f32>()
+                .map_err(|_| format!("invalid paramset maxvalue for {name}"))?;
+            let bank_name = bank_node.attribute("name");
+            let bank = display
+                .banks
+                .get_mut(bank_index)
+                .ok_or_else(|| format!("invalid paramset bank index for {name}"))?;
+            bank.setup(bank_name, params.len(), max_value);
+            for (param_index, param_node) in params.into_iter().enumerate() {
+                if let Some(param) = bank.params.get_mut(param_index) {
+                    param.set_name(param_node.attribute("name"));
+                    if let Some(init) = param_node.attribute("init") {
+                        param.value = init
+                            .parse()
+                            .map_err(|_| format!("invalid paramset init for {name}"))?;
+                    }
+                }
+            }
+        }
+        display.link_active_params();
+        self.paramsets.insert((iid, display_id), display);
         Ok(())
     }
 

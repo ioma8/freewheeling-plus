@@ -5,6 +5,7 @@
 //! rollback and final shutdown are safe to repeat.
 
 use super::{NativeComponentAdapter, ProductionApp};
+use crate::amixer::{AlsaMixerBackend, HardwareMixerInterface};
 #[cfg(not(target_os = "macos"))]
 use crate::audio_native_cpal::CpalAudioBackend as NativeAudioBackend;
 use crate::audio_native_cpal::{CpalAudioOptions, DeviceSelection};
@@ -259,12 +260,14 @@ struct MainThreadVideo {
     next_frame: Instant,
     active: bool,
     scene_state: SharedUiSceneState,
+    help_page_count: usize,
 }
 
 impl MainThreadVideo {
     fn open(data: &std::path::Path) -> Result<Self, String> {
         let scene = load_production_scene(data)?;
         let size = scene.manifest.logical_size;
+        let help_page_count = scene.manifest.help_lines.len().div_ceil(24);
         let scene_state = Arc::clone(&scene.state);
         let production = production_software_renderer(scene)?;
         let mut backend = Sdl2VideoBackend::new("FreeWheeling");
@@ -304,6 +307,7 @@ impl MainThreadVideo {
             next_frame: Instant::now(),
             active: true,
             scene_state,
+            help_page_count,
         })
     }
 
@@ -311,6 +315,11 @@ impl MainThreadVideo {
         if self.active && now >= self.next_frame {
             let mut existing = self.scene_state.write().expect("UI state poisoned");
             state.layouts = std::mem::take(&mut existing.layouts);
+            state.displays = std::mem::take(&mut existing.displays);
+            state.snapshot_pages = std::mem::take(&mut existing.snapshot_pages);
+            state.snapshot_display_counts = std::mem::take(&mut existing.snapshot_display_counts);
+            state.help_page = existing.help_page;
+            state.debug_info = existing.debug_info;
             *existing = state;
             // Rendering reads this shared state from every XML display.
             // Do not retain the write lock across `render`, or the main
@@ -427,6 +436,7 @@ struct RuntimeResources {
     midi: Option<MidiIo<MidirMidiBackend>>,
     controls: Option<RuntimeControls>,
     osc: Option<OscClient<UdpBackend>>,
+    mixer: Option<HardwareMixerInterface<AlsaMixerBackend>>,
     browser_entries: Vec<std::path::PathBuf>,
     browser_cursors: HashMap<i32, usize>,
     pending_core_events: VecDeque<CoreEvent>,
@@ -453,6 +463,7 @@ struct RuntimeResources {
     held_midi_routes: HashMap<u8, Vec<EchoRouting>>,
     rename: NativeRename,
     loop_files: HashMap<i32, std::path::PathBuf>,
+    loop_names: HashMap<i32, String>,
     loop_hashes: HashMap<i32, String>,
     loop_metadata: HashMap<i32, LoopTransferMetadata>,
     pending_snapshot_id: Option<i32>,
@@ -475,6 +486,10 @@ struct RuntimeResources {
     sync_speed: u32,
     last_recorded_loop: Option<u8>,
     recent_recordings: VecDeque<u8>,
+    current_interface: i32,
+    synth_enabled: bool,
+    help_page_count: usize,
+    debug_info: bool,
 }
 
 struct PendingLoopExport {
@@ -535,6 +550,7 @@ impl NativeRuntime {
             };
             state.values.insert(variable.name, value);
         }
+        state.paramsets = r.config.borrow().paramsets.clone();
         state.values.insert(
             "SYSTEM_variable_snapshot_truncated".into(),
             config_variables.truncated as u8 as f32,
@@ -584,18 +600,23 @@ impl NativeRuntime {
             .insert("SYSTEM_in_1_volume".into(), snapshot.monitor_gain);
         state
             .values
-            .insert("SYSTEM_in_2_volume".into(), snapshot.monitor_gain);
+            .insert("SYSTEM_in_2_volume".into(), snapshot.input_volume[1]);
+        state
+            .values
+            .insert("SYSTEM_in_1_volume".into(), snapshot.input_volume[0]);
         state
             .values
             .insert("SYSTEM_in_1_peak".into(), snapshot.input_peak[0]);
         state
             .values
             .insert("SYSTEM_in_2_peak".into(), snapshot.input_peak[1]);
-        state.values.insert("SYSTEM_in_1_record".into(), 1.0);
-        state.values.insert("SYSTEM_in_2_record".into(), 1.0);
         state.values.insert(
-            "SYSTEM_num_recording_loops_in_map".into(),
-            (snapshot.recording_slot >= 0) as u8 as f32,
+            "SYSTEM_in_1_record".into(),
+            snapshot.input_selected[0] as u8 as f32,
+        );
+        state.values.insert(
+            "SYSTEM_in_2_record".into(),
+            snapshot.input_selected[1] as u8 as f32,
         );
         state
             .values
@@ -633,10 +654,11 @@ impl NativeRuntime {
                     .iter()
                     .position(|recent| usize::from(*recent) == slot)
                     .map(|rank| rank as u8);
-                let name = r
-                    .loop_files
-                    .get(&(slot as i32))
-                    .and_then(|path| Self::persisted_display_name(path));
+                let name = r.loop_names.get(&(slot as i32)).cloned().or_else(|| {
+                    r.loop_files
+                        .get(&(slot as i32))
+                        .and_then(|path| Self::persisted_display_name(path))
+                });
                 state.loop_scopes.insert(
                     slot as i32,
                     LoopScopeState {
@@ -728,6 +750,96 @@ impl NativeRuntime {
         state
     }
 
+    /// Refresh the variables that C++ links directly to live audio, MIDI,
+    /// browser, and video objects.  Bindings are evaluated synchronously, so
+    /// this is called immediately before dispatch and after actions mutate
+    /// those objects.
+    fn sync_live_system_variables(r: &mut RuntimeResources) {
+        let snapshot = r.latest_snapshot;
+        let cpu_load = r
+            .audio
+            .as_ref()
+            .map_or(0.0, |audio| audio.get_cpu_load() * 100.0);
+        let (midi_transpose, bend_tune, midi_sync_transmit) =
+            r.midi.as_ref().map_or((0, 0, false), |midi| {
+                (midi.note_transpose, midi.bend_tune, midi.sync_transmit)
+            });
+        let (midi_outputs, patch_banks, switchable_interfaces) = {
+            let config = r.config.borrow();
+            (
+                config.midi_outputs as i32,
+                config.patch_banks.len() as i32,
+                config
+                    .interfaces
+                    .iter()
+                    .filter(|interface| interface.switchable)
+                    .count() as i32,
+            )
+        };
+        let patch_tag = r
+            .patch_browser
+            .as_ref()
+            .and_then(|browser| browser.current_bank())
+            .and_then(|bank| bank.tag)
+            .unwrap_or(0);
+        let (snapshot_page, snapshot_count) = r
+            .video
+            .as_ref()
+            .and_then(|video| video.scene_state.read().ok())
+            .and_then(|state| {
+                state.snapshot_pages.iter().next().map(|(key, page)| {
+                    (
+                        *page,
+                        state.snapshot_display_counts.get(key).copied().unwrap_or(0),
+                    )
+                })
+            })
+            .unwrap_or((0, 0));
+        let loops_in_map = snapshot
+            .loops
+            .iter()
+            .filter(|loop_state| loop_state.mode != LoopMode::Empty)
+            .count() as i32;
+        let recording_loops = snapshot
+            .loops
+            .iter()
+            .filter(|loop_state| {
+                matches!(loop_state.mode, LoopMode::Recording | LoopMode::Overdubbing)
+            })
+            .count() as i32;
+        let mut config = r.config.borrow_mut();
+        config.set_int_variable("SYSTEM_num_midi_outs", midi_outputs);
+        config.set_int_variable("SYSTEM_midi_transpose", midi_transpose);
+        config.set_float_variable("SYSTEM_master_in_volume", snapshot.monitor_gain);
+        config.set_float_variable("SYSTEM_master_out_volume", snapshot.master_gain);
+        config.set_int_variable("SYSTEM_cur_pitchbend", 0);
+        config.set_int_variable("SYSTEM_bender_tune", bend_tune);
+        config.set_float_variable("SYSTEM_cur_limiter_gain", snapshot.limiter_gain);
+        config.set_float_variable("SYSTEM_audio_cpu_load", cpu_load);
+        config.set_int_variable("SYSTEM_sync_active", r.pulse_selected as i32);
+        config.set_int_variable("SYSTEM_sync_transmit", 0);
+        config.set_int_variable("SYSTEM_midisync_transmit", midi_sync_transmit as i32);
+        config.set_int_variable("SYSTEM_fluidsynth_enabled", r.synth_enabled as i32);
+        config.set_int_variable("SYSTEM_num_help_pages", r.help_page_count as i32);
+        config.set_int_variable("SYSTEM_num_loops_in_map", loops_in_map);
+        config.set_int_variable("SYSTEM_num_recording_loops_in_map", recording_loops);
+        config.set_int_variable("SYSTEM_num_patchbanks", patch_banks);
+        config.set_int_variable("SYSTEM_cur_patchbank_tag", patch_tag);
+        config.set_int_variable("SYSTEM_num_switchable_interfaces", switchable_interfaces);
+        config.set_int_variable("SYSTEM_cur_switchable_interface", r.current_interface);
+        config.set_int_variable(
+            "SYSTEM_snapshot_page_firstidx",
+            snapshot_page.saturating_mul(snapshot_count) as i32,
+        );
+        for (index, volume) in snapshot.input_volume.iter().enumerate() {
+            config.set_float_variable(&format!("SYSTEM_in_{}_volume", index + 1), *volume);
+            config.set_int_variable(
+                &format!("SYSTEM_in_{}_record", index + 1),
+                snapshot.input_selected[index] as i32,
+            );
+        }
+    }
+
     fn new(library_dir: std::path::PathBuf, config: Rc<RefCell<FloConfig>>) -> Self {
         Self {
             resources: Rc::new(RefCell::new(RuntimeResources {
@@ -741,6 +853,7 @@ impl NativeRuntime {
                 midi: None,
                 controls: None,
                 osc: None,
+                mixer: None,
                 browser_entries: Vec::new(),
                 browser_cursors: HashMap::new(),
                 pending_core_events: VecDeque::new(),
@@ -773,6 +886,7 @@ impl NativeRuntime {
                 held_midi_routes: HashMap::new(),
                 rename: NativeRename::new(),
                 loop_files: HashMap::new(),
+                loop_names: HashMap::new(),
                 loop_hashes: HashMap::new(),
                 loop_metadata: HashMap::new(),
                 pending_snapshot_id: None,
@@ -798,6 +912,10 @@ impl NativeRuntime {
                 sync_speed: 1,
                 last_recorded_loop: None,
                 recent_recordings: VecDeque::with_capacity(8),
+                current_interface: 1,
+                synth_enabled: true,
+                help_page_count: 0,
+                debug_info: false,
             })),
         }
     }
@@ -825,7 +943,7 @@ impl NativeRuntime {
     }
 
     fn report_diagnostics(r: &mut RuntimeResources, now: Instant) {
-        if std::env::var_os("FWEELIN_DIAGNOSTICS").is_none()
+        if (!r.debug_info && std::env::var_os("FWEELIN_DIAGNOSTICS").is_none())
             || now.duration_since(r.last_diagnostic_report) < Duration::from_secs(1)
         {
             return;
@@ -849,12 +967,13 @@ impl NativeRuntime {
 
     fn dispatch_one_runtime_event(&mut self, event: &dyn Event) -> Result<(), String> {
         let mut r = self.resources.borrow_mut();
+        Self::sync_live_system_variables(&mut r);
         let registry = r.config.borrow().binding_registry.clone();
         let modes = r.cached_modes;
         let batch = RuntimeEventDispatcher::<32>::new()
             .dispatch(&mut r.config.borrow_mut(), &registry, event, &modes)
             .map_err(|error| format!("dispatch {:?}: {error:?}", event.get_type()))?;
-        if std::env::var_os("FWEELIN_DIAGNOSTICS").is_some() {
+        if r.debug_info || std::env::var_os("FWEELIN_DIAGNOSTICS").is_some() {
             eprintln!(
                 "FreeWheeling dispatch: {:?} -> {:?}",
                 event.get_type(),
@@ -902,6 +1021,7 @@ impl NativeRuntime {
         {
             Self::echo_routed_midi(&mut r, &message)?;
         }
+        Self::sync_live_system_variables(&mut r);
         Ok(())
     }
 
@@ -1047,12 +1167,84 @@ impl NativeRuntime {
                 }
             }
             ApplicationAction::VideoSwitchInterface(interface_id) => {
+                r.current_interface = interface_id;
                 let video = r.video.as_mut().ok_or("video is closed")?;
                 let mut state = video.scene_state.write().expect("UI state poisoned");
                 for ((layout_interface, _), layout) in &mut state.layouts {
                     if *layout_interface != 0 && *layout_interface < 1000 {
                         layout.show = *layout_interface == interface_id;
                     }
+                }
+                for ((display_interface, _), display) in &mut state.displays {
+                    if *display_interface != 0 && *display_interface < 1000 {
+                        *display = *display_interface == interface_id;
+                    }
+                }
+            }
+            ApplicationAction::ExitSession => {
+                r.pending_core_events.push_back(CoreEvent::ExitSession);
+            }
+            ApplicationAction::VideoShowDisplay {
+                interface_id,
+                display_id,
+                show,
+            } => {
+                let video = r.video.as_mut().ok_or("video is closed")?;
+                let mut state = video.scene_state.write().expect("UI state poisoned");
+                state.displays.insert((interface_id, display_id), show);
+            }
+            ApplicationAction::VideoShowSnapshotPage {
+                interface_id,
+                display_id,
+                page,
+            } => {
+                let video = r.video.as_mut().ok_or("video is closed")?;
+                let mut state = video.scene_state.write().expect("UI state poisoned");
+                let key = (interface_id, display_id);
+                let count = state
+                    .snapshot_display_counts
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(1)
+                    .max(1);
+                let max_page = r.snapshots.len().saturating_sub(1) / count;
+                let current = state.snapshot_pages.entry(key).or_default();
+                *current = ((*current as i32) + page).clamp(0, max_page as i32) as usize;
+            }
+            ApplicationAction::VideoShowHelp(page) => {
+                let video = r.video.as_mut().ok_or("video is closed")?;
+                let mut state = video.scene_state.write().expect("UI state poisoned");
+                if page >= 0 && (page as usize) <= video.help_page_count {
+                    state.help_page = page as usize;
+                }
+            }
+            ApplicationAction::ShowDebugInfo(show) => {
+                r.debug_info = show;
+                if let Some(video) = r.video.as_mut() {
+                    video
+                        .scene_state
+                        .write()
+                        .expect("UI state poisoned")
+                        .debug_info = show;
+                }
+                r.config
+                    .borrow_mut()
+                    .set_int_variable("SYSTEM_show_debug_info", show as i32);
+            }
+            ApplicationAction::AlsamixerControlSet {
+                hwid,
+                numid,
+                values,
+            } => {
+                if let Some(mixer) = r.mixer.as_mut() {
+                    mixer
+                        .alsa_mixer_control_set(
+                            hwid, numid, values[0], values[1], values[2], values[3],
+                        )
+                        .map_err(|error| format!("ALSA mixer: {error}"))?;
+                } else {
+                    #[cfg(not(target_os = "macos"))]
+                    return Err("ALSA mixer is not available".into());
                 }
             }
             ApplicationAction::SaveLoop { loop_id, codec } => {
@@ -1168,6 +1360,33 @@ impl NativeRuntime {
                 if !r
                     .rename
                     .begin(RenameTarget::Snapshot { slot: snapshot }, old_name)
+                {
+                    return Err("another rename operation is already active".into());
+                }
+                r.input
+                    .as_mut()
+                    .ok_or("input is closed")?
+                    .enable_unicode(true);
+            }
+            ApplicationAction::RenameLoop { loop_id } => {
+                let valid = usize::try_from(loop_id)
+                    .ok()
+                    .filter(|slot| *slot < crate::native_dsp_graph::MAX_RUNTIME_LOOPS)
+                    .is_some_and(|slot| {
+                        r.cached_modes[slot] != LoopMode::Empty
+                            || r.loop_files.contains_key(&loop_id)
+                    });
+                if !valid {
+                    return Err(format!("loop {loop_id} does not exist"));
+                }
+                let old_name = r.loop_names.get(&loop_id).cloned().or_else(|| {
+                    r.loop_files
+                        .get(&loop_id)
+                        .and_then(|path| Self::persisted_display_name(path))
+                });
+                if !r
+                    .rename
+                    .begin(RenameTarget::Loop { slot: loop_id }, old_name.as_deref())
                 {
                     return Err("another rename operation is already active".into());
                 }
@@ -1495,6 +1714,7 @@ impl NativeRuntime {
                 r.loop_selection
                     .update_after_move(from as usize, to as usize);
                 Self::move_loop_map_entry(&mut r.loop_files, from, to);
+                Self::move_loop_map_entry(&mut r.loop_names, from, to);
                 Self::move_loop_map_entry(&mut r.loop_hashes, from, to);
                 Self::move_loop_map_entry(&mut r.loop_metadata, from, to);
                 for recent in &mut r.recent_recordings {
@@ -1548,12 +1768,14 @@ impl NativeRuntime {
                         .echo_to_route(outport, channel, &message)?;
                 }
             }
-            ApplicationAction::SetSynthEnabled(enabled) => r
-                .controls
-                .as_mut()
-                .ok_or("DSP controls are closed")?
-                .try_command(RuntimeCommand::SetSynthEnabled(enabled))
-                .map_err(|_| "DSP command queue is full")?,
+            ApplicationAction::SetSynthEnabled(enabled) => {
+                r.synth_enabled = enabled;
+                r.controls
+                    .as_mut()
+                    .ok_or("DSP controls are closed")?
+                    .try_command(RuntimeCommand::SetSynthEnabled(enabled))
+                    .map_err(|_| "DSP command queue is full")?;
+            }
             ApplicationAction::MidiClock => {
                 let sync_outputs = r.config.borrow().midi_sync_outputs.clone();
                 r.midi
@@ -1805,6 +2027,12 @@ impl NativeRuntime {
             RenameTarget::Snapshot { slot } => {
                 r.snapshot_names.insert(slot, name);
             }
+            RenameTarget::Loop { slot } => {
+                r.loop_names.insert(slot, name.clone());
+                if let Some(path) = r.loop_files.get(&slot).cloned() {
+                    Self::rename_persisted_path(r, &path, &name)?;
+                }
+            }
             RenameTarget::Browser { item, .. } => {
                 Self::rename_persisted_browser_item(r, item, &name)?;
             }
@@ -1822,6 +2050,14 @@ impl NativeRuntime {
             .get(item)
             .cloned()
             .ok_or("rename browser item disappeared")?;
+        Self::rename_persisted_path(r, &selected, name)
+    }
+
+    fn rename_persisted_path(
+        r: &mut RuntimeResources,
+        selected: &std::path::Path,
+        name: &str,
+    ) -> Result<(), String> {
         let filename = selected
             .file_name()
             .and_then(|value| value.to_str())
@@ -2578,6 +2814,9 @@ impl NativeRuntime {
                 if let Some(osc) = r.osc.take() {
                     osc.close();
                 }
+                if let Some(mut mixer) = r.mixer.take() {
+                    mixer.close();
+                }
             }
             StartupPhase::InputAndMidi => {
                 if let Some(input) = r.input.as_mut() {
@@ -2691,7 +2930,9 @@ impl NativeStartupAdapter for NativeRuntime {
                 r.events = Some(manager);
             }
             StartupPhase::Video => {
-                r.video = Some(MainThreadVideo::open(&paths.resources)?);
+                let video = MainThreadVideo::open(&paths.resources)?;
+                r.help_page_count = video.help_page_count;
+                r.video = Some(video);
             }
             StartupPhase::VideoReady => {
                 if !r.video.as_ref().is_some_and(|video| video.active) {
@@ -2747,6 +2988,19 @@ impl NativeStartupAdapter for NativeRuntime {
                         max_limiter_gain: config.max_limiter_gain,
                         limiter_threshold: config.limiter_threshold,
                         limiter_release_rate: config.limiter_release_rate,
+                        fader_max_db: config.fader_max_db,
+                        input_monitoring: [
+                            config
+                                .audio_input_monitoring
+                                .first()
+                                .copied()
+                                .unwrap_or(true),
+                            config
+                                .audio_input_monitoring
+                                .get(1)
+                                .copied()
+                                .unwrap_or(true),
+                        ],
                     }
                 };
                 let (processor, controls) = production_audio_processor_with_settings(
@@ -2802,6 +3056,10 @@ impl NativeStartupAdapter for NativeRuntime {
                 );
                 osc.open().map_err(|e| format!("OSC: {e:?}"))?;
                 r.osc = Some(osc);
+                #[cfg(not(target_os = "macos"))]
+                {
+                    r.mixer = Some(HardwareMixerInterface::new(AlsaMixerBackend::default()));
+                }
             }
             StartupPhase::SystemVariables => {
                 fs::metadata(&r.library_dir)
@@ -3348,6 +3606,50 @@ mod tests {
             map_mouse_to_logical(320, 240, (640, 480), (640, 480)),
             (320, 240)
         );
+    }
+
+    #[test]
+    fn ui_state_keeps_the_live_recording_loop_count() {
+        let runtime = NativeRuntime::new("library".into(), Rc::new(RefCell::new(FloConfig::new())));
+        let mut resources = runtime.resources.borrow_mut();
+        resources
+            .config
+            .borrow_mut()
+            .set_int_variable("SYSTEM_num_recording_loops_in_map", 2);
+        resources.latest_snapshot.loops[0].mode = LoopMode::Recording;
+        resources.latest_snapshot.loops[1].mode = LoopMode::Overdubbing;
+        resources.latest_snapshot.recording_slot = 0;
+
+        let state = NativeRuntime::ui_scene_state(&resources);
+
+        assert_eq!(
+            state.values.get("SYSTEM_num_recording_loops_in_map"),
+            Some(&2.0)
+        );
+    }
+
+    #[test]
+    fn show_debug_info_updates_runtime_diagnostics_state() {
+        let runtime = NativeRuntime::new("library".into(), Rc::new(RefCell::new(FloConfig::new())));
+        let mut resources = runtime.resources.borrow_mut();
+
+        NativeRuntime::apply_application_action(
+            &mut resources,
+            ApplicationAction::ShowDebugInfo(true),
+        )
+        .unwrap();
+        assert!(resources.debug_info);
+        assert_eq!(
+            resources.config.borrow().get_int("SYSTEM_show_debug_info"),
+            Some(1)
+        );
+
+        NativeRuntime::apply_application_action(
+            &mut resources,
+            ApplicationAction::ShowDebugInfo(false),
+        )
+        .unwrap();
+        assert!(!resources.debug_info);
     }
 
     #[test]

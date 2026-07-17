@@ -46,7 +46,15 @@ pub struct UiSceneState {
     /// Mutable C++ `FloLayout` state, changed by `video-show-loop`,
     /// `video-show-layout`, and `video-switch-interface` events.
     pub layouts: HashMap<(i32, i32), LayoutSceneState>,
+    /// Mutable C++ `FloDisplay::show` state, keyed by interface/display id.
+    pub displays: HashMap<(i32, i32), bool>,
+    /// Current snapshot page for each snapshots display.
+    pub snapshot_pages: HashMap<(i32, i32), usize>,
+    pub snapshot_display_counts: HashMap<(i32, i32), usize>,
+    /// Runtime paramset state shared by bindings and the native renderer.
+    pub paramsets: HashMap<(i32, i32), crate::paramset::FloDisplayParamSet>,
     pub help_page: usize,
+    pub debug_info: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,6 +160,7 @@ enum WidgetKind {
     },
     Bar {
         switched: bool,
+        switch_variable: Option<String>,
     },
     Circle {
         off: i32,
@@ -167,6 +176,10 @@ enum WidgetKind {
         size: (i32, i32),
     },
     Snapshots {
+        size: (i32, i32),
+        margin: i32,
+    },
+    ParamSet {
         size: (i32, i32),
         margin: i32,
     },
@@ -751,12 +764,17 @@ impl XmlDisplay {
         ));
     }
     fn render_at(&mut self, r: &mut dyn Renderer, m: &RenderMetrics, offset: (i32, i32)) {
-        if !self.base.show && !self.base.forceshow {
-            return;
-        }
         let x = m.x(offset.0 + self.base.xpos);
         let y = m.y(offset.1 + self.base.ypos);
         let guard = self.state.read().expect("UI state poisoned");
+        let show = guard
+            .displays
+            .get(&(self.base.iid, self.base.id))
+            .copied()
+            .unwrap_or(self.base.show);
+        if !show && !self.base.forceshow {
+            return;
+        }
         let value = self.value(&guard);
         match &self.kind {
             WidgetKind::Text => {
@@ -792,7 +810,10 @@ impl XmlDisplay {
                 if value != 0.0 { FG } else { DIM },
                 m.scale_y,
             ),
-            WidgetKind::Bar { switched } => {
+            WidgetKind::Bar {
+                switched,
+                switch_variable,
+            } => {
                 let normalized = if self.db_scale {
                     let db = if value > 0.0 {
                         20.0 * value.log10()
@@ -804,7 +825,11 @@ impl XmlDisplay {
                     value.clamp(0.0, 1.0)
                 };
                 let length = (self.bar_scale as f32 * normalized) as i32;
-                let color = if *switched && value == 0.0 {
+                let color = if *switched
+                    && switch_variable
+                        .as_ref()
+                        .map_or(value == 0.0, |name| evaluate(name, &guard.values) == 0.0)
+                {
                     Color(HOT.0, HOT.1, HOT.2, 127)
                 } else {
                     HOT
@@ -885,13 +910,23 @@ impl XmlDisplay {
                     .clamp(0.0, (hi - lo) / step.max(f32::EPSILON))
                     as i32;
                 for index in 0..count {
-                    r.draw(DrawOp::Box(
-                        x + m.x(index * size.0),
-                        y,
-                        x + m.x(index * size.0 + size.0 - 1),
-                        y + m.y(size.1 - 1),
-                        HOT,
-                    ));
+                    if self.orientation == Orientation::Horizontal {
+                        r.draw(DrawOp::Box(
+                            x + m.x(index * size.0),
+                            y,
+                            x + m.x(index * size.0 + size.0 - 1),
+                            y + m.y(size.1 - 1),
+                            HOT,
+                        ));
+                    } else {
+                        r.draw(DrawOp::Box(
+                            x,
+                            y - m.y(index * size.1),
+                            x + m.x(size.0 - 1),
+                            y - m.y(index * size.1 + size.1 - 1),
+                            HOT,
+                        ));
+                    }
                 }
             }
             WidgetKind::Panel { size } => r.draw(DrawOp::Box(
@@ -922,8 +957,18 @@ impl XmlDisplay {
                     (x + m.x(size.0), y + m.y(size.1)),
                     border,
                 ));
-                for (index, name) in guard.snapshots.iter().enumerate() {
-                    let row = y + m.y(*margin + index as i32 * (self.font_size as i32 + 2));
+                let key = (self.base.iid, self.base.id);
+                let page = guard.snapshot_pages.get(&key).copied().unwrap_or(0);
+                let count = guard
+                    .snapshot_display_counts
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(guard.snapshots.len())
+                    .max(1);
+                for local_index in 0..count {
+                    let index = page * count + local_index;
+                    let name = guard.snapshots.get(index).cloned().flatten();
+                    let row = y + m.y(*margin + local_index as i32 * (self.font_size as i32 + 2));
                     if row > y + m.y(size.1) {
                         break;
                     }
@@ -939,9 +984,87 @@ impl XmlDisplay {
                         },
                         x + m.x(*margin),
                         row,
-                        if index == guard.help_page { FG } else { DIM },
+                        DIM,
                         m.scale_y,
                     );
+                }
+            }
+            WidgetKind::ParamSet { size, margin } => {
+                r.draw(DrawOp::Box(
+                    x,
+                    y,
+                    x + m.x(size.0),
+                    y + m.y(size.1),
+                    Color(0, 0, 0, 190),
+                ));
+                let border = Color(0xff, 0x50, 0x20, 255);
+                r.draw(DrawOp::Line((x, y), (x + m.x(size.0), y), border));
+                r.draw(DrawOp::Line(
+                    (x, y + m.y(size.1)),
+                    (x + m.x(size.0), y + m.y(size.1)),
+                    border,
+                ));
+                r.draw(DrawOp::Line((x, y), (x, y + m.y(size.1)), border));
+                r.draw(DrawOp::Line(
+                    (x + m.x(size.0), y),
+                    (x + m.x(size.0), y + m.y(size.1)),
+                    border,
+                ));
+                let key = (self.base.iid, self.base.id);
+                if let Some(paramset) = guard.paramsets.get(&key) {
+                    if let Some(title) = &self.base.title {
+                        self.text(
+                            r,
+                            title.clone(),
+                            x + m.x(size.0 - *margin),
+                            y,
+                            DIM,
+                            m.scale_y,
+                        );
+                    }
+                    if let Some(bank_name) =
+                        paramset.current_bank().and_then(|bank| bank.name.clone())
+                    {
+                        self.text(r, bank_name, x + m.x(*margin), y, DIM, m.scale_y);
+                    }
+                    let spacing = (size.0 - 2 * *margin) / paramset.activeparam.len().max(1) as i32;
+                    let max_value = paramset.current_bank().map_or(0.0, |bank| bank.maxvalue);
+                    for (index, param) in paramset.activeparam.iter().enumerate() {
+                        let bx = x + m.x(*margin + index as i32 * spacing);
+                        let level = if max_value > 0.0 {
+                            (param.as_f32() / max_value).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        };
+                        let baseline = y + m.y(size.1 - *margin);
+                        let max_height = size.1 - *margin * 3;
+                        let height = (max_height as f32 * level) as i32;
+                        let thickness = (spacing / 4).max(1);
+                        if let Some(name) = param.name.clone() {
+                            self.text(r, name, bx + m.x(thickness * 2), baseline, DIM, m.scale_y);
+                        }
+                        r.draw(DrawOp::Box(
+                            bx - m.x(thickness / 2),
+                            baseline,
+                            bx + m.x(thickness / 2),
+                            baseline - m.y(max_height),
+                            Color(0x7f, 0x28, 0x10, 255),
+                        ));
+                        r.draw(DrawOp::Box(
+                            bx - m.x(thickness),
+                            baseline - m.y(height),
+                            bx + m.x(thickness),
+                            baseline,
+                            Color(0x7f, 0x28, 0x10, 255),
+                        ));
+                        r.draw(DrawOp::Box(
+                            bx - m.x(thickness / 2),
+                            baseline - m.y(height),
+                            bx + m.x(thickness / 2),
+                            baseline,
+                            HOT,
+                        ));
+                    }
                 }
             }
             WidgetKind::Browser {
@@ -1282,6 +1405,20 @@ pub fn load_production_scene_at(
     let mut scene = DisplayScene::new();
     let mut layout_displays: Vec<Box<dyn Display>> = Vec::new();
     let mut kinds = BTreeMap::new();
+    let mut display_ids = HashMap::new();
+    for (_, path, text) in &docs {
+        let doc = Document::parse(text).map_err(|e| format!("{}: {e}", path.display()))?;
+        for declare in doc
+            .descendants()
+            .filter(|node| node.has_tag_name("declare"))
+        {
+            if let (Some(name), Some(value)) = (declare.attribute("var"), declare.attribute("init"))
+                && let Ok(value) = value.parse::<i32>()
+            {
+                display_ids.insert(name.to_owned(), value);
+            }
+        }
+    }
     let mut help_lines = Vec::new();
     let mut element_count = 0;
     for (iid, path, text) in &docs {
@@ -1320,6 +1457,7 @@ pub fn load_production_scene_at(
                         &font_specs,
                         Arc::clone(&state),
                         &mut kinds,
+                        &display_ids,
                     )?;
                     scene.displays.push(Box::new(widget));
                 }
@@ -1463,9 +1601,19 @@ fn parse_display(
     fonts: &BTreeMap<String, (PathBuf, u32)>,
     state: SharedUiSceneState,
     kinds: &mut BTreeMap<String, usize>,
+    display_ids: &HashMap<String, i32>,
 ) -> Result<XmlDisplay, String> {
     let name = node.attribute("type").unwrap_or("text");
     *kinds.entry(name.to_string()).or_default() += 1;
+    let display_id = node
+        .attribute("id")
+        .and_then(|value| {
+            value
+                .parse::<i32>()
+                .ok()
+                .or_else(|| display_ids.get(value).copied())
+        })
+        .unwrap_or_else(|| node.attribute("id").map_or(-1, stable_id));
     let pos = parse_normalized(node.attribute("pos").unwrap_or("0,0"), size);
     let font = node.attribute("font").unwrap_or("main").to_string();
     let font_size = fonts.get(&font).map_or(12, |v| v.1) as f32;
@@ -1488,6 +1636,7 @@ fn parse_display(
         },
         "bar" | "bar-switch" => WidgetKind::Bar {
             switched: name == "bar-switch",
+            switch_variable: node.attribute("switchvar").map(str::to_string),
         },
         "circle-switch" => WidgetKind::Circle {
             off: normalized_scalar(node.attribute("size0").unwrap_or("0.01"), size.0),
@@ -1495,9 +1644,9 @@ fn parse_display(
         },
         "squares" => WidgetKind::Squares {
             size: parse_normalized(node.attribute("squaresize").unwrap_or("0.03,0.03"), size),
-            lo: attr_f32(node, "value1", 0.0),
-            hi: attr_f32(node, "value2", 10.0),
-            step: attr_f32(node, "interval", 1.0),
+            lo: attr_f32(node, "firstsquareval", 0.0),
+            hi: attr_f32(node, "lastsquareval", 10.0),
+            step: attr_f32(node, "squareinterval", 1.0),
         },
         "panel" => WidgetKind::Panel {
             size: parse_normalized(node.attribute("size").unwrap_or("0.2,0.2"), size),
@@ -1506,6 +1655,49 @@ fn parse_display(
             size: parse_normalized(node.attribute("size").unwrap_or("0.3,0.22"), size),
             margin: normalized_scalar(node.attribute("margin").unwrap_or("0.01"), size.0),
         },
+        "paramset" => {
+            let display_size = parse_normalized(node.attribute("size").unwrap_or("0.3,0.22"), size);
+            let numactiveparams = attr_u32(node, "numactiveparams", 8) as usize;
+            let banks = node
+                .children()
+                .filter(|child| child.has_tag_name("bank"))
+                .collect::<Vec<_>>();
+            let mut paramset = crate::paramset::FloDisplayParamSet::new(
+                node.attribute("name").unwrap_or("NONAME"),
+                iid,
+                display_id,
+                numactiveparams,
+                banks.len(),
+                display_size.0,
+                display_size.1,
+            );
+            for (bank_index, bank_node) in banks.into_iter().enumerate() {
+                let bank = &mut paramset.banks[bank_index];
+                bank.name = bank_node.attribute("name").map(str::to_string);
+                bank.maxvalue = attr_f32(bank_node, "maxvalue", 1.0);
+                bank.params = bank_node
+                    .children()
+                    .filter(|child| child.has_tag_name("param"))
+                    .map(|param_node| {
+                        crate::paramset::ParamSetParam::new(
+                            param_node.attribute("name"),
+                            attr_f32(param_node, "init", 0.0),
+                        )
+                    })
+                    .collect();
+                bank.numparams = bank.params.len();
+            }
+            paramset.link_active_params();
+            state
+                .write()
+                .expect("UI state poisoned")
+                .paramsets
+                .insert((iid, display_id), paramset);
+            WidgetKind::ParamSet {
+                size: display_size,
+                margin: normalized_scalar(node.attribute("margin").unwrap_or("0.01"), size.0),
+            }
+        }
         "browser" => WidgetKind::Browser {
             browse_type: node.attribute("browsetype").unwrap_or("BROWSE_loop").into(),
             expand: parse_quad_normalized(
@@ -1521,11 +1713,25 @@ fn parse_display(
             .and_then(|v| v.parse().ok())
             .unwrap_or(iid),
     );
-    base.id = node.attribute("id").map(stable_id).unwrap_or(-1);
+    base.id = display_id;
     base.title = node.attribute("title").map(str::to_string);
     base.xpos = pos.0;
     base.ypos = pos.1;
     base.show = node.attribute("show").unwrap_or("1") != "0";
+    state
+        .write()
+        .expect("UI state poisoned")
+        .displays
+        .insert((base.iid, base.id), base.show);
+    if matches!(name, "snapshots") {
+        let display_size = parse_normalized(node.attribute("size").unwrap_or("0.3,0.22"), size);
+        let count = (display_size.1 / (font_size as i32 + 2).max(1)).max(1) as usize;
+        let mut state = state.write().expect("UI state poisoned");
+        state
+            .snapshot_display_counts
+            .insert((base.iid, base.id), count);
+        state.snapshot_pages.entry((base.iid, base.id)).or_insert(0);
+    }
     let mut display = XmlDisplay {
         base,
         kind,
@@ -1559,6 +1765,7 @@ fn parse_display(
             fonts,
             Arc::clone(&display.state),
             kinds,
+            display_ids,
         )?);
     }
     Ok(display)

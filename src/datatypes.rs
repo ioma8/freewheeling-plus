@@ -113,7 +113,7 @@ impl Range {
 // UserVariable
 // ============================================================
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct UserVariable {
     pub name: Option<String>,
     pub type_: CoreDataType,
