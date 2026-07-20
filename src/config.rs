@@ -1593,7 +1593,9 @@ impl FloConfig {
             .copied()
             // The C++ internal FluidSynth input follows all configured
             // external inputs and inherits its `<fluidsynth stereo>` flag.
-            .unwrap_or(input_idx == self.external_audio_input_stereo.len() && self.fluidsynth.stereo)
+            .unwrap_or(
+                input_idx == self.external_audio_input_stereo.len() && self.fluidsynth.stereo,
+            )
     }
 
     pub fn is_stereo_output(&self, _output_idx: usize) -> bool {

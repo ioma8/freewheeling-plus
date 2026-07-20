@@ -294,8 +294,6 @@ impl LoopBlockChain {
     }
 }
 
-
-
 struct TransferSlot {
     state: AtomicU8,
     generation: AtomicU32,
