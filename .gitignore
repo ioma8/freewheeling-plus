@@ -4,9 +4,12 @@
 # Local runtime data and diagnostic output
 .fweelin/
 *.wav
+!fixtures/cpp-golden/codec/*.wav
 *.aiff
 *.flac
+!fixtures/cpp-golden/codec/*.flac
 *.ogg
+!fixtures/cpp-golden/codec/*.ogg
 *.sf2
 !data/basic.sf2
 freewheeling-diagnostic-*/
