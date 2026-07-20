@@ -775,7 +775,7 @@ mod tests {
     fn vera_fixture_is_byte_deterministic() {
         fn render() -> VideoFrame {
             let mut renderer =
-                SoftwareRgbaRenderer::new(include_bytes!("../../data/Vera.ttf"), 12.0).unwrap();
+                SoftwareRgbaRenderer::new(include_bytes!("../data/Vera.ttf"), 12.0).unwrap();
             renderer.begin_frame(96, 32);
             renderer.draw(DrawOp::Box(
                 0,
