@@ -1357,26 +1357,7 @@ macro_rules! midi_value_input_event {
                 }
             }
         }
-        impl Event for $name {
-            fn get_type(&self) -> EventType {
-                EventType::$event_type
-            }
-            fn as_any(&self) -> &dyn std::any::Any {
-                self
-            }
-            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-                self
-            }
-            fn clone_box(&self) -> Box<dyn Event> {
-                Box::new(self.clone())
-            }
-            fn get_num_params(&self) -> usize {
-                1
-            }
-            fn get_param(&self, idx: usize) -> Option<EventParameter> {
-                MIDI_VALUE_INPUT_PARAMS.get(idx).copied()
-            }
-        }
+        impl_event!($name, $event_type, MIDI_VALUE_INPUT_PARAMS);
     };
 }
 
@@ -1408,20 +1389,7 @@ macro_rules! midi_unit_input_event {
                 Self::new()
             }
         }
-        impl Event for $name {
-            fn get_type(&self) -> EventType {
-                EventType::$event_type
-            }
-            fn as_any(&self) -> &dyn std::any::Any {
-                self
-            }
-            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-                self
-            }
-            fn clone_box(&self) -> Box<dyn Event> {
-                Box::new(self.clone())
-            }
-        }
+        impl_event!($name, $event_type);
     };
 }
 
