@@ -435,7 +435,7 @@ mod tests {
         let mut config = FluidLiteConfig::new(48_000.0);
         config.soundfonts.push(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../data")
+                .join("data")
                 .join("basic.sf2"),
         );
         FluidLiteBackend::new(config).expect("bundled basic.sf2 must be a loadable SoundFont");

@@ -1981,7 +1981,7 @@ mod tests {
     }
 
     fn data() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../data")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data")
     }
     #[test]
     fn loads_every_real_graphics_fixture() {

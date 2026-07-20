@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 fn authoritative_config() -> FloConfig {
     let mut config = FloConfig::new();
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../data/fweelin.xml");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/fweelin.xml");
     config
         .load_authoritative(&path)
         .expect("load actual data/fweelin.xml");
@@ -127,7 +127,7 @@ fn bounded_batch_reports_overflow_instead_of_dropping_continued_actions() {
 fn actual_save_loop_and_scene_bindings_carry_configured_codec_and_save_mode() {
     let mut config = FloConfig::new();
     config.set_int_variable("SYSTEM_loopid_lastrecord_0", 12);
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../data/fweelin.xml");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/fweelin.xml");
     config.load_authoritative(&path).unwrap();
     config
         .get_variable_mut("VAR_keyheld_shift")

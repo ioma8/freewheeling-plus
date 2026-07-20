@@ -46,7 +46,7 @@ fn root() -> PathBuf {
 }
 
 fn render(drawable: (u32, u32), logo_started: Instant) -> VideoFrame {
-    let scene = load_production_scene_at(root().join("../data"), logo_started)
+    let scene = load_production_scene_at(root().join("data"), logo_started)
         .expect("load production XML scene");
     assert_eq!(scene.manifest.logical_size, (640, 480));
     let mut renderer = production_software_renderer(scene).expect("create software renderer");

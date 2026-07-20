@@ -287,6 +287,7 @@ mod native {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub struct JackAudioMidiBackend {
         client: Option<Client>,
         active: Option<AsyncClient<Notifications, JackProcess>>,
@@ -498,13 +499,9 @@ mod native {
         Consumer<TransportCommand>,
     );
 
+    #[derive(Default)]
     pub struct DirectAlsaMixerBackend {
         ctl: Option<HCtl>,
-    }
-    impl Default for DirectAlsaMixerBackend {
-        fn default() -> Self {
-            Self { ctl: None }
-        }
     }
     impl MixerBackend for DirectAlsaMixerBackend {
         fn open(&mut self, card: &str) -> Result<(), String> {

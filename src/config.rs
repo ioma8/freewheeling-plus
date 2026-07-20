@@ -3085,7 +3085,7 @@ mod authoritative_xml_tests {
     use super::*;
 
     fn fixture() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/fweelin.xml")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("data/fweelin.xml")
     }
 
     #[test]
