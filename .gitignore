@@ -8,6 +8,7 @@
 *.flac
 *.ogg
 *.sf2
+!data/basic.sf2
 freewheeling-diagnostic-*/
 
 # Editor
