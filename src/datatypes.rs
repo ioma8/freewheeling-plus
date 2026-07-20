@@ -18,7 +18,7 @@
 */
 
 use std::fmt;
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Maximum number of reader and writer threads
@@ -622,21 +622,43 @@ impl<T: Default + Clone + Copy> SRMWRingBuffer<T> {
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum ItemState {
-    Waiting = 0,
-    Busy = 1,
-    Done = 2,
+    Waiting,
+    Busy,
+    Done,
+}
+
+impl From<ItemState> for u8 {
+    fn from(s: ItemState) -> u8 {
+        match s {
+            ItemState::Waiting => 0,
+            ItemState::Busy => 1,
+            ItemState::Done => 2,
+        }
+    }
+}
+
+impl TryFrom<u8> for ItemState {
+    type Error = ();
+    fn try_from(v: u8) -> Result<Self, ()> {
+        match v {
+            0 => Ok(ItemState::Waiting),
+            1 => Ok(ItemState::Busy),
+            2 => Ok(ItemState::Done),
+            _ => Err(()),
+        }
+    }
 }
 
 struct RTStoreItem<T: Default> {
     item: T,
-    status: AtomicI32,
+    status: AtomicU8,
 }
 
 impl<T: Default> RTStoreItem<T> {
     fn new() -> Self {
         RTStoreItem {
             item: T::default(),
-            status: AtomicI32::new(ItemState::Done as i32),
+            status: AtomicU8::new(ItemState::Done.into()),
         }
     }
 }
@@ -657,17 +679,14 @@ impl<T: Default> RTStore<T> {
         find_state: ItemState,
         replace_state: ItemState,
     ) -> Option<(usize, &T)> {
+        let find = u8::from(find_state);
+        let replace = u8::from(replace_state);
         self.items
             .iter()
             .enumerate()
             .find(|(_, item)|
                 item.status
-                    .compare_exchange(
-                        find_state as i32,
-                        replace_state as i32,
-                        Ordering::AcqRel,
-                        Ordering::Relaxed,
-                    )
+                    .compare_exchange(find, replace, Ordering::AcqRel, Ordering::Relaxed)
                     .is_ok()
             )
             .map(|(i, item)| (i, &item.item))
@@ -682,14 +701,11 @@ impl<T: Default> RTStore<T> {
         if idx >= self.num_items {
             return false;
         }
+        let expect = u8::from(expect_state);
+        let new = u8::from(new_state);
         self.items[idx]
             .status
-            .compare_exchange(
-                expect_state as i32,
-                new_state as i32,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            )
+            .compare_exchange(expect, new, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
     }
 

@@ -141,11 +141,26 @@ fn pulse_synced_loop_position(
         % loop_len
 }
 
-const TRANSFER_FREE: u8 = 0;
-const TRANSFER_CONTROL: u8 = 1;
-const TRANSFER_QUEUED: u8 = 2;
-const TRANSFER_CALLBACK: u8 = 3;
-const TRANSFER_EXPORTED: u8 = 4;
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TransferState {
+    Free,
+    Control,
+    Queued,
+    Callback,
+    Exported,
+}
+
+impl From<TransferState> for u8 {
+    fn from(s: TransferState) -> u8 {
+        match s {
+            TransferState::Free => 0,
+            TransferState::Control => 1,
+            TransferState::Queued => 2,
+            TransferState::Callback => 3,
+            TransferState::Exported => 4,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PcmTransferHandle {
@@ -314,7 +329,7 @@ impl TransferPool {
     fn new(count: usize, capacity: usize) -> Self {
         let slots = (0..count)
             .map(|_| TransferSlot {
-                state: AtomicU8::new(TRANSFER_FREE),
+                state: AtomicU8::new(TransferState::Free.into()),
                 generation: AtomicU32::new(0),
                 pcm: UnsafeCell::new(StereoTransfer {
                     left: vec![0.0; capacity],
@@ -337,8 +352,8 @@ impl TransferPool {
             if slot
                 .state
                 .compare_exchange(
-                    TRANSFER_FREE,
-                    TRANSFER_CONTROL,
+                    TransferState::Free.into(),
+                    TransferState::Control.into(),
                     Ordering::AcqRel,
                     Ordering::Relaxed,
                 )
@@ -689,7 +704,7 @@ impl RuntimeControls {
         let slot = self
             .transfers
             .slot(handle)
-            .filter(|slot| slot.state.load(Ordering::Acquire) == TRANSFER_CONTROL)
+            .filter(|slot| slot.state.load(Ordering::Acquire) == TransferState::Control.into())
             .ok_or(PcmTransferError::InvalidHandle)?;
         // SAFETY: CONTROL is exclusively owned by this endpoint.
         let pcm = unsafe { &mut *slot.pcm.get() };
@@ -715,7 +730,7 @@ impl RuntimeControls {
             .slot(handle)
             .ok_or(PcmTransferError::InvalidHandle)?;
         let state = transfer.state.load(Ordering::Acquire);
-        if state != TRANSFER_CONTROL && state != TRANSFER_EXPORTED {
+        if state != TransferState::Control.into() && state != TransferState::Exported.into() {
             return Err(PcmTransferError::InvalidHandle);
         }
         // SAFETY: CONTROL/EXPORTED grants this endpoint exclusive PCM and
@@ -726,7 +741,7 @@ impl RuntimeControls {
         scope.compute(&pcm.left[..pcm.len], &pcm.right[..pcm.len]);
         transfer
             .state
-            .compare_exchange(state, TRANSFER_QUEUED, Ordering::AcqRel, Ordering::Relaxed)
+            .compare_exchange(state, TransferState::Queued.into(), Ordering::AcqRel, Ordering::Relaxed)
             .map_err(|_| PcmTransferError::InvalidHandle)?;
         let command = RuntimeCommand::ImportLoop {
             slot,
@@ -736,7 +751,7 @@ impl RuntimeControls {
             gain,
         };
         if self.commands.try_send(command).is_err() {
-            transfer.state.store(TRANSFER_CONTROL, Ordering::Release);
+            transfer.state.store(TransferState::Control.into(), Ordering::Release);
             return Err(PcmTransferError::CommandQueueFull);
         }
         Ok(())
@@ -748,13 +763,13 @@ impl RuntimeControls {
     ) -> Result<PcmTransferHandle, PcmTransferError> {
         let replacement = self.transfers.acquire()?;
         let transfer = self.transfers.slot(replacement).unwrap();
-        transfer.state.store(TRANSFER_QUEUED, Ordering::Release);
+        transfer.state.store(TransferState::Queued.into(), Ordering::Release);
         if self
             .commands
             .try_send(RuntimeCommand::RequestLoopExport { slot, replacement })
             .is_err()
         {
-            transfer.state.store(TRANSFER_FREE, Ordering::Release);
+            transfer.state.store(TransferState::Free.into(), Ordering::Release);
             return Err(PcmTransferError::CommandQueueFull);
         }
         Ok(replacement)
@@ -768,7 +783,7 @@ impl RuntimeControls {
         let slot = self
             .transfers
             .slot(handle)
-            .filter(|slot| slot.state.load(Ordering::Acquire) == TRANSFER_EXPORTED)
+            .filter(|slot| slot.state.load(Ordering::Acquire) == TransferState::Exported.into())
             .ok_or(PcmTransferError::InvalidHandle)?;
         // SAFETY: EXPORTED is exclusively read by control until release.
         let pcm = unsafe { &*slot.pcm.get() };
@@ -781,7 +796,7 @@ impl RuntimeControls {
             .slot(handle)
             .ok_or(PcmTransferError::InvalidHandle)?;
         let state = slot.state.load(Ordering::Acquire);
-        if state != TRANSFER_CONTROL && state != TRANSFER_EXPORTED {
+        if state != TransferState::Control.into() && state != TransferState::Exported.into() {
             return Err(PcmTransferError::InvalidHandle);
         }
         // Import transfers lend their contiguous vectors to the live loop in
@@ -799,7 +814,7 @@ impl RuntimeControls {
         }
         pcm.len = 0;
         slot.state
-            .compare_exchange(state, TRANSFER_FREE, Ordering::AcqRel, Ordering::Relaxed)
+            .compare_exchange(state, TransferState::Free.into(), Ordering::AcqRel, Ordering::Relaxed)
             .map(|_| ())
             .map_err(|_| PcmTransferError::InvalidHandle)
     }
@@ -2440,7 +2455,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
             } => {
                 let Some(target) = self.loops.get_mut(slot as usize) else {
                     if let Some(transfer) = self.transfers.slot(handle) {
-                        transfer.state.store(TRANSFER_EXPORTED, Ordering::Release);
+                        transfer.state.store(TransferState::Exported.into(), Ordering::Release);
                     }
                     self.send_status(RuntimeStatus::TransferError {
                         slot,
@@ -2452,7 +2467,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 let Some(transfer) = self
                     .transfers
                     .slot(handle)
-                    .filter(|item| item.state.load(Ordering::Acquire) == TRANSFER_QUEUED)
+                    .filter(|item| item.state.load(Ordering::Acquire) == TransferState::Queued.into())
                 else {
                     self.send_status(RuntimeStatus::TransferError {
                         slot,
@@ -2461,7 +2476,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                     });
                     return;
                 };
-                transfer.state.store(TRANSFER_CALLBACK, Ordering::Release);
+                transfer.state.store(TransferState::Callback.into(), Ordering::Release);
                 // SAFETY: CALLBACK grants this audio thread exclusive access.
                 let pcm = unsafe { &mut *transfer.pcm.get() };
                 // SAFETY: CALLBACK grants the same exclusive transfer owner
@@ -2506,13 +2521,13 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 // chunks intentionally remain absent rather than being
                 // continued on the DSP callback.
                 target.scope.complete = true;
-                transfer.state.store(TRANSFER_EXPORTED, Ordering::Release);
+                transfer.state.store(TransferState::Exported.into(), Ordering::Release);
                 self.send_status(RuntimeStatus::LoopImported { slot, handle });
             }
             RuntimeCommand::RequestLoopExport { slot, replacement } => {
                 if self.export_job.is_some() {
                     if let Some(transfer) = self.transfers.slot(replacement) {
-                        transfer.state.store(TRANSFER_EXPORTED, Ordering::Release);
+                        transfer.state.store(TransferState::Exported.into(), Ordering::Release);
                     }
                     self.send_status(RuntimeStatus::TransferError {
                         slot,
@@ -2526,7 +2541,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                         && !matches!(item.mode, LoopMode::Recording | LoopMode::Overdubbing)
                 }) else {
                     if let Some(transfer) = self.transfers.slot(replacement) {
-                        transfer.state.store(TRANSFER_EXPORTED, Ordering::Release);
+                        transfer.state.store(TransferState::Exported.into(), Ordering::Release);
                     }
                     self.send_status(RuntimeStatus::TransferError {
                         slot,
@@ -2538,7 +2553,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 let Some(transfer) = self
                     .transfers
                     .slot(replacement)
-                    .filter(|item| item.state.load(Ordering::Acquire) == TRANSFER_QUEUED)
+                    .filter(|item| item.state.load(Ordering::Acquire) == TransferState::Queued.into())
                 else {
                     self.send_status(RuntimeStatus::TransferError {
                         slot,
@@ -2547,7 +2562,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                     });
                     return;
                 };
-                transfer.state.store(TRANSFER_CALLBACK, Ordering::Release);
+                transfer.state.store(TransferState::Callback.into(), Ordering::Release);
                 // SAFETY: CALLBACK grants this audio thread exclusive access.
                 let pcm = unsafe { &mut *transfer.pcm.get() };
                 pcm.len = target.len;
@@ -2574,7 +2589,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 self.stop_recording(false);
                 if let Some(job) = self.export_job.take() {
                     if let Some(transfer) = self.transfers.slot(job.handle) {
-                        transfer.state.store(TRANSFER_EXPORTED, Ordering::Release);
+                        transfer.state.store(TransferState::Exported.into(), Ordering::Release);
                     }
                     self.send_status(RuntimeStatus::TransferError {
                         slot: job.slot,
@@ -2616,7 +2631,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
         );
         job.cursor = end;
         if end == job.metadata.frames as usize {
-            transfer.state.store(TRANSFER_EXPORTED, Ordering::Release);
+            transfer.state.store(TransferState::Exported.into(), Ordering::Release);
             self.send_status(RuntimeStatus::LoopExported {
                 slot: job.slot,
                 handle: job.handle,
