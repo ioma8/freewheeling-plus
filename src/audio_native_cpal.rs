@@ -783,6 +783,7 @@ fn capture_callback(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn playback_callback(
     mut consumer: Consumer<[f32; NUM_CHANNELS]>,
     processor: AudioCallbackFn,

@@ -508,10 +508,10 @@ impl<const N: usize> RuntimeEventDispatcher<N> {
                 let key = (int(p, "interfaceid")?, int(p, "displayid")?);
                 let relative = int(p, "paramidx")? as isize;
                 let target = variable_ref(p, "absidx")?;
-                if let Some(paramset) = config.paramsets.get(&key) {
-                    if let Some(index) = paramset.absolute_param_index(relative) {
-                        config.set_int_variable(target, index as i32);
-                    }
+                if let Some(paramset) = config.paramsets.get(&key)
+                    && let Some(index) = paramset.absolute_param_index(relative)
+                {
+                    config.set_int_variable(target, index as i32);
                 }
             }
             EventType::ParamSetGetParam => {

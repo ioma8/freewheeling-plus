@@ -65,11 +65,11 @@ fn imported_pcm_is_audible_and_export_roundtrips_exactly() {
         // At frame zero the C++ adjustment also observes curlimitvol above
         // max gain and stops the positive release delta, so it is applied
         // exactly once.
-        let expected = source * if index == 0 { 1.0 } else { 1.000_020 };
+        let expected = source * if index == 0 { 1.0 } else { 1.000_02 };
         assert!((actual - expected).abs() < 0.000_001, "left frame {index}");
     }
     for (index, (&actual, &source)) in audible.1.iter().zip(&source_right).enumerate() {
-        let expected = source * if index == 0 { 1.0 } else { 1.000_020 };
+        let expected = source * if index == 0 { 1.0 } else { 1.000_02 };
         assert!((actual - expected).abs() < 0.000_001, "right frame {index}");
     }
     assert_eq!(

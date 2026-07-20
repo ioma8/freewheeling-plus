@@ -309,6 +309,7 @@ impl UserVariable {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_delta(&self, arg: &UserVariable) -> UserVariable {
         let mut ret = UserVariable::new();
         ret.type_ = CoreDataType::Char;
@@ -451,7 +452,7 @@ impl RTRWThreads {
     pub fn register_reader_or_writer() -> usize {
         let id = std::thread::current().id();
         let mut ids = get_thread_ids().lock().unwrap();
-        let idx = NUM_RW_THREADS.load(Ordering::Acquire);
+        let idx = ids.len();
         assert!(
             idx < MAX_RW_THREADS,
             "Too many writer threads for Ring Buffer!"
@@ -459,7 +460,6 @@ impl RTRWThreads {
         ids.push(id);
         let count = idx + 1;
         NUM_RW_THREADS.store(count, Ordering::Release);
-        drop(ids);
         count
     }
 

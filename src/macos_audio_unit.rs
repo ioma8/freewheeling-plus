@@ -304,6 +304,9 @@ pub struct MacosAudioUnitBackend {
     route_poll_after_ms: AtomicU64,
 }
 
+// Safety: MacosAudioUnitBackend is created, used, and dropped on the audio
+// thread only. It is never accessed concurrently. The Send impl allows it to
+// be moved into the audio callback closure.
 unsafe impl Send for MacosAudioUnitBackend {}
 
 impl MacosAudioUnitBackend {
@@ -725,10 +728,7 @@ impl AudioBackend for MacosAudioUnitBackend {
             .take_callback()
             .ok_or("audio callback is unavailable for recovery")?;
         self.close();
-        let info = match self.open("FreeWheeling") {
-            Ok(info) => info,
-            Err(error) => return Err(error),
-        };
+        let info = self.open("FreeWheeling")?;
         self.activate(callback).map(|()| info)
     }
 

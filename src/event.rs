@@ -585,6 +585,8 @@ impl EventType {
         let (name, slow) = match self {
             InputKey => ("key", false),
             InputJoystickButton => ("joybutton", false),
+            InputMouseButton => ("mousebutton", false),
+            InputMouseMotion => ("mousemotion", false),
             InputMIDIKey => ("midikey", false),
             InputMIDIController => ("midicontroller", false),
             InputMIDIProgramChange => ("midiprogramchange", false),
@@ -600,7 +602,14 @@ impl EventType {
             InputMIDIReset => ("midireset", false),
             InputMIDIClock => ("midiclock", false),
             InputMIDIStartStop => ("midistartstop", false),
+            EndRecord => ("end-record", false),
+            LoopList => ("loop-list", false),
+            SceneMarker => ("scene-marker", false),
+            TriggerSet => ("trigger-set", false),
             ALSAMixerControlSet => ("alsa-mixer-control-set", true),
+            AddProcessor => ("add-processor", false),
+            DelProcessor => ("del-processor", false),
+            CleanupProcessor => ("cleanup-processor", false),
             LoopClicked => ("loop-clicked", false),
             GoSub => ("go-sub", false),
             StartSession => ("start-freewheeling", false),
@@ -698,6 +707,8 @@ impl EventType {
         match name {
             "key" => Some(EventType::InputKey),
             "joybutton" => Some(EventType::InputJoystickButton),
+            "mousebutton" => Some(EventType::InputMouseButton),
+            "mousemotion" => Some(EventType::InputMouseMotion),
             "midikey" => Some(EventType::InputMIDIKey),
             "midicontroller" => Some(EventType::InputMIDIController),
             "midiprogramchange" => Some(EventType::InputMIDIProgramChange),
@@ -713,8 +724,15 @@ impl EventType {
             "midireset" => Some(EventType::InputMIDIReset),
             "midiclock" => Some(EventType::InputMIDIClock),
             "midistartstop" => Some(EventType::InputMIDIStartStop),
+            "end-record" => Some(EventType::EndRecord),
+            "loop-list" => Some(EventType::LoopList),
+            "scene-marker" => Some(EventType::SceneMarker),
+            "trigger-set" => Some(EventType::TriggerSet),
             "go-sub" => Some(EventType::GoSub),
             "loop-clicked" => Some(EventType::LoopClicked),
+            "add-processor" => Some(EventType::AddProcessor),
+            "del-processor" => Some(EventType::DelProcessor),
+            "cleanup-processor" => Some(EventType::CleanupProcessor),
             "alsa-mixer-control-set" => Some(EventType::ALSAMixerControlSet),
             "browser-move-to-item" => Some(EventType::BrowserMoveToItem),
             "browser-move-to-item-absolute" => Some(EventType::BrowserMoveToItemAbsolute),
@@ -4647,9 +4665,11 @@ impl EventManager {
             })
             .expect("event dispatch thread");
 
-        // The public queue remains the authoritative queue. The worker is
-        // replaced below by a manager-owned dispatcher in process_pending;
-        // keeping this worker alive preserves the C++ wake/sleep lifecycle.
+        // The worker thread and process_pending() both drain the same queue.
+        // In production the main thread calls process_pending() from the SDL
+        // event loop, making the worker redundant.  The worker is preserved
+        // for C++ lifecycle compatibility; remove it once the inline dispatch
+        // path is confirmed sufficient in all deployment scenarios.
 
         EventManager {
             listeners: worker_listeners,

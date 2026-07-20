@@ -10,6 +10,7 @@ use crate::core_startup::{StartupConfig, StartupServices};
 /// The explicitly owned application domains.  The fields are intentionally
 /// public: adapters can inspect their state without making the façade know
 /// about JACK, ALSA, SDL, or a particular persistence implementation.
+#[allow(dead_code)]
 pub struct FweelinComponents<Au, Mi, Vi, Br, Co, Pe> {
     pub audio: Au,
     pub midi: Mi,

@@ -954,13 +954,11 @@ impl FloConfig {
                             name: name.to_owned(),
                             value: value.parse().map_err(|_| "invalid fluidsynth setnum")?,
                         })
-                    } else if let Some(value) = node.attribute("setstr") {
-                        Some(FluidSetting::Text {
+                    } else {
+                        node.attribute("setstr").map(|value| FluidSetting::Text {
                             name: name.to_owned(),
                             value: value.to_owned(),
                         })
-                    } else {
-                        None
                     };
                     if let Some(setting) = setting {
                         self.fluidsynth.settings.push(setting);
@@ -1595,9 +1593,7 @@ impl FloConfig {
             .copied()
             // The C++ internal FluidSynth input follows all configured
             // external inputs and inherits its `<fluidsynth stereo>` flag.
-            .unwrap_or_else(|| {
-                input_idx == self.external_audio_input_stereo.len() && self.fluidsynth.stereo
-            })
+            .unwrap_or(input_idx == self.external_audio_input_stereo.len() && self.fluidsynth.stereo)
     }
 
     pub fn is_stereo_output(&self, _output_idx: usize) -> bool {

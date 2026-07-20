@@ -174,10 +174,10 @@ fn write_snapshot() -> io::Result<()> {
     }
     if let Some(path) = &profile.output_path {
         let mut file = std::fs::File::create(path)?;
-        return report(&profile, &mut file);
+        return report(profile, &mut file);
     }
     let mut stderr = io::stderr().lock();
-    report(&profile, &mut stderr)
+    report(profile, &mut stderr)
 }
 
 #[cfg(test)]

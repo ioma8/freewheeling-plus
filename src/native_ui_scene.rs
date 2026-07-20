@@ -1189,6 +1189,7 @@ impl XmlDisplay {
 /// Exact structural counterpart of C++ `LoopTray::Draw` and `Draw_Item`.
 /// The normal browser renderer cannot be reused here: a tray item is a
 /// `LoopTrayItem` keyed by a loop slot and invokes `VideoIO::DrawLoop`.
+#[allow(clippy::too_many_arguments)]
 fn render_loop_tray(
     r: &mut dyn Renderer,
     m: &RenderMetrics,

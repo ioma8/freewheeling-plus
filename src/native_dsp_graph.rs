@@ -233,6 +233,7 @@ struct LoopStorageBlock {
 
 /// Callback-safe counterpart to C++'s `AudioBlock::first`/`next` chain.
 /// Linking/unlinking an already allocated node performs no allocation.
+#[derive(Default)]
 struct LoopBlockChain {
     first: Option<Box<LoopStorageBlock>>,
     /// Stable because every node is individually heap allocated. This mirrors
@@ -293,15 +294,7 @@ impl LoopBlockChain {
     }
 }
 
-impl Default for LoopBlockChain {
-    fn default() -> Self {
-        Self {
-            first: None,
-            tail: None,
-            count: 0,
-        }
-    }
-}
+
 
 struct TransferSlot {
     state: AtomicU8,
@@ -1073,6 +1066,7 @@ impl LoopScopeCache {
 /// vectors/rings have fixed capacity before activation; consuming or returning
 /// a block only moves an already allocated `StereoTransfer`.
 struct LoopStoragePool {
+    #[allow(clippy::vec_box)]
     free: Vec<Box<LoopStorageBlock>>,
     refills: RealtimeReceiver<Box<LoopStorageBlock>>,
     returned: RealtimeSender<Box<LoopStorageBlock>>,
@@ -1203,6 +1197,7 @@ impl Drop for LoopStorageRefiller {
     }
 }
 
+#[allow(clippy::vec_box)]
 fn refill_loop_storage(
     refills: &mut RealtimeSender<Box<LoopStorageBlock>>,
     returned: &mut RealtimeReceiver<Box<LoopStorageBlock>>,
@@ -1961,10 +1956,11 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                     target.gain_delta = 1.0;
                     target.pulse_synced = self.pulse_sync_active;
                     target.pulse_beats = 0;
-                    target.capture_alignment_frames = self
-                        .pulse_sync_active
-                        .then_some(self.recording_alignment_frames)
-                        .unwrap_or(0);
+                    target.capture_alignment_frames = if self.pulse_sync_active {
+                        self.recording_alignment_frames
+                    } else {
+                        0
+                    };
                     target.boundary_fade_position = None;
                     target.recent_peak = 0.0;
                     target.overdub_jump.reset();
@@ -1978,10 +1974,11 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                     self.recording_pulse_beats = 0;
                     self.recording_pulse_extension_applied = false;
                     self.recording_started_late = false;
-                    self.recording_start_phase = self
-                        .pulse_sync_active
-                        .then_some(self.pulse_position)
-                        .unwrap_or(0);
+                    self.recording_start_phase = if self.pulse_sync_active {
+                        self.pulse_position
+                    } else {
+                        0
+                    };
                     self.recording_elapsed_frames = 0;
                     self.recording_stop_target_len = None;
                     if self.pulse_sync_active {
@@ -2860,7 +2857,7 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                             if slot.pulse_synced
                                 && slot.pulse_beats != 0
                                 && slot.len != 0
-                                && self.pulse_long_count % slot.pulse_beats == 0 =>
+                                && self.pulse_long_count.is_multiple_of(slot.pulse_beats) =>
                         {
                             let expected = pulse_synced_loop_position(
                                 self.pulse_frames,
@@ -3828,11 +3825,9 @@ mod tests {
             .try_command(RuntimeCommand::RequestSnapshot)
             .unwrap();
         run(&mut processor, &[], &[]);
-        let snapshot = loop {
-            match controls.try_status().expect("expected status") {
-                RuntimeStatus::Snapshot(snapshot) => break snapshot,
-                other => panic!("unexpected status: {other:?}"),
-            }
+        let snapshot = match controls.try_status().expect("expected status") {
+            RuntimeStatus::Snapshot(snapshot) => snapshot,
+            other => panic!("unexpected status: {other:?}"),
         };
         assert_eq!(snapshot.pulse_long_length, 6);
         assert_eq!(snapshot.pulse_long_count, 1);
@@ -4018,7 +4013,7 @@ mod tests {
         for _ in 0..(3800 / 64) {
             run(&mut processor, &silence, &silence);
         }
-        run(&mut processor, &vec![0.0; 3800 % 64], &vec![0.0; 3800 % 64]);
+        run(&mut processor, &[0.0; 3800 % 64], &[0.0; 3800 % 64]);
         assert_eq!(processor.pulse_position, 3800);
 
         controls
@@ -4037,7 +4032,7 @@ mod tests {
         for _ in 0..(5399 / 64) {
             run(&mut processor, &signal, &signal);
         }
-        run(&mut processor, &vec![0.5; 5399 % 64], &vec![0.5; 5399 % 64]);
+        run(&mut processor, &[0.5; 5399 % 64], &[0.5; 5399 % 64]);
         assert_eq!(processor.loops[0].len, 5200);
         // A full beat has completed since the actual (post-wait) start, so
         // the late-start heuristic must no longer apply.

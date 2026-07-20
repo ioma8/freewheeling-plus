@@ -222,6 +222,9 @@ impl<S: CoreServices> Core<S> {
 
 impl<S: CoreServices> Drop for Core<S> {
     fn drop(&mut self) {
+        // Safe to call even if the user already called shutdown() —
+        // shutdown() guards on setup_complete and each close_* method
+        // is idempotent (NativeComponents tracks per-resource state).
         self.shutdown();
     }
 }

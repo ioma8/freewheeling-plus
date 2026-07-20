@@ -220,10 +220,10 @@ impl<A: RootApp, Q: CommandQueue> RootProcessor<A, Q> {
         let (pre_left, pre_right) = self.prework.split_at(split);
         for channel in 0..if self.stereo { 2 } else { 1 } {
             let previous = if channel == 0 { pre_left } else { pre_right };
-            for frame in 0..count {
+            for (frame, prev) in previous.iter().enumerate().take(count) {
                 let ramp = frame as f32 / DEFAULT_SMOOTH_LENGTH as f32;
                 buffers.outputs[channel][frame] =
-                    buffers.outputs[channel][frame] * ramp + previous[frame] * (1.0 - ramp);
+                    buffers.outputs[channel][frame] * ramp + prev * (1.0 - ramp);
             }
         }
         self.prewritten = false;

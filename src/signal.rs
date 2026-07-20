@@ -69,10 +69,14 @@ pub fn format_signal_message(sig: c_int, buf: &mut [u8]) -> usize {
 
 fn dispatch_write(msg: &[u8]) {
     unsafe {
+        // Acquire fence pairs with Release in set_signal_test_hooks so the
+        // handler sees a consistent (writer, ctx) pair once writer is visible.
+        std::sync::atomic::fence(Ordering::Acquire);
         let writer = TEST_WRITER.load(Ordering::Relaxed);
         if writer != 0 {
             let writer: SignalWriteFn = std::mem::transmute(writer);
-            writer(msg.as_ptr(), msg.len(), TEST_CTX.load(Ordering::Relaxed));
+            let ctx = TEST_CTX.load(Ordering::Relaxed);
+            writer(msg.as_ptr(), msg.len(), ctx);
             return;
         }
         let mut p = msg.as_ptr();
@@ -89,6 +93,7 @@ fn dispatch_write(msg: &[u8]) {
 }
 fn dispatch_exit(code: c_int) {
     unsafe {
+        std::sync::atomic::fence(Ordering::Acquire);
         let exiter = TEST_EXITER.load(Ordering::Relaxed);
         if exiter != 0 {
             let exiter: SignalExitFn = std::mem::transmute(exiter);
