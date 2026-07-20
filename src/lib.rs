@@ -22,7 +22,6 @@ pub mod event;
 pub mod file_codecs;
 pub mod fluidsynth;
 pub mod fweelin_app;
-pub mod jack_ringbuffer;
 pub mod library_helper;
 pub mod linux_native;
 pub mod logo;

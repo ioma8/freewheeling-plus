@@ -4,6 +4,7 @@ use crate::audioio::{AudioCallback, AudioProcessor};
 use crate::fluidsynth::{FluidLiteBackend, FluidSynthBackend, PITCH_BEND_CENTER};
 use crate::realtime_queue::{RealtimeReceiver, RealtimeSender, bounded};
 use std::cell::UnsafeCell;
+use std::collections::VecDeque;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering},
@@ -238,74 +239,44 @@ impl TransferScopeCache {
     }
 }
 
-/// One native-recording `AudioBlock`. C++ links these nodes instead of
-/// growing a callback-owned vector, which lets a recording grow for as long
-/// as the non-realtime memory manager can provide blocks.
+/// One native-recording `AudioBlock`, stored in a `VecDeque` within the
+/// loop's block chain. Boxed so the pool can transfer ownership through
+/// channels without copying the large PCM buffers.
 struct LoopStorageBlock {
     storage: StereoTransfer,
-    next: Option<Box<LoopStorageBlock>>,
 }
 
 /// Callback-safe counterpart to C++'s `AudioBlock::first`/`next` chain.
-/// Linking/unlinking an already allocated node performs no allocation.
+/// A `VecDeque` replaces the intrusive linked list — no unsafe needed,
+/// O(1) append/pop_front, O(1) index access, and better cache locality.
 #[derive(Default)]
 struct LoopBlockChain {
-    first: Option<Box<LoopStorageBlock>>,
-    /// Stable because every node is individually heap allocated. This mirrors
-    /// `AudioBlockIterator`/`AudioBlock::Link`'s O(1) chain extension rather
-    /// than scanning the existing recording on the audio callback.
-    tail: Option<usize>,
-    count: usize,
+    blocks: VecDeque<Box<LoopStorageBlock>>,
 }
 
 impl LoopBlockChain {
     fn is_empty(&self) -> bool {
-        self.first.is_none()
+        self.blocks.is_empty()
     }
 
     fn len(&self) -> usize {
-        self.count
+        self.blocks.len()
     }
 
-    fn append(&mut self, mut block: Box<LoopStorageBlock>) {
-        block.next = None;
-        let tail = (&mut *block as *mut LoopStorageBlock) as usize;
-        if let Some(previous) = self.tail {
-            // SAFETY: `previous` points to a node owned exclusively by this
-            // chain. Nodes are boxed and never moved; `&mut self` prevents
-            // concurrent mutation while the tail link is written.
-            unsafe { (*(previous as *mut LoopStorageBlock)).next = Some(block) };
-        } else {
-            self.first = Some(block);
-        }
-        self.tail = Some(tail);
-        self.count += 1;
+    fn append(&mut self, block: Box<LoopStorageBlock>) {
+        self.blocks.push_back(block);
     }
 
     fn pop_first(&mut self) -> Option<Box<LoopStorageBlock>> {
-        let mut block = self.first.take()?;
-        self.first = block.next.take();
-        self.count -= 1;
-        if self.count == 0 {
-            self.tail = None;
-        }
-        Some(block)
+        self.blocks.pop_front()
     }
 
     fn block_at(&self, index: usize) -> &LoopStorageBlock {
-        let mut current = self.first.as_deref();
-        for _ in 0..index {
-            current = current.and_then(|block| block.next.as_deref());
-        }
-        current.expect("recording block chain shorter than loop length")
+        &self.blocks[index]
     }
 
     fn block_at_mut(&mut self, index: usize) -> &mut LoopStorageBlock {
-        let mut current = self.first.as_deref_mut();
-        for _ in 0..index {
-            current = current.and_then(|block| block.next.as_deref_mut());
-        }
-        current.expect("recording block chain shorter than loop length")
+        &mut self.blocks[index]
     }
 }
 
@@ -1135,7 +1106,6 @@ impl LoopStoragePool {
                                 right: vec![0.0; AUDIO_BLOCK_FRAMES],
                                 len: 0,
                             },
-                            next: None,
                         })
                     })
                     .collect(),
@@ -1229,7 +1199,6 @@ fn refill_loop_storage(
                     right: vec![0.0; AUDIO_BLOCK_FRAMES],
                     len: 0,
                 },
-                next: None,
             })
         });
         if let Err(full) = refills.try_send(storage) {
@@ -4561,7 +4530,6 @@ mod tests {
                     right: vec![-value; AUDIO_BLOCK_FRAMES],
                     len: 0,
                 },
-                next: None,
             })
         };
         let mut chain = LoopBlockChain::default();
