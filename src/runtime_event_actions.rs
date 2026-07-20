@@ -213,6 +213,21 @@ pub enum DispatchError {
     InvalidParameter(&'static str),
 }
 
+impl std::fmt::Display for DispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DispatchError::OutputFull { capacity } => write!(f, "dispatch output full (capacity {capacity})"),
+            DispatchError::InvalidLoopId(id) => write!(f, "invalid loop id {id}"),
+            DispatchError::InvalidInputId(id) => write!(f, "invalid input id {id}"),
+            DispatchError::RecursionLimit { depth } => write!(f, "dispatch recursion limit reached (depth {depth})"),
+            DispatchError::MissingParameter(name) => write!(f, "missing dispatch parameter '{name}'"),
+            DispatchError::InvalidParameter(name) => write!(f, "invalid dispatch parameter '{name}'"),
+        }
+    }
+}
+
+impl std::error::Error for DispatchError {}
+
 /// A stack-backed output batch. Dispatch never grows a queue or silently drops
 /// work; callers get `OutputFull` and can expose backpressure to the UI.
 #[derive(Debug)]

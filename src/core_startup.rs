@@ -118,6 +118,14 @@ pub struct StartupError {
     pub message: String,
 }
 
+impl std::fmt::Display for StartupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "startup {}: {}", self.phase, self.message)
+    }
+}
+
+impl std::error::Error for StartupError {}
+
 fn fail(phase: &'static str, message: String) -> StartupError {
     StartupError { phase, message }
 }

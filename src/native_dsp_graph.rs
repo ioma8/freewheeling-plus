@@ -190,6 +190,22 @@ pub enum PcmTransferError {
     RecordingStorageExhausted,
 }
 
+impl std::fmt::Display for PcmTransferError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PcmTransferError::PoolExhausted => write!(f, "PCM transfer pool exhausted"),
+            PcmTransferError::InvalidHandle => write!(f, "invalid PCM transfer handle"),
+            PcmTransferError::PcmTooLong => write!(f, "PCM data exceeds transfer capacity"),
+            PcmTransferError::ChannelLengthMismatch => write!(f, "left/right channel length mismatch"),
+            PcmTransferError::CommandQueueFull => write!(f, "realtime command queue full"),
+            PcmTransferError::TransferBusy => write!(f, "transfer slot is busy"),
+            PcmTransferError::RecordingStorageExhausted => write!(f, "recording storage exhausted"),
+        }
+    }
+}
+
+impl std::error::Error for PcmTransferError {}
+
 struct StereoTransfer {
     left: Vec<f32>,
     right: Vec<f32>,

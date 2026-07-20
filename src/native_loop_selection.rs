@@ -12,6 +12,17 @@ pub enum SelectionError {
     CapacityExceeded,
 }
 
+impl std::fmt::Display for SelectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SelectionError::InvalidSet => write!(f, "invalid selection set"),
+            SelectionError::CapacityExceeded => write!(f, "selection capacity exceeded"),
+        }
+    }
+}
+
+impl std::error::Error for SelectionError {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeLoopSelection {
     sets: [Vec<usize>; NUM_SELECTION_SETS],

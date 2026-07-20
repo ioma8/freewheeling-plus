@@ -91,6 +91,28 @@ pub enum OscError {
     Poisoned,
     InvalidPacket(&'static str),
 }
+
+impl std::fmt::Display for OscError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OscError::InvalidPath(path) => write!(f, "invalid OSC path '{path}'"),
+            OscError::NotConnected => write!(f, "OSC not connected"),
+            OscError::Io(e) => write!(f, "OSC I/O error: {e}"),
+            OscError::Poisoned => write!(f, "OSC mutex poisoned"),
+            OscError::InvalidPacket(reason) => write!(f, "invalid OSC packet: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for OscError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            OscError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 impl From<io::Error> for OscError {
     fn from(e: io::Error) -> Self {
         Self::Io(e)
