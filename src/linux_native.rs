@@ -538,6 +538,9 @@ mod native {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub use native::{DirectAlsaMixerBackend, JackAudioMidiBackend};
+
 #[cfg(test)]
 mod tests {
     use super::*;
