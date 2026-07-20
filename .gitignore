@@ -20,3 +20,7 @@ freewheeling-diagnostic-*/
 
 # Cargo build artifacts (outside target/)
 **/*.rs.bk
+
+# Removed porting artifacts (formerly tracked)
+generated/
+acceptance-evidence/
