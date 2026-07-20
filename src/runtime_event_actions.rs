@@ -1110,7 +1110,7 @@ mod tests {
         config
             .load_authoritative(
                 Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../data/fweelin.xml")
+                    .join("data/fweelin.xml")
                     .as_path(),
             )
             .unwrap();

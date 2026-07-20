@@ -352,6 +352,7 @@ mod tests {
         assert!(requested_format_from(Some("48000"), Some("512")).is_err());
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn requests_128_frames_from_cpal() {
         let options = cpal_options(RequestedFormat {

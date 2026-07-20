@@ -6,7 +6,7 @@ fn fixture_browser() -> NativePatchBrowser {
     let mut config = FloConfig::new();
     config.patch_banks.push(PatchBankConfig {
         interface_id: 0,
-        patches: PathBuf::from("../data/patches3.xml"),
+        patches: PathBuf::from("data/patches3.xml"),
         midi_port: 1,
         separate_channels: false,
         suppress_program_changes: true,
