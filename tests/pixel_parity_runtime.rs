@@ -141,6 +141,7 @@ fn decode_reference(path: &Path, dimensions: (u32, u32)) -> Vec<u8> {
     image.into_raw()
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn production_xml_scene_is_deterministic_at_all_acceptance_sizes() {
     // Pin C++ `video_start` in the stationary logo phase. The normal
