@@ -8,6 +8,14 @@ pub mod midiio {
     pub use freewheeling_plus::midiio::*;
 }
 
+pub mod amixer {
+    pub use freewheeling_plus::amixer::*;
+}
+
+pub mod realtime_guard {
+    pub use freewheeling_plus::realtime_guard::*;
+}
+
 #[path = "../src/linux_native.rs"]
 mod linux_native;
 
