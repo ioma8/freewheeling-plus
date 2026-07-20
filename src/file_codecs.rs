@@ -90,8 +90,8 @@ impl FlacEncoder {
     }
 
     fn push(&mut self, left: &[Sample], right: Option<&[Sample]>) -> io::Result<()> {
-        for i in 0..left.len() {
-            self.samples.push(float_to_i24(left[i]));
+        for (i, &l) in left.iter().enumerate() {
+            self.samples.push(float_to_i24(l));
             if let Some(right) = right {
                 self.samples.push(float_to_i24(right[i]));
             }
@@ -257,8 +257,8 @@ impl IFileEncoder for SndFileEncoder {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "encoder is not open"))?
         {
             EncoderOutput::Wav(writer) => {
-                for i in 0..n {
-                    writer.write_sample(left[i]).map_err(ioerr)?;
+                for (i, &l) in left[..n].iter().enumerate() {
+                    writer.write_sample(l).map_err(ioerr)?;
                     if let Some(r) = right {
                         writer.write_sample(r[i]).map_err(ioerr)?;
                     }
@@ -275,8 +275,8 @@ impl IFileEncoder for SndFileEncoder {
             }
             EncoderOutput::Flac(encoder) => encoder.push(&left[..n], right.map(|r| &r[..n]))?,
             EncoderOutput::Au { out, data_len } => {
-                for i in 0..n {
-                    out.write_all(&float_to_i32(left[i]).to_be_bytes())?;
+                for (i, &l) in left[..n].iter().enumerate() {
+                    out.write_all(&float_to_i32(l).to_be_bytes())?;
                     if let Some(r) = right {
                         out.write_all(&float_to_i32(r[i]).to_be_bytes())?;
                     }

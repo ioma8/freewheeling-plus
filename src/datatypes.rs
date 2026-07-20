@@ -564,10 +564,9 @@ pub struct SRMWRingBuffer<T: Default + Clone + Copy> {
 impl<T: Default + Clone + Copy> SRMWRingBuffer<T> {
     pub fn new(numel: usize) -> Self {
         let num_writers = RTRWThreads::get_num_threads().max(1);
-        let mut wbufs = Vec::with_capacity(MAX_RW_THREADS);
-        for _ in 0..MAX_RW_THREADS {
-            wbufs.push(RingBuffer::create(std::mem::size_of::<T>() * numel));
-        }
+        let wbufs: Vec<_> = (0..MAX_RW_THREADS)
+            .map(|_| RingBuffer::create(std::mem::size_of::<T>() * numel))
+            .collect();
         SRMWRingBuffer {
             wbufs,
             num_writers,
@@ -598,8 +597,9 @@ impl<T: Default + Clone + Copy> SRMWRingBuffer<T> {
 
     pub fn read_element(&self) -> Option<T> {
         let current_ids = RTRWThreads::get_thread_ids();
-        for i in 0..self.num_writers.min(current_ids.len()) {
-            if self.wbufs[i].read_space() >= std::mem::size_of::<T>() {
+        let limit = self.num_writers.min(current_ids.len());
+        for buf in self.wbufs[..limit].iter() {
+            if buf.read_space() >= std::mem::size_of::<T>() {
                 let mut el: T = unsafe { std::mem::zeroed() };
                 let dst = unsafe {
                     std::slice::from_raw_parts_mut(
@@ -607,7 +607,7 @@ impl<T: Default + Clone + Copy> SRMWRingBuffer<T> {
                         std::mem::size_of::<T>(),
                     )
                 };
-                if self.wbufs[i].read(dst, std::mem::size_of::<T>()) == std::mem::size_of::<T>() {
+                if buf.read(dst, std::mem::size_of::<T>()) == std::mem::size_of::<T>() {
                     return Some(el);
                 }
             }
@@ -648,10 +648,7 @@ pub struct RTStore<T: Default> {
 
 impl<T: Default> RTStore<T> {
     pub fn new(num_items: usize) -> Self {
-        let mut items = Vec::with_capacity(num_items);
-        for _ in 0..num_items {
-            items.push(RTStoreItem::new());
-        }
+        let items = (0..num_items).map(|_| RTStoreItem::new()).collect();
         RTStore { items, num_items }
     }
 
@@ -660,21 +657,20 @@ impl<T: Default> RTStore<T> {
         find_state: ItemState,
         replace_state: ItemState,
     ) -> Option<(usize, &T)> {
-        for i in 0..self.num_items {
-            if self.items[i]
-                .status
-                .compare_exchange(
-                    find_state as i32,
-                    replace_state as i32,
-                    Ordering::AcqRel,
-                    Ordering::Relaxed,
-                )
-                .is_ok()
-            {
-                return Some((i, &self.items[i].item));
-            }
-        }
-        None
+        self.items
+            .iter()
+            .enumerate()
+            .find(|(_, item)|
+                item.status
+                    .compare_exchange(
+                        find_state as i32,
+                        replace_state as i32,
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+            )
+            .map(|(i, item)| (i, &item.item))
     }
 
     pub fn change_state_at_idx(
@@ -698,10 +694,7 @@ impl<T: Default> RTStore<T> {
     }
 
     pub fn get_item_at_idx(&self, idx: usize) -> Option<&T> {
-        if idx >= self.num_items {
-            return None;
-        }
-        Some(&self.items[idx].item)
+        self.items.get(idx).map(|item| &item.item)
     }
 }
 

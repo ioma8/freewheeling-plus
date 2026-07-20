@@ -221,7 +221,7 @@ impl PreallocatedTypeInner {
     pub fn rt_new_with_wait(self: &Arc<Self>) -> Instance {
         loop {
             if let Some(x) = self.rt_new() {
-                return x;
+                break x;
             }
             thread::sleep(Duration::from_millis(10));
         }
