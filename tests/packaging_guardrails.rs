@@ -227,7 +227,7 @@ fn baseline_inventory_and_matrix_name_required_assets_and_workflows() {
 
 #[test]
 fn soundfont_handoff_keeps_unresolved_provenance_and_requires_clean_room_evidence() {
-    let handoff = fs::read_to_string(root().join("../docs/basic-sf2-clean-room-handoff.md"))
+    let handoff = fs::read_to_string(root().join("docs/basic-sf2-clean-room-handoff.md"))
         .expect("clean-room SoundFont handoff must be documented");
     for requirement in [
         "no lawful drop-in is currently available",
