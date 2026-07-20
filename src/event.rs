@@ -942,6 +942,27 @@ pub trait Event: Send {
     fn get_param(&self, _idx: usize) -> Option<EventParameter> {
         None
     }
+}macro_rules! impl_event {
+    // Without event parameters
+    ($name:ident, $type:ident) => {
+        impl Event for $name {
+            fn get_type(&self) -> EventType { EventType::$type }
+            fn as_any(&self) -> &dyn std::any::Any { self }
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+            fn clone_box(&self) -> Box<dyn Event> { Box::new(self.clone()) }
+        }
+    };
+    // With event parameters (references a const array)
+    ($name:ident, $type:ident, $params:expr) => {
+        impl Event for $name {
+            fn get_type(&self) -> EventType { EventType::$type }
+            fn as_any(&self) -> &dyn std::any::Any { self }
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+            fn clone_box(&self) -> Box<dyn Event> { Box::new(self.clone()) }
+            fn get_num_params(&self) -> usize { $params.len() }
+            fn get_param(&self, idx: usize) -> Option<EventParameter> { $params.get(idx).copied() }
+        }
+    };
 }
 
 #[derive(Clone)]
@@ -983,20 +1004,7 @@ impl EndRecordEvent {
     }
 }
 
-impl Event for EndRecordEvent {
-    fn get_type(&self) -> EventType {
-        EventType::EndRecord
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(EndRecordEvent, EndRecord);
 
 #[derive(Clone)]
 pub struct GoSubEvent {
@@ -1022,20 +1030,7 @@ impl GoSubEvent {
     }
 }
 
-impl Event for GoSubEvent {
-    fn get_type(&self) -> EventType {
-        EventType::GoSub
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(GoSubEvent, GoSub);
 
 #[derive(Clone)]
 pub struct KeyInputEvent {
@@ -1059,31 +1054,7 @@ impl KeyInputEvent {
     }
 }
 
-impl Event for KeyInputEvent {
-    fn get_type(&self) -> EventType {
-        EventType::InputKey
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        3
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        const PARAMS: [EventParameter; 3] = [
-            EventParameter::new("keydown", CoreDataType::Char),
-            EventParameter::with_max_index("key", CoreDataType::Int, 512),
-            EventParameter::new("unicode", CoreDataType::Int),
-        ];
-        PARAMS.get(idx).copied()
-    }
-}
+impl_event!(KeyInputEvent, InputKey, KEY_INPUT_PARAMS);
 
 #[derive(Clone)]
 pub struct LoopClickedEvent {
@@ -1109,20 +1080,7 @@ impl LoopClickedEvent {
     }
 }
 
-impl Event for LoopClickedEvent {
-    fn get_type(&self) -> EventType {
-        EventType::LoopClicked
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(LoopClickedEvent, LoopClicked);
 
 #[derive(Clone)]
 pub struct JoystickButtonInputEvent {
@@ -1146,31 +1104,7 @@ impl JoystickButtonInputEvent {
     }
 }
 
-impl Event for JoystickButtonInputEvent {
-    fn get_type(&self) -> EventType {
-        EventType::InputJoystickButton
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        3
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        const PARAMS: [EventParameter; 3] = [
-            EventParameter::new("down", CoreDataType::Char),
-            EventParameter::new("button", CoreDataType::Int),
-            EventParameter::new("joystick", CoreDataType::Int),
-        ];
-        PARAMS.get(idx).copied()
-    }
-}
+impl_event!(JoystickButtonInputEvent, InputJoystickButton, JOYSTICK_BUTTON_INPUT_PARAMS);
 
 #[derive(Clone)]
 pub struct MouseButtonInputEvent {
@@ -1196,32 +1130,7 @@ impl MouseButtonInputEvent {
     }
 }
 
-impl Event for MouseButtonInputEvent {
-    fn get_type(&self) -> EventType {
-        EventType::InputMouseButton
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        4
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        const PARAMS: [EventParameter; 4] = [
-            EventParameter::new("down", CoreDataType::Char),
-            EventParameter::new("button", CoreDataType::Int),
-            EventParameter::new("x", CoreDataType::Int),
-            EventParameter::new("y", CoreDataType::Int),
-        ];
-        PARAMS.get(idx).copied()
-    }
-}
+impl_event!(MouseButtonInputEvent, InputMouseButton, MOUSE_BUTTON_INPUT_PARAMS);
 
 #[derive(Clone)]
 pub struct MouseMotionInputEvent {
@@ -1243,30 +1152,7 @@ impl MouseMotionInputEvent {
     }
 }
 
-impl Event for MouseMotionInputEvent {
-    fn get_type(&self) -> EventType {
-        EventType::InputMouseMotion
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        2
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        const PARAMS: [EventParameter; 2] = [
-            EventParameter::new("x", CoreDataType::Int),
-            EventParameter::new("y", CoreDataType::Int),
-        ];
-        PARAMS.get(idx).copied()
-    }
-}
+impl_event!(MouseMotionInputEvent, InputMouseMotion, MOUSE_MOTION_INPUT_PARAMS);
 
 #[derive(Clone)]
 pub struct TriggerLoopEvent {
@@ -1292,30 +1178,7 @@ impl TriggerLoopEvent {
         }
     }
 }
-impl Event for TriggerLoopEvent {
-    fn get_type(&self) -> EventType {
-        EventType::TriggerLoop
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        2
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        const PARAMS: [EventParameter; 2] = [
-            EventParameter::new("loopid", CoreDataType::Int),
-            EventParameter::new("vol", CoreDataType::Float),
-        ];
-        PARAMS.get(idx).copied()
-    }
-}
+impl_event!(TriggerLoopEvent, TriggerLoop, TRIGGER_LOOP_PARAMS);
 
 #[derive(Clone)]
 pub struct MIDIControllerInputEvent {
@@ -1347,26 +1210,7 @@ impl MIDIControllerInputEvent {
     }
 }
 
-impl Event for MIDIControllerInputEvent {
-    fn get_type(&self) -> EventType {
-        EventType::InputMIDIController
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        MIDI_CONTROLLER_INPUT_PARAMS.len()
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        MIDI_CONTROLLER_INPUT_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(MIDIControllerInputEvent, InputMIDIController, MIDI_CONTROLLER_INPUT_PARAMS);
 
 #[derive(Clone)]
 pub struct MIDIChannelPressureInputEvent {
@@ -1392,26 +1236,7 @@ impl MIDIChannelPressureInputEvent {
     }
 }
 
-impl Event for MIDIChannelPressureInputEvent {
-    fn get_type(&self) -> EventType {
-        EventType::InputMIDIChannelPressure
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        MIDI_CHANNEL_PRESSURE_INPUT_PARAMS.len()
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        MIDI_CHANNEL_PRESSURE_INPUT_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(MIDIChannelPressureInputEvent, InputMIDIChannelPressure, MIDI_CHANNEL_PRESSURE_INPUT_PARAMS);
 
 #[derive(Clone)]
 pub struct MIDIProgramChangeInputEvent {
@@ -1437,26 +1262,7 @@ impl MIDIProgramChangeInputEvent {
     }
 }
 
-impl Event for MIDIProgramChangeInputEvent {
-    fn get_type(&self) -> EventType {
-        EventType::InputMIDIProgramChange
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        MIDI_PROGRAM_CHANGE_INPUT_PARAMS.len()
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        MIDI_PROGRAM_CHANGE_INPUT_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(MIDIProgramChangeInputEvent, InputMIDIProgramChange, MIDI_PROGRAM_CHANGE_INPUT_PARAMS);
 
 #[derive(Clone)]
 pub struct MIDIPitchBendInputEvent {
@@ -1486,26 +1292,7 @@ impl MIDIPitchBendInputEvent {
     }
 }
 
-impl Event for MIDIPitchBendInputEvent {
-    fn get_type(&self) -> EventType {
-        EventType::InputMIDIPitchBend
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        MIDI_PITCH_BEND_INPUT_PARAMS.len()
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        MIDI_PITCH_BEND_INPUT_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(MIDIPitchBendInputEvent, InputMIDIPitchBend, MIDI_PITCH_BEND_INPUT_PARAMS);
 
 #[derive(Clone)]
 pub struct MIDIPolyphonicPressureInputEvent {
@@ -1529,26 +1316,7 @@ impl MIDIPolyphonicPressureInputEvent {
     }
 }
 
-impl Event for MIDIPolyphonicPressureInputEvent {
-    fn get_type(&self) -> EventType {
-        EventType::InputMIDIPolyphonicPressure
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        MIDI_POLYPHONIC_PRESSURE_INPUT_PARAMS.len()
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        MIDI_POLYPHONIC_PRESSURE_INPUT_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(MIDIPolyphonicPressureInputEvent, InputMIDIPolyphonicPressure, MIDI_POLYPHONIC_PRESSURE_INPUT_PARAMS);
 
 #[derive(Clone)]
 pub struct MIDISystemExclusiveInputEvent {
@@ -1569,20 +1337,7 @@ impl MIDISystemExclusiveInputEvent {
     }
 }
 
-impl Event for MIDISystemExclusiveInputEvent {
-    fn get_type(&self) -> EventType {
-        EventType::InputMIDISystemExclusive
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(MIDISystemExclusiveInputEvent, InputMIDISystemExclusive);
 
 macro_rules! midi_value_input_event {
     ($name:ident, $event_type:ident) => {
@@ -1713,26 +1468,7 @@ impl MIDIKeyInputEvent {
     }
 }
 
-impl Event for MIDIKeyInputEvent {
-    fn get_type(&self) -> EventType {
-        EventType::InputMIDIKey
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        MIDI_KEY_INPUT_PARAMS.len()
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        MIDI_KEY_INPUT_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(MIDIKeyInputEvent, InputMIDIKey, MIDI_KEY_INPUT_PARAMS);
 
 #[derive(Clone)]
 pub struct MIDIClockInputEvent {
@@ -1756,26 +1492,7 @@ impl MIDIClockInputEvent {
     }
 }
 
-impl Event for MIDIClockInputEvent {
-    fn get_type(&self) -> EventType {
-        EventType::InputMIDIClock
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        MIDI_CLOCK_INPUT_PARAMS.len()
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        MIDI_CLOCK_INPUT_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(MIDIClockInputEvent, InputMIDIClock, MIDI_CLOCK_INPUT_PARAMS);
 
 #[derive(Clone)]
 pub struct MIDIStartStopInputEvent {
@@ -1801,26 +1518,7 @@ impl MIDIStartStopInputEvent {
     }
 }
 
-impl Event for MIDIStartStopInputEvent {
-    fn get_type(&self) -> EventType {
-        EventType::InputMIDIStartStop
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        MIDI_START_STOP_INPUT_PARAMS.len()
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        MIDI_START_STOP_INPUT_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(MIDIStartStopInputEvent, InputMIDIStartStop, MIDI_START_STOP_INPUT_PARAMS);
 
 #[derive(Clone)]
 pub struct FluidSynthEnableEvent {
@@ -1840,20 +1538,7 @@ impl FluidSynthEnableEvent {
     }
 }
 
-impl Event for FluidSynthEnableEvent {
-    fn get_type(&self) -> EventType {
-        EventType::FluidSynthEnable
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(FluidSynthEnableEvent, FluidSynthEnable);
 
 #[derive(Clone)]
 pub struct SetMidiTuningEvent {
@@ -1873,20 +1558,7 @@ impl SetMidiTuningEvent {
     }
 }
 
-impl Event for SetMidiTuningEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SetMidiTuning
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SetMidiTuningEvent, SetMidiTuning);
 
 #[derive(Clone)]
 pub struct BrowserMoveToItemEvent {
@@ -1910,31 +1582,7 @@ impl BrowserMoveToItemEvent {
     }
 }
 
-impl Event for BrowserMoveToItemEvent {
-    fn get_type(&self) -> EventType {
-        EventType::BrowserMoveToItem
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        3
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        const PARAMS: [EventParameter; 3] = [
-            EventParameter::new("browserid", CoreDataType::Int),
-            EventParameter::new("adjust", CoreDataType::Int),
-            EventParameter::new("jumpadjust", CoreDataType::Int),
-        ];
-        PARAMS.get(idx).copied()
-    }
-}
+impl_event!(BrowserMoveToItemEvent, BrowserMoveToItem, BROWSER_MOVE_PARAMS);
 
 #[derive(Clone)]
 pub struct BrowserMoveToItemAbsoluteEvent {
@@ -1956,30 +1604,7 @@ impl BrowserMoveToItemAbsoluteEvent {
     }
 }
 
-impl Event for BrowserMoveToItemAbsoluteEvent {
-    fn get_type(&self) -> EventType {
-        EventType::BrowserMoveToItemAbsolute
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        2
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        const PARAMS: [EventParameter; 2] = [
-            EventParameter::new("browserid", CoreDataType::Int),
-            EventParameter::new("idx", CoreDataType::Int),
-        ];
-        PARAMS.get(idx).copied()
-    }
-}
+impl_event!(BrowserMoveToItemAbsoluteEvent, BrowserMoveToItemAbsolute, BROWSER_MOVE_ABSOLUTE_PARAMS);
 
 #[derive(Clone)]
 pub struct BrowserSelectItemEvent {
@@ -1999,20 +1624,7 @@ impl BrowserSelectItemEvent {
     }
 }
 
-impl Event for BrowserSelectItemEvent {
-    fn get_type(&self) -> EventType {
-        EventType::BrowserSelectItem
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(BrowserSelectItemEvent, BrowserSelectItem);
 
 #[derive(Clone)]
 pub struct BrowserRenameItemEvent {
@@ -2032,20 +1644,7 @@ impl BrowserRenameItemEvent {
     }
 }
 
-impl Event for BrowserRenameItemEvent {
-    fn get_type(&self) -> EventType {
-        EventType::BrowserRenameItem
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(BrowserRenameItemEvent, BrowserRenameItem);
 
 #[derive(Clone)]
 pub struct BrowserItemBrowsedEvent {
@@ -2065,20 +1664,7 @@ impl BrowserItemBrowsedEvent {
     }
 }
 
-impl Event for BrowserItemBrowsedEvent {
-    fn get_type(&self) -> EventType {
-        EventType::BrowserItemBrowsed
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(BrowserItemBrowsedEvent, BrowserItemBrowsed);
 
 #[derive(Clone)]
 pub struct PatchBrowserMoveToBankEvent {
@@ -2098,20 +1684,7 @@ impl PatchBrowserMoveToBankEvent {
     }
 }
 
-impl Event for PatchBrowserMoveToBankEvent {
-    fn get_type(&self) -> EventType {
-        EventType::PatchBrowserMoveToBank
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(PatchBrowserMoveToBankEvent, PatchBrowserMoveToBank);
 
 #[derive(Clone)]
 pub struct PatchBrowserMoveToBankByIndexEvent {
@@ -2131,20 +1704,7 @@ impl PatchBrowserMoveToBankByIndexEvent {
     }
 }
 
-impl Event for PatchBrowserMoveToBankByIndexEvent {
-    fn get_type(&self) -> EventType {
-        EventType::PatchBrowserMoveToBankByIndex
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(PatchBrowserMoveToBankByIndexEvent, PatchBrowserMoveToBankByIndex);
 
 #[derive(Clone)]
 pub struct StartSessionEvent {
@@ -2162,20 +1722,7 @@ impl StartSessionEvent {
     }
 }
 
-impl Event for StartSessionEvent {
-    fn get_type(&self) -> EventType {
-        EventType::StartSession
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(StartSessionEvent, StartSession);
 
 #[derive(Clone)]
 pub struct StartInterfaceEvent {
@@ -2195,27 +1742,7 @@ impl StartInterfaceEvent {
     }
 }
 
-impl Event for StartInterfaceEvent {
-    fn get_type(&self) -> EventType {
-        EventType::StartInterface
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        1
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        const PARAMS: [EventParameter; 1] = [EventParameter::new(INTERFACEID, CoreDataType::Int)];
-        PARAMS.get(idx).copied()
-    }
-}
+impl_event!(StartInterfaceEvent, StartInterface, START_INTERFACE_PARAMS);
 
 #[derive(Clone)]
 pub struct VideoShowLayoutEvent {
@@ -2241,20 +1768,7 @@ impl VideoShowLayoutEvent {
     }
 }
 
-impl Event for VideoShowLayoutEvent {
-    fn get_type(&self) -> EventType {
-        EventType::VideoShowLayout
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(VideoShowLayoutEvent, VideoShowLayout);
 
 #[derive(Clone)]
 pub struct VideoSwitchInterfaceEvent {
@@ -2274,20 +1788,7 @@ impl VideoSwitchInterfaceEvent {
     }
 }
 
-impl Event for VideoSwitchInterfaceEvent {
-    fn get_type(&self) -> EventType {
-        EventType::VideoSwitchInterface
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(VideoSwitchInterfaceEvent, VideoSwitchInterface);
 
 #[derive(Clone)]
 pub struct VideoShowDisplayEvent {
@@ -2311,20 +1812,7 @@ impl VideoShowDisplayEvent {
     }
 }
 
-impl Event for VideoShowDisplayEvent {
-    fn get_type(&self) -> EventType {
-        EventType::VideoShowDisplay
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(VideoShowDisplayEvent, VideoShowDisplay);
 
 #[derive(Clone)]
 pub struct VideoShowHelpEvent {
@@ -2344,20 +1832,7 @@ impl VideoShowHelpEvent {
     }
 }
 
-impl Event for VideoShowHelpEvent {
-    fn get_type(&self) -> EventType {
-        EventType::VideoShowHelp
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(VideoShowHelpEvent, VideoShowHelp);
 
 #[derive(Clone)]
 pub struct VideoFullScreenEvent {
@@ -2377,20 +1852,7 @@ impl VideoFullScreenEvent {
     }
 }
 
-impl Event for VideoFullScreenEvent {
-    fn get_type(&self) -> EventType {
-        EventType::VideoFullScreen
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(VideoFullScreenEvent, VideoFullScreen);
 
 #[derive(Clone)]
 pub struct ShowDebugInfoEvent {
@@ -2410,20 +1872,7 @@ impl ShowDebugInfoEvent {
     }
 }
 
-impl Event for ShowDebugInfoEvent {
-    fn get_type(&self) -> EventType {
-        EventType::ShowDebugInfo
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(ShowDebugInfoEvent, ShowDebugInfo);
 
 #[derive(Clone)]
 pub struct VideoShowLoopEvent {
@@ -2447,20 +1896,7 @@ impl VideoShowLoopEvent {
     }
 }
 
-impl Event for VideoShowLoopEvent {
-    fn get_type(&self) -> EventType {
-        EventType::VideoShowLoop
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(VideoShowLoopEvent, VideoShowLoop);
 
 #[derive(Clone)]
 pub struct VideoShowSnapshotPageEvent {
@@ -2484,20 +1920,7 @@ impl VideoShowSnapshotPageEvent {
     }
 }
 
-impl Event for VideoShowSnapshotPageEvent {
-    fn get_type(&self) -> EventType {
-        EventType::VideoShowSnapshotPage
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(VideoShowSnapshotPageEvent, VideoShowSnapshotPage);
 
 #[derive(Clone)]
 pub struct VideoShowParamSetBankEvent {
@@ -2521,20 +1944,7 @@ impl VideoShowParamSetBankEvent {
     }
 }
 
-impl Event for VideoShowParamSetBankEvent {
-    fn get_type(&self) -> EventType {
-        EventType::VideoShowParamSetBank
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(VideoShowParamSetBankEvent, VideoShowParamSetBank);
 
 #[derive(Clone)]
 pub struct VideoShowParamSetPageEvent {
@@ -2558,20 +1968,7 @@ impl VideoShowParamSetPageEvent {
     }
 }
 
-impl Event for VideoShowParamSetPageEvent {
-    fn get_type(&self) -> EventType {
-        EventType::VideoShowParamSetPage
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(VideoShowParamSetPageEvent, VideoShowParamSetPage);
 
 #[derive(Clone)]
 pub struct ExitSessionEvent {
@@ -2589,20 +1986,7 @@ impl ExitSessionEvent {
     }
 }
 
-impl Event for ExitSessionEvent {
-    fn get_type(&self) -> EventType {
-        EventType::ExitSession
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(ExitSessionEvent, ExitSession);
 
 #[derive(Clone)]
 pub struct SlideMasterInVolumeEvent {
@@ -2622,20 +2006,7 @@ impl SlideMasterInVolumeEvent {
     }
 }
 
-impl Event for SlideMasterInVolumeEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SlideMasterInVolume
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SlideMasterInVolumeEvent, SlideMasterInVolume);
 
 #[derive(Clone)]
 pub struct SlideMasterOutVolumeEvent {
@@ -2655,20 +2026,7 @@ impl SlideMasterOutVolumeEvent {
     }
 }
 
-impl Event for SlideMasterOutVolumeEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SlideMasterOutVolume
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SlideMasterOutVolumeEvent, SlideMasterOutVolume);
 
 #[derive(Clone)]
 pub struct SlideInVolumeEvent {
@@ -2690,30 +2048,7 @@ impl SlideInVolumeEvent {
     }
 }
 
-impl Event for SlideInVolumeEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SlideInVolume
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        2
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        const PARAMS: [EventParameter; 2] = [
-            EventParameter::new("input", CoreDataType::Int),
-            EventParameter::new("slide", CoreDataType::Float),
-        ];
-        PARAMS.get(idx).copied()
-    }
-}
+impl_event!(SlideInVolumeEvent, SlideInVolume, SLIDE_IN_VOLUME_PARAMS);
 
 #[derive(Clone)]
 pub struct SetMasterInVolumeEvent {
@@ -2735,20 +2070,7 @@ impl SetMasterInVolumeEvent {
     }
 }
 
-impl Event for SetMasterInVolumeEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SetMasterInVolume
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SetMasterInVolumeEvent, SetMasterInVolume);
 
 #[derive(Clone)]
 pub struct SetMasterOutVolumeEvent {
@@ -2770,20 +2092,7 @@ impl SetMasterOutVolumeEvent {
     }
 }
 
-impl Event for SetMasterOutVolumeEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SetMasterOutVolume
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SetMasterOutVolumeEvent, SetMasterOutVolume);
 
 #[derive(Clone)]
 pub struct SetInVolumeEvent {
@@ -2807,31 +2116,7 @@ impl SetInVolumeEvent {
     }
 }
 
-impl Event for SetInVolumeEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SetInVolume
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        3
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        const PARAMS: [EventParameter; 3] = [
-            EventParameter::new("input", CoreDataType::Int),
-            EventParameter::new("vol", CoreDataType::Float),
-            EventParameter::new("fadervol", CoreDataType::Float),
-        ];
-        PARAMS.get(idx).copied()
-    }
-}
+impl_event!(SetInVolumeEvent, SetInVolume, SET_IN_VOLUME_PARAMS);
 
 #[derive(Clone)]
 pub struct ToggleInputRecordEvent {
@@ -2851,20 +2136,7 @@ impl ToggleInputRecordEvent {
     }
 }
 
-impl Event for ToggleInputRecordEvent {
-    fn get_type(&self) -> EventType {
-        EventType::ToggleInputRecord
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(ToggleInputRecordEvent, ToggleInputRecord);
 
 #[derive(Clone)]
 pub struct SetMidiEchoPortEvent {
@@ -2884,20 +2156,7 @@ impl SetMidiEchoPortEvent {
     }
 }
 
-impl Event for SetMidiEchoPortEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SetMidiEchoPort
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SetMidiEchoPortEvent, SetMidiEchoPort);
 
 #[derive(Clone)]
 pub struct SetMidiEchoChannelEvent {
@@ -2917,20 +2176,7 @@ impl SetMidiEchoChannelEvent {
     }
 }
 
-impl Event for SetMidiEchoChannelEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SetMidiEchoChannel
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SetMidiEchoChannelEvent, SetMidiEchoChannel);
 
 #[derive(Clone)]
 pub struct AdjustMidiTransposeEvent {
@@ -2950,20 +2196,7 @@ impl AdjustMidiTransposeEvent {
     }
 }
 
-impl Event for AdjustMidiTransposeEvent {
-    fn get_type(&self) -> EventType {
-        EventType::AdjustMidiTranspose
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(AdjustMidiTransposeEvent, AdjustMidiTranspose);
 
 #[derive(Clone)]
 pub struct SetTriggerVolumeEvent {
@@ -2985,20 +2218,7 @@ impl SetTriggerVolumeEvent {
     }
 }
 
-impl Event for SetTriggerVolumeEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SetTriggerVolume
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SetTriggerVolumeEvent, SetTriggerVolume);
 
 #[derive(Clone)]
 pub struct SlideLoopAmpEvent {
@@ -3020,26 +2240,7 @@ impl SlideLoopAmpEvent {
     }
 }
 
-impl Event for SlideLoopAmpEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SlideLoopAmp
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        2
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        SLIDE_LOOP_AMP_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(SlideLoopAmpEvent, SlideLoopAmp, SLIDE_LOOP_AMP_PARAMS);
 
 #[derive(Clone)]
 pub struct SetLoopAmpEvent {
@@ -3061,26 +2262,7 @@ impl SetLoopAmpEvent {
     }
 }
 
-impl Event for SetLoopAmpEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SetLoopAmp
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        2
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        SET_LOOP_AMP_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(SetLoopAmpEvent, SetLoopAmp, SET_LOOP_AMP_PARAMS);
 
 #[derive(Clone)]
 pub struct AdjustLoopAmpEvent {
@@ -3102,26 +2284,7 @@ impl AdjustLoopAmpEvent {
     }
 }
 
-impl Event for AdjustLoopAmpEvent {
-    fn get_type(&self) -> EventType {
-        EventType::AdjustLoopAmp
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        2
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        ADJUST_LOOP_AMP_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(AdjustLoopAmpEvent, AdjustLoopAmp, ADJUST_LOOP_AMP_PARAMS);
 
 #[derive(Clone)]
 pub struct SlideLoopAmpStopAllEvent {
@@ -3139,20 +2302,7 @@ impl SlideLoopAmpStopAllEvent {
     }
 }
 
-impl Event for SlideLoopAmpStopAllEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SlideLoopAmpStopAll
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SlideLoopAmpStopAllEvent, SlideLoopAmpStopAll);
 
 #[derive(Clone)]
 pub struct ToggleSelectLoopEvent {
@@ -3174,26 +2324,7 @@ impl ToggleSelectLoopEvent {
     }
 }
 
-impl Event for ToggleSelectLoopEvent {
-    fn get_type(&self) -> EventType {
-        EventType::ToggleSelectLoop
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        2
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        TOGGLE_SELECT_LOOP_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(ToggleSelectLoopEvent, ToggleSelectLoop, TOGGLE_SELECT_LOOP_PARAMS);
 
 #[derive(Clone)]
 pub struct SelectOnlyPlayingLoopsEvent {
@@ -3215,26 +2346,7 @@ impl SelectOnlyPlayingLoopsEvent {
     }
 }
 
-impl Event for SelectOnlyPlayingLoopsEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SelectOnlyPlayingLoops
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        2
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        SELECT_ONLY_PLAYING_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(SelectOnlyPlayingLoopsEvent, SelectOnlyPlayingLoops, SELECT_ONLY_PLAYING_PARAMS);
 
 #[derive(Clone)]
 pub struct SelectAllLoopsEvent {
@@ -3256,26 +2368,7 @@ impl SelectAllLoopsEvent {
     }
 }
 
-impl Event for SelectAllLoopsEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SelectAllLoops
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        2
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        SELECT_ALL_LOOPS_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(SelectAllLoopsEvent, SelectAllLoops, SELECT_ALL_LOOPS_PARAMS);
 
 #[derive(Clone)]
 pub struct InvertSelectionEvent {
@@ -3295,26 +2388,7 @@ impl InvertSelectionEvent {
     }
 }
 
-impl Event for InvertSelectionEvent {
-    fn get_type(&self) -> EventType {
-        EventType::InvertSelection
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        1
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        SETID_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(InvertSelectionEvent, InvertSelection, SETID_PARAMS);
 
 #[derive(Clone)]
 pub struct TriggerSelectedLoopsEvent {
@@ -3338,26 +2412,7 @@ impl TriggerSelectedLoopsEvent {
     }
 }
 
-impl Event for TriggerSelectedLoopsEvent {
-    fn get_type(&self) -> EventType {
-        EventType::TriggerSelectedLoops
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        3
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        TRIGGER_SELECTED_LOOPS_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(TriggerSelectedLoopsEvent, TriggerSelectedLoops, TRIGGER_SELECTED_LOOPS_PARAMS);
 
 #[derive(Clone)]
 pub struct SetSelectedLoopsTriggerVolumeEvent {
@@ -3379,26 +2434,7 @@ impl SetSelectedLoopsTriggerVolumeEvent {
     }
 }
 
-impl Event for SetSelectedLoopsTriggerVolumeEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SetSelectedLoopsTriggerVolume
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        2
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        SET_SELECTED_LOOPS_TRIGGER_VOLUME_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(SetSelectedLoopsTriggerVolumeEvent, SetSelectedLoopsTriggerVolume, SET_SELECTED_LOOPS_TRIGGER_VOLUME_PARAMS);
 
 #[derive(Clone)]
 pub struct AdjustSelectedLoopsAmpEvent {
@@ -3420,26 +2456,7 @@ impl AdjustSelectedLoopsAmpEvent {
     }
 }
 
-impl Event for AdjustSelectedLoopsAmpEvent {
-    fn get_type(&self) -> EventType {
-        EventType::AdjustSelectedLoopsAmp
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        2
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        ADJUST_SELECTED_LOOPS_AMP_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(AdjustSelectedLoopsAmpEvent, AdjustSelectedLoopsAmp, ADJUST_SELECTED_LOOPS_AMP_PARAMS);
 
 #[derive(Clone)]
 pub struct MoveLoopEvent {
@@ -3461,20 +2478,7 @@ impl MoveLoopEvent {
     }
 }
 
-impl Event for MoveLoopEvent {
-    fn get_type(&self) -> EventType {
-        EventType::MoveLoop
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(MoveLoopEvent, MoveLoop);
 
 #[derive(Clone)]
 pub struct EraseLoopEvent {
@@ -3494,20 +2498,7 @@ impl EraseLoopEvent {
     }
 }
 
-impl Event for EraseLoopEvent {
-    fn get_type(&self) -> EventType {
-        EventType::EraseLoop
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(EraseLoopEvent, EraseLoop);
 
 #[derive(Clone)]
 pub struct EraseAllLoopsEvent {
@@ -3525,20 +2516,7 @@ impl EraseAllLoopsEvent {
     }
 }
 
-impl Event for EraseAllLoopsEvent {
-    fn get_type(&self) -> EventType {
-        EventType::EraseAllLoops
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(EraseAllLoopsEvent, EraseAllLoops);
 
 #[derive(Clone)]
 pub struct SaveLoopEvent {
@@ -3558,20 +2536,7 @@ impl SaveLoopEvent {
     }
 }
 
-impl Event for SaveLoopEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SaveLoop
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SaveLoopEvent, SaveLoop);
 
 #[derive(Clone)]
 pub struct RenameLoopEvent {
@@ -3593,20 +2558,7 @@ impl RenameLoopEvent {
     }
 }
 
-impl Event for RenameLoopEvent {
-    fn get_type(&self) -> EventType {
-        EventType::RenameLoop
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(RenameLoopEvent, RenameLoop);
 
 #[derive(Clone)]
 pub struct EraseSelectedLoopsEvent {
@@ -3626,20 +2578,7 @@ impl EraseSelectedLoopsEvent {
     }
 }
 
-impl Event for EraseSelectedLoopsEvent {
-    fn get_type(&self) -> EventType {
-        EventType::EraseSelectedLoops
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(EraseSelectedLoopsEvent, EraseSelectedLoops);
 
 #[derive(Clone)]
 pub struct ToggleDiskOutputEvent {
@@ -3657,20 +2596,7 @@ impl ToggleDiskOutputEvent {
     }
 }
 
-impl Event for ToggleDiskOutputEvent {
-    fn get_type(&self) -> EventType {
-        EventType::ToggleDiskOutput
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(ToggleDiskOutputEvent, ToggleDiskOutput);
 
 #[derive(Clone)]
 pub struct SetAutoLoopSavingEvent {
@@ -3690,20 +2616,7 @@ impl SetAutoLoopSavingEvent {
     }
 }
 
-impl Event for SetAutoLoopSavingEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SetAutoLoopSaving
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SetAutoLoopSavingEvent, SetAutoLoopSaving);
 
 #[derive(Clone)]
 pub struct SaveNewSceneEvent {
@@ -3721,20 +2634,7 @@ impl SaveNewSceneEvent {
     }
 }
 
-impl Event for SaveNewSceneEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SaveNewScene
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SaveNewSceneEvent, SaveNewScene);
 
 #[derive(Clone)]
 pub struct SaveCurrentSceneEvent {
@@ -3752,20 +2652,7 @@ impl SaveCurrentSceneEvent {
     }
 }
 
-impl Event for SaveCurrentSceneEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SaveCurrentScene
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SaveCurrentSceneEvent, SaveCurrentScene);
 
 #[derive(Clone)]
 pub struct SetLoadLoopIdEvent {
@@ -3785,20 +2672,7 @@ impl SetLoadLoopIdEvent {
     }
 }
 
-impl Event for SetLoadLoopIdEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SetLoadLoopId
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SetLoadLoopIdEvent, SetLoadLoopId);
 
 #[derive(Clone)]
 pub struct SetDefaultLoopPlacementEvent {
@@ -3818,20 +2692,7 @@ impl SetDefaultLoopPlacementEvent {
     }
 }
 
-impl Event for SetDefaultLoopPlacementEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SetDefaultLoopPlacement
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SetDefaultLoopPlacementEvent, SetDefaultLoopPlacement);
 
 #[derive(Clone)]
 pub struct SelectPulseEvent {
@@ -3851,20 +2712,7 @@ impl SelectPulseEvent {
     }
 }
 
-impl Event for SelectPulseEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SelectPulse
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SelectPulseEvent, SelectPulse);
 
 #[derive(Clone)]
 pub struct DeletePulseEvent {
@@ -3884,20 +2732,7 @@ impl DeletePulseEvent {
     }
 }
 
-impl Event for DeletePulseEvent {
-    fn get_type(&self) -> EventType {
-        EventType::DeletePulse
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(DeletePulseEvent, DeletePulse);
 
 #[derive(Clone)]
 pub struct TapPulseEvent {
@@ -3919,20 +2754,7 @@ impl TapPulseEvent {
     }
 }
 
-impl Event for TapPulseEvent {
-    fn get_type(&self) -> EventType {
-        EventType::TapPulse
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(TapPulseEvent, TapPulse);
 
 #[derive(Clone)]
 pub struct SwitchMetronomeEvent {
@@ -3954,20 +2776,7 @@ impl SwitchMetronomeEvent {
     }
 }
 
-impl Event for SwitchMetronomeEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SwitchMetronome
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SwitchMetronomeEvent, SwitchMetronome);
 
 #[derive(Clone)]
 pub struct SetSyncTypeEvent {
@@ -3987,20 +2796,7 @@ impl SetSyncTypeEvent {
     }
 }
 
-impl Event for SetSyncTypeEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SetSyncType
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SetSyncTypeEvent, SetSyncType);
 
 #[derive(Clone)]
 pub struct SetSyncSpeedEvent {
@@ -4020,20 +2816,7 @@ impl SetSyncSpeedEvent {
     }
 }
 
-impl Event for SetSyncSpeedEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SetSyncSpeed
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SetSyncSpeedEvent, SetSyncSpeed);
 
 #[derive(Clone)]
 pub struct SetMidiSyncEvent {
@@ -4053,20 +2836,7 @@ impl SetMidiSyncEvent {
     }
 }
 
-impl Event for SetMidiSyncEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SetMidiSync
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SetMidiSyncEvent, SetMidiSync);
 
 #[derive(Clone)]
 pub struct SetVariableEvent {
@@ -4097,26 +2867,7 @@ impl SetVariableEvent {
     }
 }
 
-impl Event for SetVariableEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SetVariable
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        4
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        SET_VARIABLE_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(SetVariableEvent, SetVariable, SET_VARIABLE_PARAMS);
 
 #[derive(Clone)]
 pub struct ToggleVariableEvent {
@@ -4140,26 +2891,7 @@ impl ToggleVariableEvent {
     }
 }
 
-impl Event for ToggleVariableEvent {
-    fn get_type(&self) -> EventType {
-        EventType::ToggleVariable
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        3
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        TOGGLE_VARIABLE_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(ToggleVariableEvent, ToggleVariable, TOGGLE_VARIABLE_PARAMS);
 
 #[derive(Clone)]
 pub struct SplitVariableMSBLSBEvent {
@@ -4183,26 +2915,7 @@ impl SplitVariableMSBLSBEvent {
     }
 }
 
-impl Event for SplitVariableMSBLSBEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SplitVariableMSBLSB
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-    fn get_num_params(&self) -> usize {
-        3
-    }
-    fn get_param(&self, idx: usize) -> Option<EventParameter> {
-        SPLIT_VARIABLE_PARAMS.get(idx).copied()
-    }
-}
+impl_event!(SplitVariableMSBLSBEvent, SplitVariableMSBLSB, SPLIT_VARIABLE_PARAMS);
 
 #[derive(Clone)]
 pub struct ParamSetGetAbsoluteParamIdxEvent {
@@ -4233,20 +2946,7 @@ impl ParamSetGetAbsoluteParamIdxEvent {
     }
 }
 
-impl Event for ParamSetGetAbsoluteParamIdxEvent {
-    fn get_type(&self) -> EventType {
-        EventType::ParamSetGetAbsoluteParamIdx
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(ParamSetGetAbsoluteParamIdxEvent, ParamSetGetAbsoluteParamIdx);
 
 #[derive(Clone)]
 pub struct ParamSetGetParamEvent {
@@ -4272,20 +2972,7 @@ impl ParamSetGetParamEvent {
     }
 }
 
-impl Event for ParamSetGetParamEvent {
-    fn get_type(&self) -> EventType {
-        EventType::ParamSetGetParam
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(ParamSetGetParamEvent, ParamSetGetParam);
 
 #[derive(Clone)]
 pub struct ParamSetSetParamEvent {
@@ -4311,20 +2998,7 @@ impl ParamSetSetParamEvent {
     }
 }
 
-impl Event for ParamSetSetParamEvent {
-    fn get_type(&self) -> EventType {
-        EventType::ParamSetSetParam
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(ParamSetSetParamEvent, ParamSetSetParam);
 
 #[derive(Clone)]
 pub struct LogFaderVolToLinearEvent {
@@ -4348,20 +3022,7 @@ impl LogFaderVolToLinearEvent {
     }
 }
 
-impl Event for LogFaderVolToLinearEvent {
-    fn get_type(&self) -> EventType {
-        EventType::LogFaderVolToLinear
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(LogFaderVolToLinearEvent, LogFaderVolToLinear);
 
 #[derive(Clone)]
 pub struct ALSAMixerControlSetEvent {
@@ -4391,20 +3052,7 @@ impl ALSAMixerControlSetEvent {
     }
 }
 
-impl Event for ALSAMixerControlSetEvent {
-    fn get_type(&self) -> EventType {
-        EventType::ALSAMixerControlSet
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(ALSAMixerControlSetEvent, ALSAMixerControlSet);
 
 #[derive(Clone)]
 pub struct CreateSnapshotEvent {
@@ -4424,20 +3072,7 @@ impl CreateSnapshotEvent {
     }
 }
 
-impl Event for CreateSnapshotEvent {
-    fn get_type(&self) -> EventType {
-        EventType::CreateSnapshot
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(CreateSnapshotEvent, CreateSnapshot);
 
 #[derive(Clone)]
 pub struct SwapSnapshotsEvent {
@@ -4459,20 +3094,7 @@ impl SwapSnapshotsEvent {
     }
 }
 
-impl Event for SwapSnapshotsEvent {
-    fn get_type(&self) -> EventType {
-        EventType::SwapSnapshots
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(SwapSnapshotsEvent, SwapSnapshots);
 
 #[derive(Clone)]
 pub struct RenameSnapshotEvent {
@@ -4492,20 +3114,7 @@ impl RenameSnapshotEvent {
     }
 }
 
-impl Event for RenameSnapshotEvent {
-    fn get_type(&self) -> EventType {
-        EventType::RenameSnapshot
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(RenameSnapshotEvent, RenameSnapshot);
 
 #[derive(Clone)]
 pub struct TriggerSnapshotEvent {
@@ -4525,20 +3134,7 @@ impl TriggerSnapshotEvent {
     }
 }
 
-impl Event for TriggerSnapshotEvent {
-    fn get_type(&self) -> EventType {
-        EventType::TriggerSnapshot
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(TriggerSnapshotEvent, TriggerSnapshot);
 
 #[derive(Clone)]
 pub struct TransmitPlayingLoopsToDAWEvent {
@@ -4556,20 +3152,7 @@ impl TransmitPlayingLoopsToDAWEvent {
     }
 }
 
-impl Event for TransmitPlayingLoopsToDAWEvent {
-    fn get_type(&self) -> EventType {
-        EventType::TransmitPlayingLoopsToDAW
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(TransmitPlayingLoopsToDAWEvent, TransmitPlayingLoopsToDAW);
 
 #[derive(Clone)]
 pub struct PulseSyncEvent {
@@ -4587,20 +3170,7 @@ impl PulseSyncEvent {
     }
 }
 
-impl Event for PulseSyncEvent {
-    fn get_type(&self) -> EventType {
-        EventType::PulseSync
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
+impl_event!(PulseSyncEvent, PulseSync);
 
 // ============================================================
 // Event manager
