@@ -665,13 +665,12 @@ impl<T: Default> RTStoreItem<T> {
 
 pub struct RTStore<T: Default> {
     items: Vec<RTStoreItem<T>>,
-    num_items: usize,
 }
 
 impl<T: Default> RTStore<T> {
     pub fn new(num_items: usize) -> Self {
         let items = (0..num_items).map(|_| RTStoreItem::new()).collect();
-        RTStore { items, num_items }
+        RTStore { items }
     }
 
     pub fn find_item_with_state(
@@ -698,15 +697,16 @@ impl<T: Default> RTStore<T> {
         expect_state: ItemState,
         new_state: ItemState,
     ) -> bool {
-        if idx >= self.num_items {
-            return false;
-        }
         let expect = u8::from(expect_state);
         let new = u8::from(new_state);
-        self.items[idx]
-            .status
-            .compare_exchange(expect, new, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
+        self.items
+            .get(idx)
+            .map(|item| {
+                item.status
+                    .compare_exchange(expect, new, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+            })
+            .unwrap_or(false)
     }
 
     pub fn get_item_at_idx(&self, idx: usize) -> Option<&T> {
