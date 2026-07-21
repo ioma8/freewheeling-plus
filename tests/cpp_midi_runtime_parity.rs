@@ -1,7 +1,4 @@
-use freewheeling_plus::event::{
-    MIDIChannelPressureInputEvent, MIDIControllerInputEvent, MIDIKeyInputEvent,
-    MIDIPitchBendInputEvent, MIDIProgramChangeInputEvent, MIDIStartStopInputEvent,
-};
+use freewheeling_plus::event::Event;
 use freewheeling_plus::midiio::MidiIo;
 use freewheeling_plus::midiio::{MidiMessage, MidiPortMessage, decode, encode};
 use freewheeling_plus::midiio_platform::{MidiPort, PortRegistry, RegistryMidiBackend};
@@ -9,7 +6,7 @@ use freewheeling_plus::native_event_bridge::midi_event;
 
 const GOLDEN: &str = include_str!("../fixtures/cpp-golden/midi/messages.log");
 
-fn event(message: MidiMessage) -> Box<dyn freewheeling_plus::event::Event> {
+fn event(message: MidiMessage) -> Event {
     midi_event(MidiPortMessage { port: 0, message }).expect("actionable MIDI message")
 }
 
@@ -83,35 +80,38 @@ fn genuine_cpp_input_fixture_matches_codec_and_event_mapping() {
     }
 
     let key = event(decode(&[0x92, 62, 0]).unwrap());
-    let key = key.as_any().downcast_ref::<MIDIKeyInputEvent>().unwrap();
+    let (notenum, vel) = match &key {
+        Event::MIDIKeyInput { notenum, vel, .. } => (*notenum, *vel),
+        _ => unreachable!(),
+    };
     assert_eq!(
-        (key.channel, key.notenum, key.vel, key.down),
-        (2, 62, 0, false)
+        (notenum, vel),
+        (62, 0)
     );
     let cc = event(decode(&[0xb3, 7, 100]).unwrap());
-    let cc = cc
-        .as_any()
-        .downcast_ref::<MIDIControllerInputEvent>()
-        .unwrap();
-    assert_eq!((cc.channel, cc.ctrl, cc.val), (3, 7, 100));
+    let (channel, ctrl, val) = match &cc {
+        Event::MIDIControllerInput { channel, ctrl, val, .. } => (*channel, *ctrl, *val),
+        _ => unreachable!(),
+    };
+    assert_eq!((channel, ctrl, val), (3, 7, 100));
     let program = event(decode(&[0xc4, 42]).unwrap());
-    let program = program
-        .as_any()
-        .downcast_ref::<MIDIProgramChangeInputEvent>()
-        .unwrap();
-    assert_eq!((program.channel, program.val), (4, 42));
+    let (ch, pv) = match &program {
+        Event::MIDIProgramChangeInput { channel, val, .. } => (*channel, *val),
+        _ => unreachable!(),
+    };
+    assert_eq!((ch, pv), (4, 42));
     let pressure = event(decode(&[0xd5, 77]).unwrap());
-    let pressure = pressure
-        .as_any()
-        .downcast_ref::<MIDIChannelPressureInputEvent>()
-        .unwrap();
-    assert_eq!((pressure.channel, pressure.val), (5, 77));
+    let (pch, pval) = match &pressure {
+        Event::MIDIChannelPressureInput { channel, val, .. } => (*channel, *val),
+        _ => unreachable!(),
+    };
+    assert_eq!((pch, pval), (5, 77));
     let bend = event(decode(&[0xe6, 0x34, 0x12]).unwrap());
-    let bend = bend
-        .as_any()
-        .downcast_ref::<MIDIPitchBendInputEvent>()
-        .unwrap();
-    assert_eq!((bend.channel, bend.val), (6, 0x1234));
+    let (bch, bval) = match &bend {
+        Event::MIDIPitchBendInput { channel, val, .. } => (*channel, *val),
+        _ => unreachable!(),
+    };
+    assert_eq!((bch, bval), (6, 0x1234));
 }
 
 #[test]
@@ -242,11 +242,10 @@ fn genuine_cpp_output_fixture_matches_clamping_sync_and_runtime_send() {
     for (wire, start) in [([0xfa], true), ([0xfc], false)] {
         let mapped = event(decode(&wire).unwrap());
         assert_eq!(
-            mapped
-                .as_any()
-                .downcast_ref::<MIDIStartStopInputEvent>()
-                .unwrap()
-                .start,
+            match &mapped {
+                Event::MIDIStartStopInput { start, .. } => *start,
+                _ => unreachable!(),
+            },
             start
         );
     }

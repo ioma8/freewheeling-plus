@@ -1,34 +1,41 @@
 use freewheeling_plus::datatypes::{Range, UserVariable};
-use freewheeling_plus::event::{
-    ALSAMixerControlSetEvent, AdjustMidiTransposeEvent, BrowserItemBrowsedEvent,
-    BrowserMoveToItemAbsoluteEvent, BrowserMoveToItemEvent, BrowserRenameItemEvent,
-    BrowserSelectItemEvent, CreateSnapshotEvent, DeletePulseEvent, EraseAllLoopsEvent,
-    EraseLoopEvent, EraseSelectedLoopsEvent, Event, EventParameter, EventType, ExitSessionEvent,
-    FluidSynthEnableEvent, GoSubEvent, JoystickButtonInputEvent, KeyInputEvent,
-    LogFaderVolToLinearEvent, LoopClickedEvent, MIDIChannelPressureInputEvent,
-    MIDIControllerInputEvent, MIDIKeyInputEvent, MIDIPitchBendInputEvent,
-    MIDIProgramChangeInputEvent, MouseButtonInputEvent, MouseMotionInputEvent, MoveLoopEvent,
-    ParamSetGetAbsoluteParamIdxEvent, ParamSetGetParamEvent, ParamSetSetParamEvent,
-    PatchBrowserMoveToBankByIndexEvent, PatchBrowserMoveToBankEvent, PulseSyncEvent,
-    RenameLoopEvent, RenameSnapshotEvent, SaveCurrentSceneEvent, SaveLoopEvent, SaveNewSceneEvent,
-    SelectPulseEvent, SetAutoLoopSavingEvent, SetDefaultLoopPlacementEvent, SetInVolumeEvent,
-    SetLoadLoopIdEvent, SetMasterInVolumeEvent, SetMidiEchoChannelEvent, SetMidiEchoPortEvent,
-    SetMidiSyncEvent, SetMidiTuningEvent, SetSyncSpeedEvent, SetSyncTypeEvent,
-    SetTriggerVolumeEvent, ShowDebugInfoEvent, SlideInVolumeEvent, SlideMasterInVolumeEvent,
-    StartInterfaceEvent, StartSessionEvent, SwapSnapshotsEvent, SwitchMetronomeEvent,
-    TapPulseEvent, ToggleDiskOutputEvent, ToggleInputRecordEvent, TransmitPlayingLoopsToDAWEvent,
-    TriggerSnapshotEvent, VideoFullScreenEvent, VideoShowDisplayEvent, VideoShowHelpEvent,
-    VideoShowLoopEvent, VideoShowParamSetBankEvent, VideoShowParamSetPageEvent,
-    VideoShowSnapshotPageEvent, VideoSwitchInterfaceEvent,
-};
+use freewheeling_plus::event::{Event, EventParameter, EventType, INTERFACEID};
 
 #[test]
 fn test_midi_events_report_expected_types() {
-    let cc = MIDIControllerInputEvent::new(1, 7, 100);
-    let key = MIDIKeyInputEvent::new(2, 64, 90, true);
-    let program = MIDIProgramChangeInputEvent::new(1, 6, 42, false);
-    let pressure = MIDIChannelPressureInputEvent::new(1, 6, 99, true);
-    let bend = MIDIPitchBendInputEvent::new(3, 1234);
+    let cc = Event::MIDIControllerInput {
+        outport: 1,
+        channel: 0,
+        ctrl: 7,
+        val: 100,
+        echo: false,
+    };
+    let key = Event::MIDIKeyInput {
+        outport: 2,
+        channel: 0,
+        notenum: 64,
+        vel: 90,
+        down: true,
+        echo: false,
+    };
+    let program = Event::MIDIProgramChangeInput {
+        outport: 1,
+        channel: 6,
+        val: 42,
+        echo: false,
+    };
+    let pressure = Event::MIDIChannelPressureInput {
+        outport: 1,
+        channel: 6,
+        val: 99,
+        echo: true,
+    };
+    let bend = Event::MIDIPitchBendInput {
+        outport: 3,
+        channel: 0,
+        val: 1234,
+        echo: false,
+    };
 
     assert_eq!(cc.get_type(), EventType::InputMIDIController);
     assert_eq!(key.get_type(), EventType::InputMIDIKey);
@@ -38,137 +45,315 @@ fn test_midi_events_report_expected_types() {
 }
 
 #[test]
-fn test_event_clone_box_preserves_payload() {
-    let ev: Box<dyn Event> = Box::new(FluidSynthEnableEvent::new(true));
-    let cloned = ev.clone_box();
-    let typed = cloned
-        .as_any()
-        .downcast_ref::<FluidSynthEnableEvent>()
-        .unwrap();
-    assert!(typed.enable);
-    assert_eq!(typed.get_type(), EventType::FluidSynthEnable);
+fn test_event_clone_preserves_payload() {
+    let ev = Event::FluidSynthEnable { enable: true };
+    let cloned = ev.clone();
+    assert_eq!(cloned, ev);
+    assert_eq!(cloned.get_type(), EventType::FluidSynthEnable);
 }
 
 #[test]
 fn test_browser_navigation_events_carry_indices() {
-    let move_rel = BrowserMoveToItemEvent::new(9, -1, 4);
-    let move_abs = BrowserMoveToItemAbsoluteEvent::new(9, 12);
-    let bank_rel = PatchBrowserMoveToBankEvent::new(1);
-    let bank_abs = PatchBrowserMoveToBankByIndexEvent::new(3);
+    let move_rel = Event::BrowserMoveToItem {
+        browserid: 9,
+        adjust: -1,
+        jump_adjust: 4,
+    };
+    let move_abs = Event::BrowserMoveToItemAbsolute {
+        browserid: 9,
+        index: 12,
+    };
+    let bank_rel = Event::PatchBrowserMoveToBank { direction: 1 };
+    let bank_abs = Event::PatchBrowserMoveToBankByIndex { index: 3 };
 
-    assert_eq!(move_rel.browserid, 9);
-    assert_eq!(move_rel.adjust, -1);
-    assert_eq!(move_rel.jump_adjust, 4);
-    assert_eq!(move_abs.browserid, 9);
-    assert_eq!(move_abs.index, 12);
-    assert_eq!(bank_rel.direction, 1);
-    assert_eq!(bank_abs.index, 3);
+    let (browserid, adjust, jump_adjust) = match &move_rel {
+        Event::BrowserMoveToItem {
+            browserid,
+            adjust,
+            jump_adjust,
+        } => (*browserid, *adjust, *jump_adjust),
+        _ => unreachable!(),
+    };
+    assert_eq!(browserid, 9);
+    assert_eq!(adjust, -1);
+    assert_eq!(jump_adjust, 4);
+
+    let (browserid2, index2) = match &move_abs {
+        Event::BrowserMoveToItemAbsolute { browserid, index } => (*browserid, *index),
+        _ => unreachable!(),
+    };
+    assert_eq!(browserid2, 9);
+    assert_eq!(index2, 12);
+
+    let direction = match &bank_rel {
+        Event::PatchBrowserMoveToBank { direction } => *direction,
+        _ => unreachable!(),
+    };
+    assert_eq!(direction, 1);
+
+    let index3 = match &bank_abs {
+        Event::PatchBrowserMoveToBankByIndex { index } => *index,
+        _ => unreachable!(),
+    };
+    assert_eq!(index3, 3);
 }
 
 #[test]
 fn test_browser_selection_events_preserve_browser_id() {
-    let select = BrowserSelectItemEvent::new(2);
-    let rename = BrowserRenameItemEvent::new(3);
-    let browsed = BrowserItemBrowsedEvent::new(4);
+    let select = Event::BrowserSelectItem { browserid: 2 };
+    let rename = Event::BrowserRenameItem { browserid: 3 };
+    let browsed = Event::BrowserItemBrowsed { browserid: 4 };
 
-    assert_eq!(select.browserid, 2);
-    assert_eq!(rename.browserid, 3);
-    assert_eq!(browsed.browserid, 4);
+    let b1 = match &select {
+        Event::BrowserSelectItem { browserid } => *browserid,
+        _ => unreachable!(),
+    };
+    assert_eq!(b1, 2);
+
+    let b2 = match &rename {
+        Event::BrowserRenameItem { browserid } => *browserid,
+        _ => unreachable!(),
+    };
+    assert_eq!(b2, 3);
+
+    let b3 = match &browsed {
+        Event::BrowserItemBrowsed { browserid } => *browserid,
+        _ => unreachable!(),
+    };
+    assert_eq!(b3, 4);
     assert_eq!(browsed.get_type(), EventType::BrowserItemBrowsed);
 }
 
 #[test]
 fn test_set_midi_tuning_event_payload() {
-    let tuning = SetMidiTuningEvent::new(12.5);
+    let tuning = Event::SetMidiTuning { tuning: 12.5 };
     assert_eq!(tuning.get_type(), EventType::SetMidiTuning);
-    assert!((tuning.tuning - 12.5).abs() < 0.0001);
+    if let Event::SetMidiTuning { tuning: val } = &tuning {
+        assert!((val - 12.5).abs() < 0.0001);
+    }
 }
 
 #[test]
 fn test_session_events_have_expected_types_and_payloads() {
-    let start = StartSessionEvent::new();
-    let iface = StartInterfaceEvent::new(7);
-    let exit = ExitSessionEvent::new();
+    let start = Event::StartSession;
+    let iface = Event::StartInterface { interfaceid: 7 };
+    let exit = Event::ExitSession;
 
     assert_eq!(start.get_type(), EventType::StartSession);
     assert_eq!(iface.get_type(), EventType::StartInterface);
-    assert_eq!(iface.interfaceid, 7);
+    let ifid = match &iface {
+        Event::StartInterface { interfaceid } => *interfaceid,
+        _ => unreachable!(),
+    };
+    assert_eq!(ifid, 7);
     assert_eq!(exit.get_type(), EventType::ExitSession);
 }
 
 #[test]
 fn test_volume_and_input_control_events_preserve_payloads() {
-    let slide_master = SlideMasterInVolumeEvent::new(0.25);
-    let slide_in = SlideInVolumeEvent::new(2, -0.5);
-    let set_master = SetMasterInVolumeEvent::new(0.8, 0.7);
-    let set_in = SetInVolumeEvent::new(3, 0.4, 0.2);
-    let toggle = ToggleInputRecordEvent::new(1);
+    let slide_master = Event::SlideMasterInVolume { slide: 0.25 };
+    let slide_in = Event::SlideInVolume {
+        input: 2,
+        slide: -0.5,
+    };
+    let set_master = Event::SetMasterInVolume {
+        vol: 0.8,
+        fadervol: 0.7,
+    };
+    let set_in = Event::SetInVolume {
+        input: 3,
+        vol: 0.4,
+        fadervol: 0.2,
+    };
+    let toggle = Event::ToggleInputRecord { input: 1 };
 
-    assert!((slide_master.slide - 0.25).abs() < 0.0001);
-    assert_eq!(slide_in.input, 2);
-    assert!((slide_in.slide + 0.5).abs() < 0.0001);
-    assert!((set_master.vol - 0.8).abs() < 0.0001);
-    assert!((set_master.fadervol - 0.7).abs() < 0.0001);
-    assert_eq!(set_in.input, 3);
-    assert_eq!(toggle.input, 1);
+    let sm_slide = match &slide_master {
+        Event::SlideMasterInVolume { slide } => *slide,
+        _ => unreachable!(),
+    };
+    assert!((sm_slide - 0.25).abs() < 0.0001);
+
+    let (si_input, si_slide) = match &slide_in {
+        Event::SlideInVolume { input, slide } => (*input, *slide),
+        _ => unreachable!(),
+    };
+    assert_eq!(si_input, 2);
+    assert!((si_slide + 0.5).abs() < 0.0001);
+
+    let (sm_vol, sm_fv) = match &set_master {
+        Event::SetMasterInVolume { vol, fadervol } => (*vol, *fadervol),
+        _ => unreachable!(),
+    };
+    assert!((sm_vol - 0.8).abs() < 0.0001);
+    assert!((sm_fv - 0.7).abs() < 0.0001);
+
+    let si_input2 = match &set_in {
+        Event::SetInVolume { input, .. } => *input,
+        _ => unreachable!(),
+    };
+    assert_eq!(si_input2, 3);
+
+    let toggle_input = match &toggle {
+        Event::ToggleInputRecord { input } => *input,
+        _ => unreachable!(),
+    };
+    assert_eq!(toggle_input, 1);
 }
 
 #[test]
 fn test_midi_echo_and_trigger_events_preserve_payloads() {
-    let echo_port = SetMidiEchoPortEvent::new(2);
-    let echo_channel = SetMidiEchoChannelEvent::new(-1);
-    let transpose = AdjustMidiTransposeEvent::new(12);
-    let trigger = SetTriggerVolumeEvent::new(5, 0.9);
+    let echo_port = Event::SetMidiEchoPort { echoport: 2 };
+    let echo_channel = Event::SetMidiEchoChannel { echochannel: -1 };
+    let transpose = Event::AdjustMidiTranspose { adjust: 12 };
+    let trigger = Event::SetTriggerVolume {
+        index: 5,
+        vol: 0.9,
+    };
 
-    assert_eq!(echo_port.echoport, 2);
-    assert_eq!(echo_channel.echochannel, -1);
-    assert_eq!(transpose.adjust, 12);
-    assert_eq!(trigger.index, 5);
-    assert!((trigger.vol - 0.9).abs() < 0.0001);
+    let ep = match &echo_port {
+        Event::SetMidiEchoPort { echoport } => *echoport,
+        _ => unreachable!(),
+    };
+    assert_eq!(ep, 2);
+
+    let ec = match &echo_channel {
+        Event::SetMidiEchoChannel { echochannel } => *echochannel,
+        _ => unreachable!(),
+    };
+    assert_eq!(ec, -1);
+
+    let ta = match &transpose {
+        Event::AdjustMidiTranspose { adjust } => *adjust,
+        _ => unreachable!(),
+    };
+    assert_eq!(ta, 12);
+
+    let (ti, tv) = match &trigger {
+        Event::SetTriggerVolume { index, vol } => (*index, *vol),
+        _ => unreachable!(),
+    };
+    assert_eq!(ti, 5);
+    assert!((tv - 0.9).abs() < 0.0001);
 }
 
 #[test]
 fn test_loop_management_events_preserve_payloads() {
-    let move_loop = MoveLoopEvent::new(5, 8);
-    let erase_loop = EraseLoopEvent::new(11);
-    let erase_all = EraseAllLoopsEvent::new();
-    let save_loop = SaveLoopEvent::new(7);
-    let placement = SetDefaultLoopPlacementEvent::new(Range::new(20, 29));
+    let move_loop = Event::MoveLoop {
+        oldloopid: 5,
+        newloopid: 8,
+    };
+    let erase_loop = Event::EraseLoop { index: 11 };
+    let erase_all = Event::EraseAllLoops;
+    let save_loop = Event::SaveLoop { index: 7 };
+    let placement = Event::SetDefaultLoopPlacement {
+        looprange: Range::new(20, 29),
+    };
 
-    assert_eq!(move_loop.oldloopid, 5);
-    assert_eq!(move_loop.newloopid, 8);
-    assert_eq!(erase_loop.index, 11);
+    let (oldid, newid) = match &move_loop {
+        Event::MoveLoop {
+            oldloopid,
+            newloopid,
+        } => (*oldloopid, *newloopid),
+        _ => unreachable!(),
+    };
+    assert_eq!(oldid, 5);
+    assert_eq!(newid, 8);
+
+    let el = match &erase_loop {
+        Event::EraseLoop { index } => *index,
+        _ => unreachable!(),
+    };
+    assert_eq!(el, 11);
+
     assert_eq!(erase_all.get_type(), EventType::EraseAllLoops);
-    assert_eq!(save_loop.index, 7);
-    assert_eq!(placement.looprange, Range::new(20, 29));
+
+    let sl = match &save_loop {
+        Event::SaveLoop { index } => *index,
+        _ => unreachable!(),
+    };
+    assert_eq!(sl, 7);
+
+    let lr = match &placement {
+        Event::SetDefaultLoopPlacement { looprange } => looprange.clone(),
+        _ => unreachable!(),
+    };
+    assert_eq!(lr, Range::new(20, 29));
 }
 
 #[test]
 fn test_pulse_and_sync_events_preserve_payloads() {
-    let select = SelectPulseEvent::new(1);
-    let delete = DeletePulseEvent::new(2);
-    let tap = TapPulseEvent::new(3, true);
-    let metro = SwitchMetronomeEvent::new(4, false);
-    let sync_type = SetSyncTypeEvent::new(true);
-    let sync_speed = SetSyncSpeedEvent::new(24);
-    let midi_sync = SetMidiSyncEvent::new(1);
-    let pulse_sync = PulseSyncEvent::new();
+    let select = Event::SelectPulse { pulse: 1 };
+    let delete = Event::DeletePulse { pulse: 2 };
+    let tap = Event::TapPulse {
+        pulse: 3,
+        newlen: true,
+    };
+    let metro = Event::SwitchMetronome {
+        pulse: 4,
+        metronome: false,
+    };
+    let sync_type = Event::SetSyncType { stype: true };
+    let sync_speed = Event::SetSyncSpeed { sspd: 24 };
+    let midi_sync = Event::SetMidiSync { midisync: 1 };
+    let pulse_sync = Event::PulseSync;
 
-    assert_eq!(select.pulse, 1);
-    assert_eq!(delete.pulse, 2);
-    assert_eq!(tap.pulse, 3);
-    assert!(tap.newlen);
-    assert_eq!(metro.pulse, 4);
-    assert!(!metro.metronome);
-    assert!(sync_type.stype);
-    assert_eq!(sync_speed.sspd, 24);
-    assert_eq!(midi_sync.midisync, 1);
+    let sp = match &select {
+        Event::SelectPulse { pulse } => *pulse,
+        _ => unreachable!(),
+    };
+    assert_eq!(sp, 1);
+
+    let dp = match &delete {
+        Event::DeletePulse { pulse } => *pulse,
+        _ => unreachable!(),
+    };
+    assert_eq!(dp, 2);
+
+    let (tp, tn) = match &tap {
+        Event::TapPulse { pulse, newlen } => (*pulse, *newlen),
+        _ => unreachable!(),
+    };
+    assert_eq!(tp, 3);
+    assert!(tn);
+
+    let (mp, mm) = match &metro {
+        Event::SwitchMetronome { pulse, metronome } => (*pulse, *metronome),
+        _ => unreachable!(),
+    };
+    assert_eq!(mp, 4);
+    assert!(!mm);
+
+    let st = match &sync_type {
+        Event::SetSyncType { stype } => *stype,
+        _ => unreachable!(),
+    };
+    assert!(st);
+
+    let ss = match &sync_speed {
+        Event::SetSyncSpeed { sspd } => *sspd,
+        _ => unreachable!(),
+    };
+    assert_eq!(ss, 24);
+
+    let ms = match &midi_sync {
+        Event::SetMidiSync { midisync } => *midisync,
+        _ => unreachable!(),
+    };
+    assert_eq!(ms, 1);
+
     assert_eq!(pulse_sync.get_type(), EventType::PulseSync);
 }
 
 #[test]
 fn test_event_parameter_metadata_for_core_events() {
-    let midi_key = MIDIKeyInputEvent::new(2, 64, 90, true);
+    let midi_key = Event::MIDIKeyInput {
+        outport: 2,
+        channel: 0,
+        notenum: 64,
+        vel: 90,
+        down: true,
+        echo: false,
+    };
     // The C++ event table includes output routing ahead of the MIDI payload.
     assert_eq!(midi_key.get_num_params(), 6);
     assert_eq!(
@@ -195,7 +380,13 @@ fn test_event_parameter_metadata_for_core_events() {
     );
     assert_eq!(midi_key.get_param(99), None);
 
-    let ctrl = MIDIControllerInputEvent::new(1, 7, 100);
+    let ctrl = Event::MIDIControllerInput {
+        outport: 1,
+        channel: 0,
+        ctrl: 7,
+        val: 100,
+        echo: false,
+    };
     assert_eq!(
         ctrl.get_param(2),
         Some(EventParameter::with_max_index(
@@ -205,7 +396,12 @@ fn test_event_parameter_metadata_for_core_events() {
         ))
     );
 
-    let program = MIDIProgramChangeInputEvent::new(1, 6, 42, false);
+    let program = Event::MIDIProgramChangeInput {
+        outport: 1,
+        channel: 6,
+        val: 42,
+        echo: false,
+    };
     assert_eq!(
         program.get_param(2),
         Some(EventParameter::new(
@@ -214,7 +410,12 @@ fn test_event_parameter_metadata_for_core_events() {
         ))
     );
 
-    let pressure = MIDIChannelPressureInputEvent::new(1, 6, 99, true);
+    let pressure = Event::MIDIChannelPressureInput {
+        outport: 1,
+        channel: 6,
+        val: 99,
+        echo: true,
+    };
     assert_eq!(
         pressure.get_param(2),
         Some(EventParameter::new(
@@ -223,7 +424,12 @@ fn test_event_parameter_metadata_for_core_events() {
         ))
     );
 
-    let bend = MIDIPitchBendInputEvent::new(3, 1234);
+    let bend = Event::MIDIPitchBendInput {
+        outport: 3,
+        channel: 0,
+        val: 1234,
+        echo: false,
+    };
     assert_eq!(
         bend.get_param(2),
         Some(EventParameter::new(
@@ -235,79 +441,280 @@ fn test_event_parameter_metadata_for_core_events() {
 
 #[test]
 fn test_display_control_events_preserve_payloads() {
-    let switch_iface = VideoSwitchInterfaceEvent::new(2);
-    let show_display = VideoShowDisplayEvent::new(2, 5, true);
-    let help = VideoShowHelpEvent::new(3);
-    let fullscreen = VideoFullScreenEvent::new(true);
-    let debug = ShowDebugInfoEvent::new(false);
-    let show_loop = VideoShowLoopEvent::new(1, 9, Range::new(10, 13));
-    let snapshot = VideoShowSnapshotPageEvent::new(1, 4, -1);
-    let bank = VideoShowParamSetBankEvent::new(1, 7, 1);
-    let page = VideoShowParamSetPageEvent::new(1, 7, -1);
+    let switch_iface = Event::VideoSwitchInterface { interfaceid: 2 };
+    let show_display = Event::VideoShowDisplay {
+        interfaceid: 2,
+        displayid: 5,
+        show: true,
+    };
+    let help = Event::VideoShowHelp { page: 3 };
+    let fullscreen = Event::VideoFullScreen { fullscreen: true };
+    let debug = Event::ShowDebugInfo { show: false };
+    let show_loop = Event::VideoShowLoop {
+        interfaceid: 1,
+        layoutid: 9,
+        loopid: Range::new(10, 13),
+    };
+    let snapshot = Event::VideoShowSnapshotPage {
+        interfaceid: 1,
+        displayid: 4,
+        page: -1,
+    };
+    let bank = Event::VideoShowParamSetBank {
+        interfaceid: 1,
+        displayid: 7,
+        bank: 1,
+    };
+    let page = Event::VideoShowParamSetPage {
+        interfaceid: 1,
+        displayid: 7,
+        page: -1,
+    };
 
-    assert_eq!(switch_iface.interfaceid, 2);
-    assert_eq!(show_display.displayid, 5);
-    assert!(show_display.show);
-    assert_eq!(help.page, 3);
-    assert!(fullscreen.fullscreen);
-    assert!(!debug.show);
-    assert_eq!(show_loop.layoutid, 9);
-    assert_eq!(show_loop.loopid, Range::new(10, 13));
-    assert_eq!(snapshot.page, -1);
-    assert_eq!(bank.bank, 1);
-    assert_eq!(page.page, -1);
+    let si = match &switch_iface {
+        Event::VideoSwitchInterface { interfaceid } => *interfaceid,
+        _ => unreachable!(),
+    };
+    assert_eq!(si, 2);
+
+    let (did, showing) = match &show_display {
+        Event::VideoShowDisplay {
+            displayid, show, ..
+        } => (*displayid, *show),
+        _ => unreachable!(),
+    };
+    assert_eq!(did, 5);
+    assert!(showing);
+
+    let hp = match &help {
+        Event::VideoShowHelp { page } => *page,
+        _ => unreachable!(),
+    };
+    assert_eq!(hp, 3);
+
+    let fs = match &fullscreen {
+        Event::VideoFullScreen { fullscreen } => *fullscreen,
+        _ => unreachable!(),
+    };
+    assert!(fs);
+
+    let ds = match &debug {
+        Event::ShowDebugInfo { show } => *show,
+        _ => unreachable!(),
+    };
+    assert!(!ds);
+
+    let (lid, lr) = match &show_loop {
+        Event::VideoShowLoop {
+            layoutid, loopid, ..
+        } => (*layoutid, loopid.clone()),
+        _ => unreachable!(),
+    };
+    assert_eq!(lid, 9);
+    assert_eq!(lr, Range::new(10, 13));
+
+    let sp = match &snapshot {
+        Event::VideoShowSnapshotPage { page, .. } => *page,
+        _ => unreachable!(),
+    };
+    assert_eq!(sp, -1);
+
+    let bk = match &bank {
+        Event::VideoShowParamSetBank { bank, .. } => *bank,
+        _ => unreachable!(),
+    };
+    assert_eq!(bk, 1);
+
+    let pp = match &page {
+        Event::VideoShowParamSetPage { page, .. } => *page,
+        _ => unreachable!(),
+    };
+    assert_eq!(pp, -1);
 }
 
 #[test]
 fn test_gosub_paramset_and_mixer_events_preserve_payloads() {
-    let go_sub = GoSubEvent::new(100, 1.5, 2.5, 3.5);
-    let loop_clicked = LoopClickedEvent::new(true, 2, 7, false);
-    let abs_idx = ParamSetGetAbsoluteParamIdxEvent::new(1, 5, 3, Some("VAR_idx".to_string()));
-    let get_param = ParamSetGetParamEvent::new(1, 5, 4, Some("VAR_value".to_string()));
-    let set_param = ParamSetSetParamEvent::new(1, 5, 4, 0.75);
+    let go_sub = Event::GoSub {
+        sub: 100,
+        param1: 1.5,
+        param2: 2.5,
+        param3: 3.5,
+    };
+    let loop_clicked = Event::LoopClicked {
+        down: true,
+        button: 2,
+        loopid: 7,
+        in_layout: false,
+    };
+    let abs_idx = Event::ParamSetGetAbsoluteParamIdx {
+        interfaceid: 1,
+        displayid: 5,
+        paramidx: 3,
+        absidx_name: Some("VAR_idx".to_string()),
+    };
+    let get_param = Event::ParamSetGetParam {
+        interfaceid: 1,
+        displayid: 5,
+        paramidx: 4,
+        var_name: Some("VAR_value".to_string()),
+    };
+    let set_param = Event::ParamSetSetParam {
+        interfaceid: 1,
+        displayid: 5,
+        paramidx: 4,
+        value: 0.75,
+    };
     let mut fadervol = UserVariable::new();
     fadervol.set_float(0.5);
-    let fader =
-        LogFaderVolToLinearEvent::new(Some("VAR_out".to_string()), fadervol.clone(), 16384.0);
-    let mixer = ALSAMixerControlSetEvent::new(0, 5, 1, 2, 3, 4);
+    let fader = Event::LogFaderVolToLinear {
+        var_name: Some("VAR_out".to_string()),
+        fadervol: fadervol.clone(),
+        scale: 16384.0,
+    };
+    let mixer = Event::ALSAMixerControlSet {
+        hwid: 0,
+        numid: 5,
+        val1: 1,
+        val2: 2,
+        val3: 3,
+        val4: 4,
+    };
 
-    assert_eq!(go_sub.sub, 100);
-    assert_eq!(go_sub.param2, 2.5);
-    assert_eq!(loop_clicked.loopid, 7);
-    assert!(!loop_clicked.in_layout);
-    assert_eq!(abs_idx.absidx_name.as_deref(), Some("VAR_idx"));
-    assert_eq!(get_param.var_name.as_deref(), Some("VAR_value"));
-    assert_eq!(set_param.value, 0.75);
-    assert_eq!(fader.var_name.as_deref(), Some("VAR_out"));
-    assert_eq!(fader.fadervol.as_f32(), fadervol.as_f32());
-    assert_eq!(mixer.numid, 5);
-    assert_eq!(mixer.val4, 4);
+    let (gs_sub, gs_param2) = match &go_sub {
+        Event::GoSub {
+            sub, param2, ..
+        } => (*sub, *param2),
+        _ => unreachable!(),
+    };
+    assert_eq!(gs_sub, 100);
+    assert_eq!(gs_param2, 2.5);
+
+    let (lc_loopid, lc_in_layout) = match &loop_clicked {
+        Event::LoopClicked {
+            loopid,
+            in_layout,
+            ..
+        } => (*loopid, *in_layout),
+        _ => unreachable!(),
+    };
+    assert_eq!(lc_loopid, 7);
+    assert!(!lc_in_layout);
+
+    let ai_name = match &abs_idx {
+        Event::ParamSetGetAbsoluteParamIdx {
+            absidx_name, ..
+        } => absidx_name.as_deref(),
+        _ => unreachable!(),
+    };
+    assert_eq!(ai_name, Some("VAR_idx"));
+
+    let gp_name = match &get_param {
+        Event::ParamSetGetParam { var_name, .. } => var_name.as_deref(),
+        _ => unreachable!(),
+    };
+    assert_eq!(gp_name, Some("VAR_value"));
+
+    let sp_val = match &set_param {
+        Event::ParamSetSetParam { value, .. } => *value,
+        _ => unreachable!(),
+    };
+    assert_eq!(sp_val, 0.75);
+
+    let fv_name = match &fader {
+        Event::LogFaderVolToLinear { var_name, .. } => var_name.as_deref(),
+        _ => unreachable!(),
+    };
+    assert_eq!(fv_name, Some("VAR_out"));
+
+    let fv_val = match &fader {
+        Event::LogFaderVolToLinear { fadervol, .. } => fadervol.as_f32(),
+        _ => unreachable!(),
+    };
+    assert_eq!(fv_val, fadervol.as_f32());
+
+    let (mx_numid, mx_val4) = match &mixer {
+        Event::ALSAMixerControlSet {
+            numid, val4, ..
+        } => (*numid, *val4),
+        _ => unreachable!(),
+    };
+    assert_eq!(mx_numid, 5);
+    assert_eq!(mx_val4, 4);
 }
 
 #[test]
 fn test_snapshot_scene_and_runtime_events_preserve_payloads() {
-    let rename_loop = RenameLoopEvent::new(9, true);
-    let erase_selected = EraseSelectedLoopsEvent::new(3);
-    let toggle_disk = ToggleDiskOutputEvent::new();
-    let autosave = SetAutoLoopSavingEvent::new(true);
-    let save_new = SaveNewSceneEvent::new();
-    let save_current = SaveCurrentSceneEvent::new();
-    let load_loop = SetLoadLoopIdEvent::new(14);
-    let create = CreateSnapshotEvent::new(2);
-    let swap = SwapSnapshotsEvent::new(2, 5);
-    let rename_snap = RenameSnapshotEvent::new(4);
-    let trigger = TriggerSnapshotEvent::new(7);
-    let transmit = TransmitPlayingLoopsToDAWEvent::new();
+    let rename_loop = Event::RenameLoop {
+        loopid: 9,
+        in_layout: true,
+    };
+    let erase_selected = Event::EraseSelectedLoops { setid: 3 };
+    let toggle_disk = Event::ToggleDiskOutput;
+    let autosave = Event::SetAutoLoopSaving { save: true };
+    let save_new = Event::SaveNewScene;
+    let save_current = Event::SaveCurrentScene;
+    let load_loop = Event::SetLoadLoopId { index: 14 };
+    let create = Event::CreateSnapshot { snapid: 2 };
+    let swap = Event::SwapSnapshots {
+        snapid1: 2,
+        snapid2: 5,
+    };
+    let rename_snap = Event::RenameSnapshot { snapid: 4 };
+    let trigger = Event::TriggerSnapshot { snapid: 7 };
+    let transmit = Event::TransmitPlayingLoopsToDAW;
 
-    assert_eq!(rename_loop.loopid, 9);
-    assert!(rename_loop.in_layout);
-    assert_eq!(erase_selected.setid, 3);
-    assert!(autosave.save);
-    assert_eq!(load_loop.index, 14);
-    assert_eq!(create.snapid, 2);
-    assert_eq!(swap.snapid2, 5);
-    assert_eq!(rename_snap.snapid, 4);
-    assert_eq!(trigger.snapid, 7);
+    let (rl_id, rl_layout) = match &rename_loop {
+        Event::RenameLoop {
+            loopid,
+            in_layout,
+        } => (*loopid, *in_layout),
+        _ => unreachable!(),
+    };
+    assert_eq!(rl_id, 9);
+    assert!(rl_layout);
+
+    let es_setid = match &erase_selected {
+        Event::EraseSelectedLoops { setid } => *setid,
+        _ => unreachable!(),
+    };
+    assert_eq!(es_setid, 3);
+
+    let autosave_val = match &autosave {
+        Event::SetAutoLoopSaving { save } => *save,
+        _ => unreachable!(),
+    };
+    assert!(autosave_val);
+
+    let ll_idx = match &load_loop {
+        Event::SetLoadLoopId { index } => *index,
+        _ => unreachable!(),
+    };
+    assert_eq!(ll_idx, 14);
+
+    let cs_id = match &create {
+        Event::CreateSnapshot { snapid } => *snapid,
+        _ => unreachable!(),
+    };
+    assert_eq!(cs_id, 2);
+
+    let sw_id2 = match &swap {
+        Event::SwapSnapshots { snapid2, .. } => *snapid2,
+        _ => unreachable!(),
+    };
+    assert_eq!(sw_id2, 5);
+
+    let rs_id = match &rename_snap {
+        Event::RenameSnapshot { snapid } => *snapid,
+        _ => unreachable!(),
+    };
+    assert_eq!(rs_id, 4);
+
+    let ts_id = match &trigger {
+        Event::TriggerSnapshot { snapid } => *snapid,
+        _ => unreachable!(),
+    };
+    assert_eq!(ts_id, 7);
+
     assert_eq!(toggle_disk.get_type(), EventType::ToggleDiskOutput);
     assert_eq!(save_new.get_type(), EventType::SaveNewScene);
     assert_eq!(save_current.get_type(), EventType::SaveCurrentScene);
@@ -316,7 +723,11 @@ fn test_snapshot_scene_and_runtime_events_preserve_payloads() {
 
 #[test]
 fn test_event_parameter_metadata_for_browser_and_volume_events() {
-    let move_rel = BrowserMoveToItemEvent::new(9, -1, 4);
+    let move_rel = Event::BrowserMoveToItem {
+        browserid: 9,
+        adjust: -1,
+        jump_adjust: 4,
+    };
     assert_eq!(move_rel.get_num_params(), 3);
     assert_eq!(
         move_rel.get_param(2),
@@ -326,7 +737,10 @@ fn test_event_parameter_metadata_for_browser_and_volume_events() {
         ))
     );
 
-    let move_abs = BrowserMoveToItemAbsoluteEvent::new(9, 12);
+    let move_abs = Event::BrowserMoveToItemAbsolute {
+        browserid: 9,
+        index: 12,
+    };
     assert_eq!(
         move_abs.get_param(1),
         Some(EventParameter::new(
@@ -335,16 +749,19 @@ fn test_event_parameter_metadata_for_browser_and_volume_events() {
         ))
     );
 
-    let iface = StartInterfaceEvent::new(7);
+    let iface = Event::StartInterface { interfaceid: 7 };
     assert_eq!(
         iface.get_param(0),
         Some(EventParameter::new(
-            freewheeling_plus::event::INTERFACEID,
+            INTERFACEID,
             freewheeling_plus::datatypes::CoreDataType::Int
         ))
     );
 
-    let slide_in = SlideInVolumeEvent::new(2, -0.5);
+    let slide_in = Event::SlideInVolume {
+        input: 2,
+        slide: -0.5,
+    };
     assert_eq!(
         slide_in.get_param(1),
         Some(EventParameter::new(
@@ -353,7 +770,11 @@ fn test_event_parameter_metadata_for_browser_and_volume_events() {
         ))
     );
 
-    let set_in = SetInVolumeEvent::new(3, 0.4, 0.2);
+    let set_in = Event::SetInVolume {
+        input: 3,
+        vol: 0.4,
+        fadervol: 0.2,
+    };
     assert_eq!(
         set_in.get_param(2),
         Some(EventParameter::new(
@@ -365,7 +786,11 @@ fn test_event_parameter_metadata_for_browser_and_volume_events() {
 
 #[test]
 fn test_event_parameter_metadata_for_input_events() {
-    let key = KeyInputEvent::new(true, 32, 65);
+    let key = Event::KeyInput {
+        down: true,
+        keysym: 32,
+        unicode: 65,
+    };
     assert_eq!(key.get_num_params(), 3);
     assert_eq!(
         key.get_param(1),
@@ -376,7 +801,11 @@ fn test_event_parameter_metadata_for_input_events() {
         ))
     );
 
-    let joy = JoystickButtonInputEvent::new(true, 4, 1);
+    let joy = Event::JoystickButtonInput {
+        down: true,
+        button: 4,
+        joystick: 1,
+    };
     assert_eq!(
         joy.get_param(2),
         Some(EventParameter::new(
@@ -385,7 +814,12 @@ fn test_event_parameter_metadata_for_input_events() {
         ))
     );
 
-    let mouse_button = MouseButtonInputEvent::new(false, 2, 100, 200);
+    let mouse_button = Event::MouseButtonInput {
+        down: false,
+        button: 2,
+        x: 100,
+        y: 200,
+    };
     assert_eq!(
         mouse_button.get_param(3),
         Some(EventParameter::new(
@@ -394,7 +828,7 @@ fn test_event_parameter_metadata_for_input_events() {
         ))
     );
 
-    let mouse_motion = MouseMotionInputEvent::new(11, 22);
+    let mouse_motion = Event::MouseMotionInput { x: 11, y: 22 };
     assert_eq!(mouse_motion.get_num_params(), 2);
     assert_eq!(
         mouse_motion.get_param(0),

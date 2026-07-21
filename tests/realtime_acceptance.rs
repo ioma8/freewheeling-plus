@@ -1,17 +1,14 @@
 use freewheeling_plus::audioio::{
     AudioBackend, AudioCallback, AudioCallbackFn, AudioIO, AudioProcessor, BackendInfo,
 };
-use freewheeling_plus::event::{Event, EventListener, EventManager, EventType, StartSessionEvent};
+use freewheeling_plus::event::{Event, EventListener, EventManager, EventType};
 use freewheeling_plus::mem::{MemoryManager, Preallocated, PreallocatedTypeInner};
 use freewheeling_plus::midiio::{MidiBackend, MidiIo, MidiMessage, MidiPortMessage};
 use freewheeling_plus::processor_queue::{ProcessorCommand, ProcessorCommandQueue};
 use freewheeling_plus::rcu::{Rcu, RcuRegistry};
 use std::sync::atomic::AtomicPtr;
-use std::sync::{
-    Arc, Barrier,
-    atomic::{AtomicUsize, Ordering},
-    mpsc,
-};
+use std::sync::mpsc;
+use std::sync::{Arc, Barrier, atomic::{AtomicUsize, Ordering}};
 use std::thread;
 use std::time::Duration;
 
@@ -19,7 +16,7 @@ struct CountListener(Arc<AtomicUsize>);
 impl EventListener for CountListener {
     fn receive_event(
         &mut self,
-        _: Box<dyn Event>,
+        _: &Event,
         _: &dyn freewheeling_plus::event::EventProducer,
     ) {
         self.0.fetch_add(1, Ordering::SeqCst);
@@ -41,7 +38,7 @@ fn event_dispatch_is_thread_safe_and_shutdown_joins_worker() {
         let b = barrier.clone();
         workers.push(thread::spawn(move || {
             b.wait();
-            m.post_event(Box::new(StartSessionEvent::new()));
+            m.post_event(Event::StartSession);
         }));
     }
     barrier.wait();

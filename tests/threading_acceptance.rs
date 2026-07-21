@@ -1,4 +1,4 @@
-use freewheeling_plus::event::{Event, EventListener, EventManager, EventType, StartSessionEvent};
+use freewheeling_plus::event::{Event, EventListener, EventManager, EventType};
 use freewheeling_plus::mem::{MemoryManager, Preallocated, PreallocatedTypeInner};
 use freewheeling_plus::processor_queue::{ProcessorCommand, ProcessorCommandQueue};
 use freewheeling_plus::rcu::{Rcu, RcuRegistry};
@@ -12,7 +12,7 @@ struct AcknowledgingListener(mpsc::Sender<()>);
 impl EventListener for AcknowledgingListener {
     fn receive_event(
         &mut self,
-        event: Box<dyn Event>,
+        event: &Event,
         _: &dyn freewheeling_plus::event::EventProducer,
     ) {
         assert_eq!(event.get_type(), EventType::StartSession);
@@ -38,7 +38,7 @@ fn event_delivery_acknowledges_every_concurrent_post() {
         workers.push(thread::spawn(move || {
             gate.wait();
             for _ in 0..EVENTS_PER_PRODUCER {
-                manager.post_event(Box::new(StartSessionEvent::new()));
+                manager.post_event(freewheeling_plus::event::Event::StartSession);
             }
         }));
     }

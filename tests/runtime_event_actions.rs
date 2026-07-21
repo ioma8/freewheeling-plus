@@ -2,9 +2,7 @@
 // its source directly gave this integration test a synthetic crate root and
 // could diverge as module dependencies evolved.
 use freewheeling_plus::config::FloConfig;
-use freewheeling_plus::event::{
-    EndRecordEvent, EventType, GoSubEvent, KeyInputEvent, LoopClickedEvent,
-};
+use freewheeling_plus::event::{Event, EventType};
 use freewheeling_plus::native_dsp_graph::{LoopMode, MAX_RUNTIME_LOOPS, RuntimeCommand};
 use freewheeling_plus::runtime_event_actions::{
     ApplicationAction, CodecSelection, DispatchError, DispatchOutput, RuntimeEventDispatcher,
@@ -25,7 +23,7 @@ fn actual_loop_click_binding_tracks_record_mute_trigger_and_overdub_state() {
     let mut config = authoritative_config();
     let registry = config.binding_registry.clone();
     let dispatcher = RuntimeEventDispatcher::<8>::new();
-    let input = LoopClickedEvent::new(true, 1, 7, true);
+    let input = Event::LoopClicked { down: true, button: 1, loopid: 7, in_layout: true };
     let mut loops = [LoopMode::Empty; MAX_RUNTIME_LOOPS];
     for variable in [
         "VAR_keyheld_shift",
@@ -96,7 +94,7 @@ fn actual_fullscreen_chain_applies_variable_before_application_action() {
     let registry = config.binding_registry.clone();
     let loops = [LoopMode::Empty; MAX_RUNTIME_LOOPS];
     let pause = freewheeling_plus::sdlio::get_sdl_key("pause");
-    let input = KeyInputEvent::new(true, pause, 0);
+    let input = Event::KeyInput { down: true, keysym: pause, unicode: 0 };
 
     let batch = RuntimeEventDispatcher::<8>::new()
         .dispatch(&mut config, &registry, &input, &loops)
@@ -116,7 +114,7 @@ fn bounded_batch_reports_overflow_instead_of_dropping_continued_actions() {
     let registry = config.binding_registry.clone();
     let loops = [LoopMode::Empty; MAX_RUNTIME_LOOPS];
     let pause = freewheeling_plus::sdlio::get_sdl_key("pause");
-    let input = KeyInputEvent::new(true, pause, 0);
+    let input = Event::KeyInput { down: true, keysym: pause, unicode: 0 };
     let error = RuntimeEventDispatcher::<0>::new()
         .dispatch(&mut config, &registry, &input, &loops)
         .unwrap_err();
@@ -137,7 +135,7 @@ fn actual_save_loop_and_scene_bindings_carry_configured_codec_and_save_mode() {
     let loops = [LoopMode::Empty; MAX_RUNTIME_LOOPS];
     let dispatcher = RuntimeEventDispatcher::<8>::new();
 
-    let save_loop = KeyInputEvent::new(true, freewheeling_plus::sdlio::get_sdl_key("f8"), 0);
+    let save_loop = Event::KeyInput { down: true, keysym: freewheeling_plus::sdlio::get_sdl_key("f8"), unicode: 0 };
     let batch = dispatcher
         .dispatch(&mut config, &registry, &save_loop, &loops)
         .unwrap();
@@ -149,7 +147,7 @@ fn actual_save_loop_and_scene_bindings_carry_configured_codec_and_save_mode() {
         }))
     );
 
-    let save_scene = KeyInputEvent::new(true, freewheeling_plus::sdlio::get_sdl_key("f7"), 0);
+    let save_scene = Event::KeyInput { down: true, keysym: freewheeling_plus::sdlio::get_sdl_key("f7"), unicode: 0 };
     let batch = dispatcher
         .dispatch(&mut config, &registry, &save_scene, &loops)
         .unwrap();
@@ -188,7 +186,7 @@ fn actual_browser_binding_specializes_loop_import_scene_load_and_rename() {
     }
     let loops = [LoopMode::Empty; MAX_RUNTIME_LOOPS];
     let dispatcher = RuntimeEventDispatcher::<8>::new();
-    let enter = KeyInputEvent::new(true, freewheeling_plus::sdlio::get_sdl_key("return"), 0);
+    let enter = Event::KeyInput { down: true, keysym: freewheeling_plus::sdlio::get_sdl_key("return"), unicode: 0 };
     config
         .get_variable_mut("VAR_keyheld_ctrl")
         .unwrap()
@@ -260,7 +258,7 @@ fn actual_snapshot_subroutine_preserves_action_then_variable_update_order() {
     config.set_int_variable("VAR_snapid_last2", 2);
     let registry = config.binding_registry.clone();
     let loops = [LoopMode::Empty; MAX_RUNTIME_LOOPS];
-    let trigger = GoSubEvent::new(101, 9.0, 0.0, 0.0);
+    let trigger = Event::GoSub { sub: 101, param1: 9.0, param2: 0.0, param3: 0.0 };
 
     let batch = RuntimeEventDispatcher::<8>::new()
         .dispatch(&mut config, &registry, &trigger, &loops)
@@ -296,7 +294,7 @@ fn actual_loop_controls_emit_gain_actions_from_shipped_bindings() {
             })
         });
     let loops = [LoopMode::Empty; MAX_RUNTIME_LOOPS];
-    let input = LoopClickedEvent::new(true, 1, 4, true);
+    let input = Event::LoopClicked { down: true, button: 1, loopid: 4, in_layout: true };
     config
         .get_variable_mut("VAR_keyheld_up")
         .unwrap()
@@ -318,7 +316,7 @@ fn actual_loop_controls_emit_gain_actions_from_shipped_bindings() {
         .get_variable_mut("VAR_keyheld_up")
         .unwrap()
         .set_char(0);
-    let input = LoopClickedEvent::new(true, 4, 4, true);
+    let input = Event::LoopClicked { down: true, button: 4, loopid: 4, in_layout: true };
     let batch = RuntimeEventDispatcher::<8>::new()
         .dispatch(&mut config, &registry, &input, &loops)
         .unwrap();
@@ -339,7 +337,7 @@ fn end_record_is_translated_to_the_existing_runtime_stop_command() {
     let registry = config.binding_registry.clone();
     let loops = [LoopMode::Recording; MAX_RUNTIME_LOOPS];
     let batch = RuntimeEventDispatcher::<2>::new()
-        .dispatch(&mut config, &registry, &EndRecordEvent::new(false), &loops)
+        .dispatch(&mut config, &registry, &Event::EndRecord { keeprecord: false }, &loops)
         .unwrap();
     assert_eq!(
         batch.iter().collect::<Vec<_>>(),

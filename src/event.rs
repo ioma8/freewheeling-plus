@@ -907,6 +907,11 @@ impl EventType {
             EventType::SetVariable => &SET_VARIABLE_PARAMS,
             EventType::ToggleVariable => &TOGGLE_VARIABLE_PARAMS,
             EventType::SplitVariableMSBLSB => &SPLIT_VARIABLE_PARAMS,
+            EventType::InputMIDIClock => &MIDI_CLOCK_INPUT_PARAMS,
+            EventType::InputMIDIStartStop => &MIDI_START_STOP_INPUT_PARAMS,
+            EventType::InputMIDITuneRequest => &[],
+            EventType::InputMIDIActiveSensing => &[],
+            EventType::InputMIDIReset => &[],
             _ => &[],
         }
     }
