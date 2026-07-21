@@ -3,11 +3,7 @@
    Ported from fweelin_browser.h/cc
 */
 
-use crate::event::{
-    BrowserItemBrowsedEvent, BrowserMoveToItemAbsoluteEvent, BrowserMoveToItemEvent,
-    BrowserRenameItemEvent, BrowserSelectItemEvent, Event, PatchBrowserMoveToBankByIndexEvent,
-    PatchBrowserMoveToBankEvent, RenameLoopEvent,
-};
+use crate::event::Event;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -605,68 +601,67 @@ impl Browser {
         false
     }
 
-    pub fn receive_event(&mut self, ev: &dyn Event) -> bool {
-        if let Some(event) = ev.as_any().downcast_ref::<BrowserMoveToItemEvent>() {
-            if event.browserid != self.browser_id {
-                return false;
+    pub fn receive_event(&mut self, ev: &Event) -> bool {
+        match ev {
+            Event::BrowserMoveToItem { browserid, adjust, jump_adjust } => {
+                if *browserid != self.browser_id {
+                    return false;
+                }
+                self.move_to(*adjust, *jump_adjust);
+                true
             }
-            self.move_to(event.adjust, event.jump_adjust);
-            return true;
-        }
-        if let Some(event) = ev.as_any().downcast_ref::<BrowserMoveToItemAbsoluteEvent>() {
-            if event.browserid != self.browser_id {
-                return false;
+            Event::BrowserMoveToItemAbsolute { browserid, index } => {
+                if *browserid != self.browser_id {
+                    return false;
+                }
+                self.move_to_beginning();
+                self.move_to(*index, 0);
+                true
             }
-            self.move_to_beginning();
-            self.move_to(event.index, 0);
-            return true;
-        }
-        if let Some(event) = ev.as_any().downcast_ref::<BrowserSelectItemEvent>() {
-            if event.browserid != self.browser_id {
-                return false;
+            Event::BrowserSelectItem { browserid } => {
+                if *browserid != self.browser_id {
+                    return false;
+                }
+                self.select_current();
+                true
             }
-            self.select_current();
-            return true;
-        }
-        if let Some(event) = ev.as_any().downcast_ref::<BrowserRenameItemEvent>() {
-            if event.browserid != self.browser_id {
-                return false;
+            Event::BrowserRenameItem { browserid } => {
+                if *browserid != self.browser_id {
+                    return false;
+                }
+                self.begin_rename();
+                true
             }
-            self.begin_rename();
-            return true;
-        }
-        if let Some(event) = ev.as_any().downcast_ref::<RenameLoopEvent>() {
-            if self.item_type != BrowserItemType::LoopTray || event.in_layout {
-                return false;
+            Event::RenameLoop { loopid, in_layout } => {
+                if self.item_type != BrowserItemType::LoopTray || *in_layout {
+                    return false;
+                }
+                if let Some(idx) = self
+                    .items
+                    .iter()
+                    .position(|item| item.match_id == Some(*loopid))
+                {
+                    self.current_index = Some(idx);
+                    self.selected_index = Some(idx);
+                    self.last_browsed = true;
+                    return self.begin_rename();
+                }
+                false
             }
-            if let Some(idx) = self
-                .items
-                .iter()
-                .position(|item| item.match_id == Some(event.loopid))
-            {
-                self.current_index = Some(idx);
-                self.selected_index = Some(idx);
-                self.last_browsed = true;
-                return self.begin_rename();
+            Event::PatchBrowserMoveToBank { direction } => {
+                self.move_patch_bank(*direction)
             }
-            return false;
-        }
-        if let Some(event) = ev.as_any().downcast_ref::<PatchBrowserMoveToBankEvent>() {
-            return self.move_patch_bank(event.direction);
-        }
-        if let Some(event) = ev
-            .as_any()
-            .downcast_ref::<PatchBrowserMoveToBankByIndexEvent>()
-        {
-            return self.move_patch_bank_to_index(event.index);
-        }
-        if let Some(event) = ev.as_any().downcast_ref::<BrowserItemBrowsedEvent>() {
-            if event.browserid != self.browser_id {
-                return false;
+            Event::PatchBrowserMoveToBankByIndex { index } => {
+                self.move_patch_bank_to_index(*index)
             }
-            return self.item_browsed();
+            Event::BrowserItemBrowsed { browserid } => {
+                if *browserid != self.browser_id {
+                    return false;
+                }
+                self.item_browsed()
+            }
+            _ => false,
         }
-        false
     }
 
     fn matches_item_type(&self, path: &Path) -> bool {
