@@ -17,7 +17,20 @@ cargo build --release
 cargo test
 ```
 
-The binary is `freewheeling-plus`. Run `--smoke-test` to verify the core lifecycle without audio or video hardware:
+
+## Audio Backend
+
+The audio backend is selected at startup via the `FWEELIN_AUDIO_BACKEND` environment variable:
+
+| Value | macOS | Linux |
+|-------|-------|-------|
+| *unset* | CoreAudio AudioUnit (native) | CPAL (cross-platform) |
+| `jack` | JACK (requires `brew install jack`) | JACK |
+| `cpal` | CPAL (explicit override) | CPAL |
+
+**JACK** provides external transport sync (bar/beat/bpm from a DAW) and integrated MIDI ports. On macOS, install JACK via Homebrew: `brew install jack`.
+
+**CPAL** requires no audio server — it uses the platform's default audio API (CoreAudio on macOS, ALSA on Linux). Transport state is synthesized from the internal pulse clock.
 
 ```sh
 cargo run --release -- --smoke-test
