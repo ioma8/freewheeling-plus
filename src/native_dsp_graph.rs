@@ -101,7 +101,7 @@ impl Default for DspSettings {
     }
 }
 
-/// C++ `Pulse::clockrun` states (`SS_NONE`, `SS_START`, `SS_BEAT`): whether
+/// C++ `Pulse::clockrun` states (`SyncState::None`, `SyncState::Start`, `SyncState::Beat`): whether
 /// MIDI clock transmission is off, waiting for the first downbeat to send
 /// MIDI start, or running.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1370,7 +1370,7 @@ pub struct RuntimeAudioProcessor<B: FluidSynthBackend = FluidLiteBackend> {
     pulse_downbeat_suppressed: bool,
     /// C++ `MidiIO::midisyncxmit`: whether the pulse transmits MIDI sync.
     midi_sync_transmit: bool,
-    /// C++ `Pulse::clockrun` (SS_NONE / SS_START / SS_BEAT).
+    /// C++ `Pulse::clockrun` (SyncState::None / SyncState::Start / SyncState::Beat).
     clock_run: ClockRun,
     /// C++ `Pulse::process` statics `midi_clock_count` / `midi_beat_count`.
     midi_clock_count: i32,

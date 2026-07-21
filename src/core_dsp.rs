@@ -10,11 +10,28 @@ use crate::core_dsp_audio_buffers::{AudioBufferConfig, AudioBuffers, InputSettin
 pub type Sample = f32;
 pub type NFrames = u32;
 
-pub const SS_NONE: i32 = 0;
-pub const SS_START: i32 = 1;
-pub const SS_BEAT: i32 = 2;
-pub const SS_END: i32 = 3;
-pub const SS_ENDED: i32 = 4;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum SyncState {
+    None = 0,
+    Start = 1,
+    Beat = 2,
+    End = 3,
+    Ended = 4,
+}
+
+impl From<i32> for SyncState {
+    fn from(value: i32) -> Self {
+        match value {
+            0 => SyncState::None,
+            1 => SyncState::Start,
+            2 => SyncState::Beat,
+            3 => SyncState::End,
+            4 => SyncState::Ended,
+            _ => SyncState::None,
+        }
+    }
+}
 
 pub fn math_gcd(a: i32, b: i32) -> i32 {
     if b == 0 { a } else { math_gcd(b, a % b) }
@@ -256,5 +273,26 @@ mod tests {
         p.process_clock(4);
         assert!(p.take_wrapped());
         assert_eq!(p.curpos, 0);
+    }
+}
+
+#[cfg(test)]
+mod sync_state_tests {
+    use super::*;
+
+    #[test]
+    fn sync_state_repr_values() {
+        assert_eq!(SyncState::None as i32, 0);
+        assert_eq!(SyncState::Start as i32, 1);
+        assert_eq!(SyncState::Beat as i32, 2);
+        assert_eq!(SyncState::End as i32, 3);
+        assert_eq!(SyncState::Ended as i32, 4);
+    }
+
+    #[test]
+    fn sync_state_from_i32() {
+        assert_eq!(SyncState::from(0), SyncState::None);
+        assert_eq!(SyncState::from(3), SyncState::End);
+        assert_eq!(SyncState::from(5), SyncState::None);
     }
 }
