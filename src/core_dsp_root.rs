@@ -313,6 +313,7 @@ impl<A: RootApp, Q: CommandQueue> RootProcessor<A, Q> {
             }
         }
 
+        #[cfg(debug_assertions)]
         debug_assert_eq!(
             processed, expected,
             "chain({kind:?}): {processed}/{expected} items processed"
