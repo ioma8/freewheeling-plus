@@ -1532,6 +1532,7 @@ impl EventManager {
 
     /// Enqueue without waiting for delivery. The newest event is rejected
     /// when the bounded queue is full.
+    #[allow(clippy::result_large_err)]
     pub fn try_post_event(&self, ev: Event) -> Result<(), Event> {
         let mut queue = self.queue.lock().unwrap();
         if queue.len() >= self.capacity {
