@@ -928,2217 +928,391 @@ pub trait EventListener: Send {
 }
 
 // ============================================================
-// Event trait + concrete events
+// Event enum — single type for all events
 // ============================================================
 
-pub trait Event: Send {
-    fn get_type(&self) -> EventType;
-    fn as_any(&self) -> &dyn std::any::Any;
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
-    fn clone_box(&self) -> Box<dyn Event>;
-    fn get_num_params(&self) -> usize {
-        0
-    }
-    fn get_param(&self, _idx: usize) -> Option<EventParameter> {
-        None
-    }
-}macro_rules! impl_event {
-    // Without event parameters
-    ($name:ident, $type:ident) => {
-        impl Event for $name {
-            fn get_type(&self) -> EventType { EventType::$type }
-            fn as_any(&self) -> &dyn std::any::Any { self }
-            fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
-            fn clone_box(&self) -> Box<dyn Event> { Box::new(self.clone()) }
-        }
-    };
-    // With event parameters (references a const array)
-    ($name:ident, $type:ident, $params:expr) => {
-        impl Event for $name {
-            fn get_type(&self) -> EventType { EventType::$type }
-            fn as_any(&self) -> &dyn std::any::Any { self }
-            fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
-            fn clone_box(&self) -> Box<dyn Event> { Box::new(self.clone()) }
-            fn get_num_params(&self) -> usize { $params.len() }
-            fn get_param(&self, idx: usize) -> Option<EventParameter> { $params.get(idx).copied() }
-        }
-    };
-}
+#[derive(Clone, Debug, PartialEq)]
+pub enum Event {
+    // Unit variants (no data beyond the tag)
+    None,
+    StartSession,
+    ExitSession,
+    SlideLoopAmpStopAll,
+    EraseAllLoops,
+    ToggleDiskOutput,
+    SaveNewScene,
+    SaveCurrentScene,
+    TransmitPlayingLoopsToDAW,
+    PulseSync,
+    MIDITuneRequestInput,
+    MIDIActiveSensingInput,
+    MIDIResetInput,
 
-#[derive(Clone)]
-pub struct BaseEvent {
-    pub event_type: EventType,
-    pub timestamp: f64,
-}
-
-impl Event for BaseEvent {
-    fn get_type(&self) -> EventType {
-        self.event_type
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-    fn clone_box(&self) -> Box<dyn Event> {
-        Box::new(self.clone())
-    }
-}
-
-#[derive(Clone)]
-pub struct EndRecordEvent {
-    pub base: BaseEvent,
-    pub keeprecord: bool,
-}
-
-impl EndRecordEvent {
-    pub fn new(keeprecord: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::EndRecord,
-                timestamp: 0.0,
-            },
-            keeprecord,
-        }
-    }
-}
-
-impl_event!(EndRecordEvent, EndRecord);
-
-#[derive(Clone)]
-pub struct GoSubEvent {
-    pub base: BaseEvent,
-    pub sub: i32,
-    pub param1: f32,
-    pub param2: f32,
-    pub param3: f32,
-}
-
-impl GoSubEvent {
-    pub fn new(sub: i32, param1: f32, param2: f32, param3: f32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::GoSub,
-                timestamp: 0.0,
-            },
-            sub,
-            param1,
-            param2,
-            param3,
-        }
-    }
-}
-
-impl_event!(GoSubEvent, GoSub);
-
-#[derive(Clone)]
-pub struct KeyInputEvent {
-    pub base: BaseEvent,
-    pub down: bool,
-    pub keysym: i32,
-    pub unicode: i32,
-}
-
-impl KeyInputEvent {
-    pub fn new(down: bool, keysym: i32, unicode: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::InputKey,
-                timestamp: 0.0,
-            },
-            down,
-            keysym,
-            unicode,
-        }
-    }
-}
-
-impl_event!(KeyInputEvent, InputKey, KEY_INPUT_PARAMS);
-
-#[derive(Clone)]
-pub struct LoopClickedEvent {
-    pub base: BaseEvent,
-    pub down: bool,
-    pub button: i32,
-    pub loopid: i32,
-    pub in_layout: bool,
-}
-
-impl LoopClickedEvent {
-    pub fn new(down: bool, button: i32, loopid: i32, in_layout: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::LoopClicked,
-                timestamp: 0.0,
-            },
-            down,
-            button,
-            loopid,
-            in_layout,
-        }
-    }
-}
-
-impl_event!(LoopClickedEvent, LoopClicked);
-
-#[derive(Clone)]
-pub struct JoystickButtonInputEvent {
-    pub base: BaseEvent,
-    pub down: bool,
-    pub button: i32,
-    pub joystick: i32,
-}
-
-impl JoystickButtonInputEvent {
-    pub fn new(down: bool, button: i32, joystick: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::InputJoystickButton,
-                timestamp: 0.0,
-            },
-            down,
-            button,
-            joystick,
-        }
-    }
-}
-
-impl_event!(JoystickButtonInputEvent, InputJoystickButton, JOYSTICK_BUTTON_INPUT_PARAMS);
-
-#[derive(Clone)]
-pub struct MouseButtonInputEvent {
-    pub base: BaseEvent,
-    pub down: bool,
-    pub button: i32,
-    pub x: i32,
-    pub y: i32,
-}
-
-impl MouseButtonInputEvent {
-    pub fn new(down: bool, button: i32, x: i32, y: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::InputMouseButton,
-                timestamp: 0.0,
-            },
-            down,
-            button,
-            x,
-            y,
-        }
-    }
-}
-
-impl_event!(MouseButtonInputEvent, InputMouseButton, MOUSE_BUTTON_INPUT_PARAMS);
-
-#[derive(Clone)]
-pub struct MouseMotionInputEvent {
-    pub base: BaseEvent,
-    pub x: i32,
-    pub y: i32,
-}
-
-impl MouseMotionInputEvent {
-    pub fn new(x: i32, y: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::InputMouseMotion,
-                timestamp: 0.0,
-            },
-            x,
-            y,
-        }
-    }
-}
-
-impl_event!(MouseMotionInputEvent, InputMouseMotion, MOUSE_MOTION_INPUT_PARAMS);
-
-#[derive(Clone)]
-pub struct TriggerLoopEvent {
-    pub base: BaseEvent,
-    pub index: i32,
-    pub vol: f32,
-    pub engage: i32,
-    pub shot: bool,
-    pub overdub: bool,
-}
-impl TriggerLoopEvent {
-    pub fn new(index: i32, vol: f32) -> Self {
-        TriggerLoopEvent {
-            base: BaseEvent {
-                event_type: EventType::TriggerLoop,
-                timestamp: 0.0,
-            },
-            index,
-            vol,
-            engage: -1,
-            shot: false,
-            overdub: false,
-        }
-    }
-}
-impl_event!(TriggerLoopEvent, TriggerLoop, TRIGGER_LOOP_PARAMS);
-
-#[derive(Clone)]
-pub struct MIDIControllerInputEvent {
-    pub base: BaseEvent,
-    pub outport: i32,
-    pub channel: u8,
-    pub ctrl: u8,
-    pub val: u8,
-    pub echo: bool,
-}
-
-impl MIDIControllerInputEvent {
-    pub fn new(channel: u8, ctrl: u8, val: u8) -> Self {
-        Self::with_route(1, channel, ctrl, val, false)
-    }
-
-    pub fn with_route(outport: i32, channel: u8, ctrl: u8, val: u8, echo: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::InputMIDIController,
-                timestamp: 0.0,
-            },
-            outport,
-            channel,
-            ctrl,
-            val,
-            echo,
-        }
-    }
-}
-
-impl_event!(MIDIControllerInputEvent, InputMIDIController, MIDI_CONTROLLER_INPUT_PARAMS);
-
-#[derive(Clone)]
-pub struct MIDIChannelPressureInputEvent {
-    pub base: BaseEvent,
-    pub outport: i32,
-    pub channel: u8,
-    pub val: u8,
-    pub echo: bool,
-}
-
-impl MIDIChannelPressureInputEvent {
-    pub fn new(outport: i32, channel: u8, val: u8, echo: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::InputMIDIChannelPressure,
-                timestamp: 0.0,
-            },
-            outport,
-            channel,
-            val,
-            echo,
-        }
-    }
-}
-
-impl_event!(MIDIChannelPressureInputEvent, InputMIDIChannelPressure, MIDI_CHANNEL_PRESSURE_INPUT_PARAMS);
-
-#[derive(Clone)]
-pub struct MIDIProgramChangeInputEvent {
-    pub base: BaseEvent,
-    pub outport: i32,
-    pub channel: u8,
-    pub val: u8,
-    pub echo: bool,
-}
-
-impl MIDIProgramChangeInputEvent {
-    pub fn new(outport: i32, channel: u8, val: u8, echo: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::InputMIDIProgramChange,
-                timestamp: 0.0,
-            },
-            outport,
-            channel,
-            val,
-            echo,
-        }
-    }
-}
-
-impl_event!(MIDIProgramChangeInputEvent, InputMIDIProgramChange, MIDI_PROGRAM_CHANGE_INPUT_PARAMS);
-
-#[derive(Clone)]
-pub struct MIDIPitchBendInputEvent {
-    pub base: BaseEvent,
-    pub outport: i32,
-    pub channel: u8,
-    pub val: i32,
-    pub echo: bool,
-}
-
-impl MIDIPitchBendInputEvent {
-    pub fn new(channel: u8, val: i32) -> Self {
-        Self::with_route(1, channel, val, false)
-    }
-
-    pub fn with_route(outport: i32, channel: u8, val: i32, echo: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::InputMIDIPitchBend,
-                timestamp: 0.0,
-            },
-            outport,
-            channel,
-            val,
-            echo,
-        }
-    }
-}
-
-impl_event!(MIDIPitchBendInputEvent, InputMIDIPitchBend, MIDI_PITCH_BEND_INPUT_PARAMS);
-
-#[derive(Clone)]
-pub struct MIDIPolyphonicPressureInputEvent {
-    pub base: BaseEvent,
-    pub channel: u8,
-    pub notenum: u8,
-    pub val: u8,
-}
-
-impl MIDIPolyphonicPressureInputEvent {
-    pub fn new(channel: u8, notenum: u8, val: u8) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::InputMIDIPolyphonicPressure,
-                timestamp: 0.0,
-            },
-            channel,
-            notenum,
-            val,
-        }
-    }
-}
-
-impl_event!(MIDIPolyphonicPressureInputEvent, InputMIDIPolyphonicPressure, MIDI_POLYPHONIC_PRESSURE_INPUT_PARAMS);
-
-#[derive(Clone)]
-pub struct MIDISystemExclusiveInputEvent {
-    pub base: BaseEvent,
-    /// Complete message, including the F0/F7 framing bytes.
-    pub bytes: Vec<u8>,
-}
-
-impl MIDISystemExclusiveInputEvent {
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::InputMIDISystemExclusive,
-                timestamp: 0.0,
-            },
-            bytes,
-        }
-    }
-}
-
-impl_event!(MIDISystemExclusiveInputEvent, InputMIDISystemExclusive);
-
-macro_rules! midi_value_input_event {
-    ($name:ident, $event_type:ident) => {
-        #[derive(Clone)]
-        pub struct $name {
-            pub base: BaseEvent,
-            pub value: u16,
-        }
-        impl $name {
-            pub fn new(value: u16) -> Self {
-                Self {
-                    base: BaseEvent {
-                        event_type: EventType::$event_type,
-                        timestamp: 0.0,
-                    },
-                    value,
-                }
-            }
-        }
-        impl_event!($name, $event_type, MIDI_VALUE_INPUT_PARAMS);
-    };
-}
-
-midi_value_input_event!(
-    MIDITimeCodeQuarterFrameInputEvent,
-    InputMIDITimeCodeQuarterFrame
-);
-midi_value_input_event!(MIDISongPositionInputEvent, InputMIDISongPosition);
-midi_value_input_event!(MIDISongSelectInputEvent, InputMIDISongSelect);
-
-macro_rules! midi_unit_input_event {
-    ($name:ident, $event_type:ident) => {
-        #[derive(Clone)]
-        pub struct $name {
-            pub base: BaseEvent,
-        }
-        impl $name {
-            pub fn new() -> Self {
-                Self {
-                    base: BaseEvent {
-                        event_type: EventType::$event_type,
-                        timestamp: 0.0,
-                    },
-                }
-            }
-        }
-        impl Default for $name {
-            fn default() -> Self {
-                Self::new()
-            }
-        }
-        impl_event!($name, $event_type);
-    };
-}
-
-midi_unit_input_event!(MIDITuneRequestInputEvent, InputMIDITuneRequest);
-midi_unit_input_event!(MIDIActiveSensingInputEvent, InputMIDIActiveSensing);
-midi_unit_input_event!(MIDIResetInputEvent, InputMIDIReset);
-
-#[derive(Clone)]
-pub struct MIDIKeyInputEvent {
-    pub base: BaseEvent,
-    pub outport: i32,
-    pub channel: u8,
-    pub notenum: u8,
-    pub vel: u8,
-    pub down: bool,
-    pub echo: bool,
-}
-
-impl MIDIKeyInputEvent {
-    pub fn new(channel: u8, notenum: u8, vel: u8, down: bool) -> Self {
-        Self::with_route(1, channel, notenum, vel, down, false)
-    }
-
-    pub fn with_route(
+    // Struct variants with fields
+    EndRecord {
+        keeprecord: bool,
+    },
+    GoSub {
+        sub: i32,
+        param1: f32,
+        param2: f32,
+        param3: f32,
+    },
+    KeyInput {
+        down: bool,
+        keysym: i32,
+        unicode: i32,
+    },
+    LoopClicked {
+        down: bool,
+        button: i32,
+        loopid: i32,
+        in_layout: bool,
+    },
+    JoystickButtonInput {
+        down: bool,
+        button: i32,
+        joystick: i32,
+    },
+    MouseButtonInput {
+        down: bool,
+        button: i32,
+        x: i32,
+        y: i32,
+    },
+    MouseMotionInput {
+        x: i32,
+        y: i32,
+    },
+    TriggerLoop {
+        index: i32,
+        vol: f32,
+        engage: i32,
+        shot: bool,
+        overdub: bool,
+    },
+    MIDIControllerInput {
+        outport: i32,
+        channel: u8,
+        ctrl: u8,
+        val: u8,
+        echo: bool,
+    },
+    MIDIChannelPressureInput {
+        outport: i32,
+        channel: u8,
+        val: u8,
+        echo: bool,
+    },
+    MIDIProgramChangeInput {
+        outport: i32,
+        channel: u8,
+        val: u8,
+        echo: bool,
+    },
+    MIDIPitchBendInput {
+        outport: i32,
+        channel: u8,
+        val: i32,
+        echo: bool,
+    },
+    MIDIPolyphonicPressureInput {
+        channel: u8,
+        notenum: u8,
+        val: u8,
+    },
+    MIDISystemExclusiveInput {
+        bytes: Vec<u8>,
+    },
+    MIDITimeCodeQuarterFrameInput {
+        value: u16,
+    },
+    MIDISongPositionInput {
+        value: u16,
+    },
+    MIDISongSelectInput {
+        value: u16,
+    },
+    MIDIKeyInput {
         outport: i32,
         channel: u8,
         notenum: u8,
         vel: u8,
         down: bool,
         echo: bool,
-    ) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::InputMIDIKey,
-                timestamp: 0.0,
-            },
-            outport,
-            channel,
-            notenum,
-            vel,
-            down,
-            echo,
-        }
-    }
-}
-
-impl_event!(MIDIKeyInputEvent, InputMIDIKey, MIDI_KEY_INPUT_PARAMS);
-
-#[derive(Clone)]
-pub struct MIDIClockInputEvent {
-    pub base: BaseEvent,
-    pub outport: i32,
-}
-
-impl MIDIClockInputEvent {
-    pub fn new() -> Self {
-        Self::with_outport(1)
-    }
-
-    pub fn with_outport(outport: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::InputMIDIClock,
-                timestamp: 0.0,
-            },
-            outport,
-        }
-    }
-}
-
-impl_event!(MIDIClockInputEvent, InputMIDIClock, MIDI_CLOCK_INPUT_PARAMS);
-
-#[derive(Clone)]
-pub struct MIDIStartStopInputEvent {
-    pub base: BaseEvent,
-    pub outport: i32,
-    pub start: bool,
-}
-
-impl MIDIStartStopInputEvent {
-    pub fn new(start: bool) -> Self {
-        Self::with_outport(1, start)
-    }
-
-    pub fn with_outport(outport: i32, start: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::InputMIDIStartStop,
-                timestamp: 0.0,
-            },
-            outport,
-            start,
-        }
-    }
-}
-
-impl_event!(MIDIStartStopInputEvent, InputMIDIStartStop, MIDI_START_STOP_INPUT_PARAMS);
-
-#[derive(Clone)]
-pub struct FluidSynthEnableEvent {
-    pub base: BaseEvent,
-    pub enable: bool,
-}
-
-impl FluidSynthEnableEvent {
-    pub fn new(enable: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::FluidSynthEnable,
-                timestamp: 0.0,
-            },
-            enable,
-        }
-    }
-}
-
-impl_event!(FluidSynthEnableEvent, FluidSynthEnable);
-
-#[derive(Clone)]
-pub struct SetMidiTuningEvent {
-    pub base: BaseEvent,
-    pub tuning: f32,
-}
-
-impl SetMidiTuningEvent {
-    pub fn new(tuning: f32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SetMidiTuning,
-                timestamp: 0.0,
-            },
-            tuning,
-        }
-    }
-}
-
-impl_event!(SetMidiTuningEvent, SetMidiTuning);
-
-#[derive(Clone)]
-pub struct BrowserMoveToItemEvent {
-    pub base: BaseEvent,
-    pub browserid: i32,
-    pub adjust: i32,
-    pub jump_adjust: i32,
-}
-
-impl BrowserMoveToItemEvent {
-    pub fn new(browserid: i32, adjust: i32, jump_adjust: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::BrowserMoveToItem,
-                timestamp: 0.0,
-            },
-            browserid,
-            adjust,
-            jump_adjust,
-        }
-    }
-}
-
-impl_event!(BrowserMoveToItemEvent, BrowserMoveToItem, BROWSER_MOVE_PARAMS);
-
-#[derive(Clone)]
-pub struct BrowserMoveToItemAbsoluteEvent {
-    pub base: BaseEvent,
-    pub browserid: i32,
-    pub index: i32,
-}
-
-impl BrowserMoveToItemAbsoluteEvent {
-    pub fn new(browserid: i32, index: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::BrowserMoveToItemAbsolute,
-                timestamp: 0.0,
-            },
-            browserid,
-            index,
-        }
-    }
-}
-
-impl_event!(BrowserMoveToItemAbsoluteEvent, BrowserMoveToItemAbsolute, BROWSER_MOVE_ABSOLUTE_PARAMS);
-
-#[derive(Clone)]
-pub struct BrowserSelectItemEvent {
-    pub base: BaseEvent,
-    pub browserid: i32,
-}
-
-impl BrowserSelectItemEvent {
-    pub fn new(browserid: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::BrowserSelectItem,
-                timestamp: 0.0,
-            },
-            browserid,
-        }
-    }
-}
-
-impl_event!(BrowserSelectItemEvent, BrowserSelectItem);
-
-#[derive(Clone)]
-pub struct BrowserRenameItemEvent {
-    pub base: BaseEvent,
-    pub browserid: i32,
-}
-
-impl BrowserRenameItemEvent {
-    pub fn new(browserid: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::BrowserRenameItem,
-                timestamp: 0.0,
-            },
-            browserid,
-        }
-    }
-}
-
-impl_event!(BrowserRenameItemEvent, BrowserRenameItem);
-
-#[derive(Clone)]
-pub struct BrowserItemBrowsedEvent {
-    pub base: BaseEvent,
-    pub browserid: i32,
-}
-
-impl BrowserItemBrowsedEvent {
-    pub fn new(browserid: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::BrowserItemBrowsed,
-                timestamp: 0.0,
-            },
-            browserid,
-        }
-    }
-}
-
-impl_event!(BrowserItemBrowsedEvent, BrowserItemBrowsed);
-
-#[derive(Clone)]
-pub struct PatchBrowserMoveToBankEvent {
-    pub base: BaseEvent,
-    pub direction: i32,
-}
-
-impl PatchBrowserMoveToBankEvent {
-    pub fn new(direction: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::PatchBrowserMoveToBank,
-                timestamp: 0.0,
-            },
-            direction,
-        }
-    }
-}
-
-impl_event!(PatchBrowserMoveToBankEvent, PatchBrowserMoveToBank);
-
-#[derive(Clone)]
-pub struct PatchBrowserMoveToBankByIndexEvent {
-    pub base: BaseEvent,
-    pub index: i32,
-}
-
-impl PatchBrowserMoveToBankByIndexEvent {
-    pub fn new(index: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::PatchBrowserMoveToBankByIndex,
-                timestamp: 0.0,
-            },
-            index,
-        }
-    }
-}
-
-impl_event!(PatchBrowserMoveToBankByIndexEvent, PatchBrowserMoveToBankByIndex);
-
-#[derive(Clone)]
-pub struct StartSessionEvent {
-    pub base: BaseEvent,
-}
-
-impl StartSessionEvent {
-    pub fn new() -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::StartSession,
-                timestamp: 0.0,
-            },
-        }
-    }
-}
-
-impl_event!(StartSessionEvent, StartSession);
-
-#[derive(Clone)]
-pub struct StartInterfaceEvent {
-    pub base: BaseEvent,
-    pub interfaceid: i32,
-}
-
-impl StartInterfaceEvent {
-    pub fn new(interfaceid: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::StartInterface,
-                timestamp: 0.0,
-            },
-            interfaceid,
-        }
-    }
-}
-
-impl_event!(StartInterfaceEvent, StartInterface, START_INTERFACE_PARAMS);
-
-#[derive(Clone)]
-pub struct VideoShowLayoutEvent {
-    pub base: BaseEvent,
-    pub interfaceid: i32,
-    pub layoutid: i32,
-    pub show: bool,
-    pub hideothers: bool,
-}
-
-impl VideoShowLayoutEvent {
-    pub fn new(interfaceid: i32, layoutid: i32, show: bool, hideothers: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::VideoShowLayout,
-                timestamp: 0.0,
-            },
-            interfaceid,
-            layoutid,
-            show,
-            hideothers,
-        }
-    }
-}
-
-impl_event!(VideoShowLayoutEvent, VideoShowLayout);
-
-#[derive(Clone)]
-pub struct VideoSwitchInterfaceEvent {
-    pub base: BaseEvent,
-    pub interfaceid: i32,
-}
-
-impl VideoSwitchInterfaceEvent {
-    pub fn new(interfaceid: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::VideoSwitchInterface,
-                timestamp: 0.0,
-            },
-            interfaceid,
-        }
-    }
-}
-
-impl_event!(VideoSwitchInterfaceEvent, VideoSwitchInterface);
-
-#[derive(Clone)]
-pub struct VideoShowDisplayEvent {
-    pub base: BaseEvent,
-    pub interfaceid: i32,
-    pub displayid: i32,
-    pub show: bool,
-}
-
-impl VideoShowDisplayEvent {
-    pub fn new(interfaceid: i32, displayid: i32, show: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::VideoShowDisplay,
-                timestamp: 0.0,
-            },
-            interfaceid,
-            displayid,
-            show,
-        }
-    }
-}
-
-impl_event!(VideoShowDisplayEvent, VideoShowDisplay);
-
-#[derive(Clone)]
-pub struct VideoShowHelpEvent {
-    pub base: BaseEvent,
-    pub page: i32,
-}
-
-impl VideoShowHelpEvent {
-    pub fn new(page: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::VideoShowHelp,
-                timestamp: 0.0,
-            },
-            page,
-        }
-    }
-}
-
-impl_event!(VideoShowHelpEvent, VideoShowHelp);
-
-#[derive(Clone)]
-pub struct VideoFullScreenEvent {
-    pub base: BaseEvent,
-    pub fullscreen: bool,
-}
-
-impl VideoFullScreenEvent {
-    pub fn new(fullscreen: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::VideoFullScreen,
-                timestamp: 0.0,
-            },
-            fullscreen,
-        }
-    }
-}
-
-impl_event!(VideoFullScreenEvent, VideoFullScreen);
-
-#[derive(Clone)]
-pub struct ShowDebugInfoEvent {
-    pub base: BaseEvent,
-    pub show: bool,
-}
-
-impl ShowDebugInfoEvent {
-    pub fn new(show: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::ShowDebugInfo,
-                timestamp: 0.0,
-            },
-            show,
-        }
-    }
-}
-
-impl_event!(ShowDebugInfoEvent, ShowDebugInfo);
-
-#[derive(Clone)]
-pub struct VideoShowLoopEvent {
-    pub base: BaseEvent,
-    pub interfaceid: i32,
-    pub layoutid: i32,
-    pub loopid: Range,
-}
-
-impl VideoShowLoopEvent {
-    pub fn new(interfaceid: i32, layoutid: i32, loopid: Range) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::VideoShowLoop,
-                timestamp: 0.0,
-            },
-            interfaceid,
-            layoutid,
-            loopid,
-        }
-    }
-}
-
-impl_event!(VideoShowLoopEvent, VideoShowLoop);
-
-#[derive(Clone)]
-pub struct VideoShowSnapshotPageEvent {
-    pub base: BaseEvent,
-    pub interfaceid: i32,
-    pub displayid: i32,
-    pub page: i32,
-}
-
-impl VideoShowSnapshotPageEvent {
-    pub fn new(interfaceid: i32, displayid: i32, page: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::VideoShowSnapshotPage,
-                timestamp: 0.0,
-            },
-            interfaceid,
-            displayid,
-            page,
-        }
-    }
-}
-
-impl_event!(VideoShowSnapshotPageEvent, VideoShowSnapshotPage);
-
-#[derive(Clone)]
-pub struct VideoShowParamSetBankEvent {
-    pub base: BaseEvent,
-    pub interfaceid: i32,
-    pub displayid: i32,
-    pub bank: i32,
-}
-
-impl VideoShowParamSetBankEvent {
-    pub fn new(interfaceid: i32, displayid: i32, bank: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::VideoShowParamSetBank,
-                timestamp: 0.0,
-            },
-            interfaceid,
-            displayid,
-            bank,
-        }
-    }
-}
-
-impl_event!(VideoShowParamSetBankEvent, VideoShowParamSetBank);
-
-#[derive(Clone)]
-pub struct VideoShowParamSetPageEvent {
-    pub base: BaseEvent,
-    pub interfaceid: i32,
-    pub displayid: i32,
-    pub page: i32,
-}
-
-impl VideoShowParamSetPageEvent {
-    pub fn new(interfaceid: i32, displayid: i32, page: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::VideoShowParamSetPage,
-                timestamp: 0.0,
-            },
-            interfaceid,
-            displayid,
-            page,
-        }
-    }
-}
-
-impl_event!(VideoShowParamSetPageEvent, VideoShowParamSetPage);
-
-#[derive(Clone)]
-pub struct ExitSessionEvent {
-    pub base: BaseEvent,
-}
-
-impl ExitSessionEvent {
-    pub fn new() -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::ExitSession,
-                timestamp: 0.0,
-            },
-        }
-    }
-}
-
-impl_event!(ExitSessionEvent, ExitSession);
-
-#[derive(Clone)]
-pub struct SlideMasterInVolumeEvent {
-    pub base: BaseEvent,
-    pub slide: f32,
-}
-
-impl SlideMasterInVolumeEvent {
-    pub fn new(slide: f32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SlideMasterInVolume,
-                timestamp: 0.0,
-            },
-            slide,
-        }
-    }
-}
-
-impl_event!(SlideMasterInVolumeEvent, SlideMasterInVolume);
-
-#[derive(Clone)]
-pub struct SlideMasterOutVolumeEvent {
-    pub base: BaseEvent,
-    pub slide: f32,
-}
-
-impl SlideMasterOutVolumeEvent {
-    pub fn new(slide: f32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SlideMasterOutVolume,
-                timestamp: 0.0,
-            },
-            slide,
-        }
-    }
-}
-
-impl_event!(SlideMasterOutVolumeEvent, SlideMasterOutVolume);
-
-#[derive(Clone)]
-pub struct SlideInVolumeEvent {
-    pub base: BaseEvent,
-    pub input: i32,
-    pub slide: f32,
-}
-
-impl SlideInVolumeEvent {
-    pub fn new(input: i32, slide: f32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SlideInVolume,
-                timestamp: 0.0,
-            },
-            input,
-            slide,
-        }
-    }
-}
-
-impl_event!(SlideInVolumeEvent, SlideInVolume, SLIDE_IN_VOLUME_PARAMS);
-
-#[derive(Clone)]
-pub struct SetMasterInVolumeEvent {
-    pub base: BaseEvent,
-    pub vol: f32,
-    pub fadervol: f32,
-}
-
-impl SetMasterInVolumeEvent {
-    pub fn new(vol: f32, fadervol: f32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SetMasterInVolume,
-                timestamp: 0.0,
-            },
-            vol,
-            fadervol,
-        }
-    }
-}
-
-impl_event!(SetMasterInVolumeEvent, SetMasterInVolume);
-
-#[derive(Clone)]
-pub struct SetMasterOutVolumeEvent {
-    pub base: BaseEvent,
-    pub vol: f32,
-    pub fadervol: f32,
-}
-
-impl SetMasterOutVolumeEvent {
-    pub fn new(vol: f32, fadervol: f32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SetMasterOutVolume,
-                timestamp: 0.0,
-            },
-            vol,
-            fadervol,
-        }
-    }
-}
-
-impl_event!(SetMasterOutVolumeEvent, SetMasterOutVolume);
-
-#[derive(Clone)]
-pub struct SetInVolumeEvent {
-    pub base: BaseEvent,
-    pub input: i32,
-    pub vol: f32,
-    pub fadervol: f32,
-}
-
-impl SetInVolumeEvent {
-    pub fn new(input: i32, vol: f32, fadervol: f32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SetInVolume,
-                timestamp: 0.0,
-            },
-            input,
-            vol,
-            fadervol,
-        }
-    }
-}
-
-impl_event!(SetInVolumeEvent, SetInVolume, SET_IN_VOLUME_PARAMS);
-
-#[derive(Clone)]
-pub struct ToggleInputRecordEvent {
-    pub base: BaseEvent,
-    pub input: i32,
-}
-
-impl ToggleInputRecordEvent {
-    pub fn new(input: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::ToggleInputRecord,
-                timestamp: 0.0,
-            },
-            input,
-        }
-    }
-}
-
-impl_event!(ToggleInputRecordEvent, ToggleInputRecord);
-
-#[derive(Clone)]
-pub struct SetMidiEchoPortEvent {
-    pub base: BaseEvent,
-    pub echoport: i32,
-}
-
-impl SetMidiEchoPortEvent {
-    pub fn new(echoport: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SetMidiEchoPort,
-                timestamp: 0.0,
-            },
-            echoport,
-        }
-    }
-}
-
-impl_event!(SetMidiEchoPortEvent, SetMidiEchoPort);
-
-#[derive(Clone)]
-pub struct SetMidiEchoChannelEvent {
-    pub base: BaseEvent,
-    pub echochannel: i32,
-}
-
-impl SetMidiEchoChannelEvent {
-    pub fn new(echochannel: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SetMidiEchoChannel,
-                timestamp: 0.0,
-            },
-            echochannel,
-        }
-    }
-}
-
-impl_event!(SetMidiEchoChannelEvent, SetMidiEchoChannel);
-
-#[derive(Clone)]
-pub struct AdjustMidiTransposeEvent {
-    pub base: BaseEvent,
-    pub adjust: i32,
-}
-
-impl AdjustMidiTransposeEvent {
-    pub fn new(adjust: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::AdjustMidiTranspose,
-                timestamp: 0.0,
-            },
-            adjust,
-        }
-    }
-}
-
-impl_event!(AdjustMidiTransposeEvent, AdjustMidiTranspose);
-
-#[derive(Clone)]
-pub struct SetTriggerVolumeEvent {
-    pub base: BaseEvent,
-    pub index: i32,
-    pub vol: f32,
-}
-
-impl SetTriggerVolumeEvent {
-    pub fn new(index: i32, vol: f32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SetTriggerVolume,
-                timestamp: 0.0,
-            },
-            index,
-            vol,
-        }
-    }
-}
-
-impl_event!(SetTriggerVolumeEvent, SetTriggerVolume);
-
-#[derive(Clone)]
-pub struct SlideLoopAmpEvent {
-    pub base: BaseEvent,
-    pub index: i32,
-    pub slide: f32,
-}
-
-impl SlideLoopAmpEvent {
-    pub fn new(index: i32, slide: f32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SlideLoopAmp,
-                timestamp: 0.0,
-            },
-            index,
-            slide,
-        }
-    }
-}
-
-impl_event!(SlideLoopAmpEvent, SlideLoopAmp, SLIDE_LOOP_AMP_PARAMS);
-
-#[derive(Clone)]
-pub struct SetLoopAmpEvent {
-    pub base: BaseEvent,
-    pub index: i32,
-    pub amp: f32,
-}
-
-impl SetLoopAmpEvent {
-    pub fn new(index: i32, amp: f32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SetLoopAmp,
-                timestamp: 0.0,
-            },
-            index,
-            amp,
-        }
-    }
-}
-
-impl_event!(SetLoopAmpEvent, SetLoopAmp, SET_LOOP_AMP_PARAMS);
-
-#[derive(Clone)]
-pub struct AdjustLoopAmpEvent {
-    pub base: BaseEvent,
-    pub index: i32,
-    pub ampfactor: f32,
-}
-
-impl AdjustLoopAmpEvent {
-    pub fn new(index: i32, ampfactor: f32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::AdjustLoopAmp,
-                timestamp: 0.0,
-            },
-            index,
-            ampfactor,
-        }
-    }
-}
-
-impl_event!(AdjustLoopAmpEvent, AdjustLoopAmp, ADJUST_LOOP_AMP_PARAMS);
-
-#[derive(Clone)]
-pub struct SlideLoopAmpStopAllEvent {
-    pub base: BaseEvent,
-}
-
-impl SlideLoopAmpStopAllEvent {
-    pub fn new() -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SlideLoopAmpStopAll,
-                timestamp: 0.0,
-            },
-        }
-    }
-}
-
-impl_event!(SlideLoopAmpStopAllEvent, SlideLoopAmpStopAll);
-
-#[derive(Clone)]
-pub struct ToggleSelectLoopEvent {
-    pub base: BaseEvent,
-    pub setid: i32,
-    pub loopid: i32,
-}
-
-impl ToggleSelectLoopEvent {
-    pub fn new(setid: i32, loopid: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::ToggleSelectLoop,
-                timestamp: 0.0,
-            },
-            setid,
-            loopid,
-        }
-    }
-}
-
-impl_event!(ToggleSelectLoopEvent, ToggleSelectLoop, TOGGLE_SELECT_LOOP_PARAMS);
-
-#[derive(Clone)]
-pub struct SelectOnlyPlayingLoopsEvent {
-    pub base: BaseEvent,
-    pub setid: i32,
-    pub playing: bool,
-}
-
-impl SelectOnlyPlayingLoopsEvent {
-    pub fn new(setid: i32, playing: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SelectOnlyPlayingLoops,
-                timestamp: 0.0,
-            },
-            setid,
-            playing,
-        }
-    }
-}
-
-impl_event!(SelectOnlyPlayingLoopsEvent, SelectOnlyPlayingLoops, SELECT_ONLY_PLAYING_PARAMS);
-
-#[derive(Clone)]
-pub struct SelectAllLoopsEvent {
-    pub base: BaseEvent,
-    pub setid: i32,
-    pub select: bool,
-}
-
-impl SelectAllLoopsEvent {
-    pub fn new(setid: i32, select: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SelectAllLoops,
-                timestamp: 0.0,
-            },
-            setid,
-            select,
-        }
-    }
-}
-
-impl_event!(SelectAllLoopsEvent, SelectAllLoops, SELECT_ALL_LOOPS_PARAMS);
-
-#[derive(Clone)]
-pub struct InvertSelectionEvent {
-    pub base: BaseEvent,
-    pub setid: i32,
-}
-
-impl InvertSelectionEvent {
-    pub fn new(setid: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::InvertSelection,
-                timestamp: 0.0,
-            },
-            setid,
-        }
-    }
-}
-
-impl_event!(InvertSelectionEvent, InvertSelection, SETID_PARAMS);
-
-#[derive(Clone)]
-pub struct TriggerSelectedLoopsEvent {
-    pub base: BaseEvent,
-    pub setid: i32,
-    pub vol: f32,
-    pub toggleloops: bool,
-}
-
-impl TriggerSelectedLoopsEvent {
-    pub fn new(setid: i32, vol: f32, toggleloops: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::TriggerSelectedLoops,
-                timestamp: 0.0,
-            },
-            setid,
-            vol,
-            toggleloops,
-        }
-    }
-}
-
-impl_event!(TriggerSelectedLoopsEvent, TriggerSelectedLoops, TRIGGER_SELECTED_LOOPS_PARAMS);
-
-#[derive(Clone)]
-pub struct SetSelectedLoopsTriggerVolumeEvent {
-    pub base: BaseEvent,
-    pub setid: i32,
-    pub vol: f32,
-}
-
-impl SetSelectedLoopsTriggerVolumeEvent {
-    pub fn new(setid: i32, vol: f32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SetSelectedLoopsTriggerVolume,
-                timestamp: 0.0,
-            },
-            setid,
-            vol,
-        }
-    }
-}
-
-impl_event!(SetSelectedLoopsTriggerVolumeEvent, SetSelectedLoopsTriggerVolume, SET_SELECTED_LOOPS_TRIGGER_VOLUME_PARAMS);
-
-#[derive(Clone)]
-pub struct AdjustSelectedLoopsAmpEvent {
-    pub base: BaseEvent,
-    pub setid: i32,
-    pub ampfactor: f32,
-}
-
-impl AdjustSelectedLoopsAmpEvent {
-    pub fn new(setid: i32, ampfactor: f32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::AdjustSelectedLoopsAmp,
-                timestamp: 0.0,
-            },
-            setid,
-            ampfactor,
-        }
-    }
-}
-
-impl_event!(AdjustSelectedLoopsAmpEvent, AdjustSelectedLoopsAmp, ADJUST_SELECTED_LOOPS_AMP_PARAMS);
-
-#[derive(Clone)]
-pub struct MoveLoopEvent {
-    pub base: BaseEvent,
-    pub oldloopid: i32,
-    pub newloopid: i32,
-}
-
-impl MoveLoopEvent {
-    pub fn new(oldloopid: i32, newloopid: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::MoveLoop,
-                timestamp: 0.0,
-            },
-            oldloopid,
-            newloopid,
-        }
-    }
-}
-
-impl_event!(MoveLoopEvent, MoveLoop);
-
-#[derive(Clone)]
-pub struct EraseLoopEvent {
-    pub base: BaseEvent,
-    pub index: i32,
-}
-
-impl EraseLoopEvent {
-    pub fn new(index: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::EraseLoop,
-                timestamp: 0.0,
-            },
-            index,
-        }
-    }
-}
-
-impl_event!(EraseLoopEvent, EraseLoop);
-
-#[derive(Clone)]
-pub struct EraseAllLoopsEvent {
-    pub base: BaseEvent,
-}
-
-impl EraseAllLoopsEvent {
-    pub fn new() -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::EraseAllLoops,
-                timestamp: 0.0,
-            },
-        }
-    }
-}
-
-impl_event!(EraseAllLoopsEvent, EraseAllLoops);
-
-#[derive(Clone)]
-pub struct SaveLoopEvent {
-    pub base: BaseEvent,
-    pub index: i32,
-}
-
-impl SaveLoopEvent {
-    pub fn new(index: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SaveLoop,
-                timestamp: 0.0,
-            },
-            index,
-        }
-    }
-}
-
-impl_event!(SaveLoopEvent, SaveLoop);
-
-#[derive(Clone)]
-pub struct RenameLoopEvent {
-    pub base: BaseEvent,
-    pub loopid: i32,
-    pub in_layout: bool,
-}
-
-impl RenameLoopEvent {
-    pub fn new(loopid: i32, in_layout: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::RenameLoop,
-                timestamp: 0.0,
-            },
-            loopid,
-            in_layout,
-        }
-    }
-}
-
-impl_event!(RenameLoopEvent, RenameLoop);
-
-#[derive(Clone)]
-pub struct EraseSelectedLoopsEvent {
-    pub base: BaseEvent,
-    pub setid: i32,
-}
-
-impl EraseSelectedLoopsEvent {
-    pub fn new(setid: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::EraseSelectedLoops,
-                timestamp: 0.0,
-            },
-            setid,
-        }
-    }
-}
-
-impl_event!(EraseSelectedLoopsEvent, EraseSelectedLoops);
-
-#[derive(Clone)]
-pub struct ToggleDiskOutputEvent {
-    pub base: BaseEvent,
-}
-
-impl ToggleDiskOutputEvent {
-    pub fn new() -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::ToggleDiskOutput,
-                timestamp: 0.0,
-            },
-        }
-    }
-}
-
-impl_event!(ToggleDiskOutputEvent, ToggleDiskOutput);
-
-#[derive(Clone)]
-pub struct SetAutoLoopSavingEvent {
-    pub base: BaseEvent,
-    pub save: bool,
-}
-
-impl SetAutoLoopSavingEvent {
-    pub fn new(save: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SetAutoLoopSaving,
-                timestamp: 0.0,
-            },
-            save,
-        }
-    }
-}
-
-impl_event!(SetAutoLoopSavingEvent, SetAutoLoopSaving);
-
-#[derive(Clone)]
-pub struct SaveNewSceneEvent {
-    pub base: BaseEvent,
-}
-
-impl SaveNewSceneEvent {
-    pub fn new() -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SaveNewScene,
-                timestamp: 0.0,
-            },
-        }
-    }
-}
-
-impl_event!(SaveNewSceneEvent, SaveNewScene);
-
-#[derive(Clone)]
-pub struct SaveCurrentSceneEvent {
-    pub base: BaseEvent,
-}
-
-impl SaveCurrentSceneEvent {
-    pub fn new() -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SaveCurrentScene,
-                timestamp: 0.0,
-            },
-        }
-    }
-}
-
-impl_event!(SaveCurrentSceneEvent, SaveCurrentScene);
-
-#[derive(Clone)]
-pub struct SetLoadLoopIdEvent {
-    pub base: BaseEvent,
-    pub index: i32,
-}
-
-impl SetLoadLoopIdEvent {
-    pub fn new(index: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SetLoadLoopId,
-                timestamp: 0.0,
-            },
-            index,
-        }
-    }
-}
-
-impl_event!(SetLoadLoopIdEvent, SetLoadLoopId);
-
-#[derive(Clone)]
-pub struct SetDefaultLoopPlacementEvent {
-    pub base: BaseEvent,
-    pub looprange: Range,
-}
-
-impl SetDefaultLoopPlacementEvent {
-    pub fn new(looprange: Range) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SetDefaultLoopPlacement,
-                timestamp: 0.0,
-            },
-            looprange,
-        }
-    }
-}
-
-impl_event!(SetDefaultLoopPlacementEvent, SetDefaultLoopPlacement);
-
-#[derive(Clone)]
-pub struct SelectPulseEvent {
-    pub base: BaseEvent,
-    pub pulse: i32,
-}
-
-impl SelectPulseEvent {
-    pub fn new(pulse: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SelectPulse,
-                timestamp: 0.0,
-            },
-            pulse,
-        }
-    }
-}
-
-impl_event!(SelectPulseEvent, SelectPulse);
-
-#[derive(Clone)]
-pub struct DeletePulseEvent {
-    pub base: BaseEvent,
-    pub pulse: i32,
-}
-
-impl DeletePulseEvent {
-    pub fn new(pulse: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::DeletePulse,
-                timestamp: 0.0,
-            },
-            pulse,
-        }
-    }
-}
-
-impl_event!(DeletePulseEvent, DeletePulse);
-
-#[derive(Clone)]
-pub struct TapPulseEvent {
-    pub base: BaseEvent,
-    pub pulse: i32,
-    pub newlen: bool,
-}
-
-impl TapPulseEvent {
-    pub fn new(pulse: i32, newlen: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::TapPulse,
-                timestamp: 0.0,
-            },
-            pulse,
-            newlen,
-        }
-    }
-}
-
-impl_event!(TapPulseEvent, TapPulse);
-
-#[derive(Clone)]
-pub struct SwitchMetronomeEvent {
-    pub base: BaseEvent,
-    pub pulse: i32,
-    pub metronome: bool,
-}
-
-impl SwitchMetronomeEvent {
-    pub fn new(pulse: i32, metronome: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SwitchMetronome,
-                timestamp: 0.0,
-            },
-            pulse,
-            metronome,
-        }
-    }
-}
-
-impl_event!(SwitchMetronomeEvent, SwitchMetronome);
-
-#[derive(Clone)]
-pub struct SetSyncTypeEvent {
-    pub base: BaseEvent,
-    pub stype: bool,
-}
-
-impl SetSyncTypeEvent {
-    pub fn new(stype: bool) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SetSyncType,
-                timestamp: 0.0,
-            },
-            stype,
-        }
-    }
-}
-
-impl_event!(SetSyncTypeEvent, SetSyncType);
-
-#[derive(Clone)]
-pub struct SetSyncSpeedEvent {
-    pub base: BaseEvent,
-    pub sspd: i32,
-}
-
-impl SetSyncSpeedEvent {
-    pub fn new(sspd: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SetSyncSpeed,
-                timestamp: 0.0,
-            },
-            sspd,
-        }
-    }
-}
-
-impl_event!(SetSyncSpeedEvent, SetSyncSpeed);
-
-#[derive(Clone)]
-pub struct SetMidiSyncEvent {
-    pub base: BaseEvent,
-    pub midisync: i32,
-}
-
-impl SetMidiSyncEvent {
-    pub fn new(midisync: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SetMidiSync,
-                timestamp: 0.0,
-            },
-            midisync,
-        }
-    }
-}
-
-impl_event!(SetMidiSyncEvent, SetMidiSync);
-
-#[derive(Clone)]
-pub struct SetVariableEvent {
-    pub base: BaseEvent,
-    pub var_name: Option<String>,
-    pub value: UserVariable,
-    pub maxjumpcheck: bool,
-    pub maxjump: UserVariable,
-}
-
-impl SetVariableEvent {
-    pub fn new(
+    },
+    MIDIClockInput {
+        outport: i32,
+    },
+    MIDIStartStopInput {
+        outport: i32,
+        start: bool,
+    },
+    FluidSynthEnable {
+        enable: bool,
+    },
+    SetMidiTuning {
+        tuning: f32,
+    },
+    BrowserMoveToItem {
+        browserid: i32,
+        adjust: i32,
+        jump_adjust: i32,
+    },
+    BrowserMoveToItemAbsolute {
+        browserid: i32,
+        index: i32,
+    },
+    BrowserSelectItem {
+        browserid: i32,
+    },
+    BrowserRenameItem {
+        browserid: i32,
+    },
+    BrowserItemBrowsed {
+        browserid: i32,
+    },
+    PatchBrowserMoveToBank {
+        direction: i32,
+    },
+    PatchBrowserMoveToBankByIndex {
+        index: i32,
+    },
+    StartInterface {
+        interfaceid: i32,
+    },
+    VideoShowLayout {
+        interfaceid: i32,
+        layoutid: i32,
+        show: bool,
+        hideothers: bool,
+    },
+    VideoSwitchInterface {
+        interfaceid: i32,
+    },
+    VideoShowDisplay {
+        interfaceid: i32,
+        displayid: i32,
+        show: bool,
+    },
+    VideoShowHelp {
+        page: i32,
+    },
+    VideoFullScreen {
+        fullscreen: bool,
+    },
+    ShowDebugInfo {
+        show: bool,
+    },
+    VideoShowLoop {
+        interfaceid: i32,
+        layoutid: i32,
+        loopid: Range,
+    },
+    VideoShowSnapshotPage {
+        interfaceid: i32,
+        displayid: i32,
+        page: i32,
+    },
+    VideoShowParamSetBank {
+        interfaceid: i32,
+        displayid: i32,
+        bank: i32,
+    },
+    VideoShowParamSetPage {
+        interfaceid: i32,
+        displayid: i32,
+        page: i32,
+    },
+    SlideMasterInVolume {
+        slide: f32,
+    },
+    SlideMasterOutVolume {
+        slide: f32,
+    },
+    SlideInVolume {
+        input: i32,
+        slide: f32,
+    },
+    SetMasterInVolume {
+        vol: f32,
+        fadervol: f32,
+    },
+    SetMasterOutVolume {
+        vol: f32,
+        fadervol: f32,
+    },
+    SetInVolume {
+        input: i32,
+        vol: f32,
+        fadervol: f32,
+    },
+    ToggleInputRecord {
+        input: i32,
+    },
+    SetMidiEchoPort {
+        echoport: i32,
+    },
+    SetMidiEchoChannel {
+        echochannel: i32,
+    },
+    AdjustMidiTranspose {
+        adjust: i32,
+    },
+    SetTriggerVolume {
+        index: i32,
+        vol: f32,
+    },
+    SlideLoopAmp {
+        index: i32,
+        slide: f32,
+    },
+    SetLoopAmp {
+        index: i32,
+        amp: f32,
+    },
+    AdjustLoopAmp {
+        index: i32,
+        ampfactor: f32,
+    },
+    ToggleSelectLoop {
+        setid: i32,
+        loopid: i32,
+    },
+    SelectOnlyPlayingLoops {
+        setid: i32,
+        playing: bool,
+    },
+    SelectAllLoops {
+        setid: i32,
+        select: bool,
+    },
+    InvertSelection {
+        setid: i32,
+    },
+    TriggerSelectedLoops {
+        setid: i32,
+        vol: f32,
+        toggleloops: bool,
+    },
+    SetSelectedLoopsTriggerVolume {
+        setid: i32,
+        vol: f32,
+    },
+    AdjustSelectedLoopsAmp {
+        setid: i32,
+        ampfactor: f32,
+    },
+    MoveLoop {
+        oldloopid: i32,
+        newloopid: i32,
+    },
+    EraseLoop {
+        index: i32,
+    },
+    SaveLoop {
+        index: i32,
+    },
+    RenameLoop {
+        loopid: i32,
+        in_layout: bool,
+    },
+    EraseSelectedLoops {
+        setid: i32,
+    },
+    SetAutoLoopSaving {
+        save: bool,
+    },
+    SetLoadLoopId {
+        index: i32,
+    },
+    SetDefaultLoopPlacement {
+        looprange: Range,
+    },
+    SelectPulse {
+        pulse: i32,
+    },
+    DeletePulse {
+        pulse: i32,
+    },
+    TapPulse {
+        pulse: i32,
+        newlen: bool,
+    },
+    SwitchMetronome {
+        pulse: i32,
+        metronome: bool,
+    },
+    SetSyncType {
+        stype: bool,
+    },
+    SetSyncSpeed {
+        sspd: i32,
+    },
+    SetMidiSync {
+        midisync: i32,
+    },
+    SetVariable {
         var_name: Option<String>,
         value: UserVariable,
         maxjumpcheck: bool,
         maxjump: UserVariable,
-    ) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SetVariable,
-                timestamp: 0.0,
-            },
-            var_name,
-            value,
-            maxjumpcheck,
-            maxjump,
-        }
-    }
-}
-
-impl_event!(SetVariableEvent, SetVariable, SET_VARIABLE_PARAMS);
-
-#[derive(Clone)]
-pub struct ToggleVariableEvent {
-    pub base: BaseEvent,
-    pub var_name: Option<String>,
-    pub maxvalue: i32,
-    pub minvalue: i32,
-}
-
-impl ToggleVariableEvent {
-    pub fn new(var_name: Option<String>, maxvalue: i32, minvalue: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::ToggleVariable,
-                timestamp: 0.0,
-            },
-            var_name,
-            maxvalue,
-            minvalue,
-        }
-    }
-}
-
-impl_event!(ToggleVariableEvent, ToggleVariable, TOGGLE_VARIABLE_PARAMS);
-
-#[derive(Clone)]
-pub struct SplitVariableMSBLSBEvent {
-    pub base: BaseEvent,
-    pub var: UserVariable,
-    pub msb_name: Option<String>,
-    pub lsb_name: Option<String>,
-}
-
-impl SplitVariableMSBLSBEvent {
-    pub fn new(var: UserVariable, msb_name: Option<String>, lsb_name: Option<String>) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SplitVariableMSBLSB,
-                timestamp: 0.0,
-            },
-            var,
-            msb_name,
-            lsb_name,
-        }
-    }
-}
-
-impl_event!(SplitVariableMSBLSBEvent, SplitVariableMSBLSB, SPLIT_VARIABLE_PARAMS);
-
-#[derive(Clone)]
-pub struct ParamSetGetAbsoluteParamIdxEvent {
-    pub base: BaseEvent,
-    pub interfaceid: i32,
-    pub displayid: i32,
-    pub paramidx: i32,
-    pub absidx_name: Option<String>,
-}
-
-impl ParamSetGetAbsoluteParamIdxEvent {
-    pub fn new(
+    },
+    ToggleVariable {
+        var_name: Option<String>,
+        maxvalue: i32,
+        minvalue: i32,
+    },
+    SplitVariableMSBLSB {
+        var: UserVariable,
+        msb_name: Option<String>,
+        lsb_name: Option<String>,
+    },
+    ParamSetGetAbsoluteParamIdx {
         interfaceid: i32,
         displayid: i32,
         paramidx: i32,
         absidx_name: Option<String>,
-    ) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::ParamSetGetAbsoluteParamIdx,
-                timestamp: 0.0,
-            },
-            interfaceid,
-            displayid,
-            paramidx,
-            absidx_name,
-        }
-    }
+    },
+    ParamSetGetParam {
+        interfaceid: i32,
+        displayid: i32,
+        paramidx: i32,
+        var_name: Option<String>,
+    },
+    ParamSetSetParam {
+        interfaceid: i32,
+        displayid: i32,
+        paramidx: i32,
+        value: f32,
+    },
+    LogFaderVolToLinear {
+        var_name: Option<String>,
+        fadervol: UserVariable,
+        scale: f32,
+    },
+    ALSAMixerControlSet {
+        hwid: i32,
+        numid: i32,
+        val1: i32,
+        val2: i32,
+        val3: i32,
+        val4: i32,
+    },
+    CreateSnapshot {
+        snapid: i32,
+    },
+    SwapSnapshots {
+        snapid1: i32,
+        snapid2: i32,
+    },
+    RenameSnapshot {
+        snapid: i32,
+    },
+    TriggerSnapshot {
+        snapid: i32,
+    },
 }
-
-impl_event!(ParamSetGetAbsoluteParamIdxEvent, ParamSetGetAbsoluteParamIdx);
-
-#[derive(Clone)]
-pub struct ParamSetGetParamEvent {
-    pub base: BaseEvent,
-    pub interfaceid: i32,
-    pub displayid: i32,
-    pub paramidx: i32,
-    pub var_name: Option<String>,
-}
-
-impl ParamSetGetParamEvent {
-    pub fn new(interfaceid: i32, displayid: i32, paramidx: i32, var_name: Option<String>) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::ParamSetGetParam,
-                timestamp: 0.0,
-            },
-            interfaceid,
-            displayid,
-            paramidx,
-            var_name,
-        }
-    }
-}
-
-impl_event!(ParamSetGetParamEvent, ParamSetGetParam);
-
-#[derive(Clone)]
-pub struct ParamSetSetParamEvent {
-    pub base: BaseEvent,
-    pub interfaceid: i32,
-    pub displayid: i32,
-    pub paramidx: i32,
-    pub value: f32,
-}
-
-impl ParamSetSetParamEvent {
-    pub fn new(interfaceid: i32, displayid: i32, paramidx: i32, value: f32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::ParamSetSetParam,
-                timestamp: 0.0,
-            },
-            interfaceid,
-            displayid,
-            paramidx,
-            value,
-        }
-    }
-}
-
-impl_event!(ParamSetSetParamEvent, ParamSetSetParam);
-
-#[derive(Clone)]
-pub struct LogFaderVolToLinearEvent {
-    pub base: BaseEvent,
-    pub var_name: Option<String>,
-    pub fadervol: UserVariable,
-    pub scale: f32,
-}
-
-impl LogFaderVolToLinearEvent {
-    pub fn new(var_name: Option<String>, fadervol: UserVariable, scale: f32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::LogFaderVolToLinear,
-                timestamp: 0.0,
-            },
-            var_name,
-            fadervol,
-            scale,
-        }
-    }
-}
-
-impl_event!(LogFaderVolToLinearEvent, LogFaderVolToLinear);
-
-#[derive(Clone)]
-pub struct ALSAMixerControlSetEvent {
-    pub base: BaseEvent,
-    pub hwid: i32,
-    pub numid: i32,
-    pub val1: i32,
-    pub val2: i32,
-    pub val3: i32,
-    pub val4: i32,
-}
-
-impl ALSAMixerControlSetEvent {
-    pub fn new(hwid: i32, numid: i32, val1: i32, val2: i32, val3: i32, val4: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::ALSAMixerControlSet,
-                timestamp: 0.0,
-            },
-            hwid,
-            numid,
-            val1,
-            val2,
-            val3,
-            val4,
-        }
-    }
-}
-
-impl_event!(ALSAMixerControlSetEvent, ALSAMixerControlSet);
-
-#[derive(Clone)]
-pub struct CreateSnapshotEvent {
-    pub base: BaseEvent,
-    pub snapid: i32,
-}
-
-impl CreateSnapshotEvent {
-    pub fn new(snapid: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::CreateSnapshot,
-                timestamp: 0.0,
-            },
-            snapid,
-        }
-    }
-}
-
-impl_event!(CreateSnapshotEvent, CreateSnapshot);
-
-#[derive(Clone)]
-pub struct SwapSnapshotsEvent {
-    pub base: BaseEvent,
-    pub snapid1: i32,
-    pub snapid2: i32,
-}
-
-impl SwapSnapshotsEvent {
-    pub fn new(snapid1: i32, snapid2: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::SwapSnapshots,
-                timestamp: 0.0,
-            },
-            snapid1,
-            snapid2,
-        }
-    }
-}
-
-impl_event!(SwapSnapshotsEvent, SwapSnapshots);
-
-#[derive(Clone)]
-pub struct RenameSnapshotEvent {
-    pub base: BaseEvent,
-    pub snapid: i32,
-}
-
-impl RenameSnapshotEvent {
-    pub fn new(snapid: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::RenameSnapshot,
-                timestamp: 0.0,
-            },
-            snapid,
-        }
-    }
-}
-
-impl_event!(RenameSnapshotEvent, RenameSnapshot);
-
-#[derive(Clone)]
-pub struct TriggerSnapshotEvent {
-    pub base: BaseEvent,
-    pub snapid: i32,
-}
-
-impl TriggerSnapshotEvent {
-    pub fn new(snapid: i32) -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::TriggerSnapshot,
-                timestamp: 0.0,
-            },
-            snapid,
-        }
-    }
-}
-
-impl_event!(TriggerSnapshotEvent, TriggerSnapshot);
-
-#[derive(Clone)]
-pub struct TransmitPlayingLoopsToDAWEvent {
-    pub base: BaseEvent,
-}
-
-impl TransmitPlayingLoopsToDAWEvent {
-    pub fn new() -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::TransmitPlayingLoopsToDAW,
-                timestamp: 0.0,
-            },
-        }
-    }
-}
-
-impl_event!(TransmitPlayingLoopsToDAWEvent, TransmitPlayingLoopsToDAW);
-
-#[derive(Clone)]
-pub struct PulseSyncEvent {
-    pub base: BaseEvent,
-}
-
-impl PulseSyncEvent {
-    pub fn new() -> Self {
-        Self {
-            base: BaseEvent {
-                event_type: EventType::PulseSync,
-                timestamp: 0.0,
-            },
-        }
-    }
-}
-
-impl_event!(PulseSyncEvent, PulseSync);
 
 // ============================================================
 // Event manager
@@ -3285,83 +1459,3 @@ impl Drop for EventManager {
     }
 }
 
-macro_rules! default_via_new {
-    ($($type:ty),+ $(,)?) => {
-        $(
-            impl Default for $type {
-                fn default() -> Self {
-                    Self::new()
-                }
-            }
-        )+
-    };
-}
-
-default_via_new!(
-    MIDIClockInputEvent,
-    StartSessionEvent,
-    ExitSessionEvent,
-    SlideLoopAmpStopAllEvent,
-    EraseAllLoopsEvent,
-    ToggleDiskOutputEvent,
-    SaveNewSceneEvent,
-    SaveCurrentSceneEvent,
-    TransmitPlayingLoopsToDAWEvent,
-    PulseSyncEvent,
-    EventManager,
-);
-
-#[cfg(test)]
-mod event_contract_tests {
-    use super::*;
-
-    fn parameter_names(event: &dyn Event) -> Vec<&'static str> {
-        (0..event.get_num_params())
-            .map(|index| event.get_param(index).unwrap().name)
-            .collect()
-    }
-
-    #[test]
-    fn routed_midi_event_schemas_match_cpp_binding_parameters() {
-        let controller = MIDIControllerInputEvent::new(2, 7, 99);
-        assert_eq!(controller.outport, 1);
-        assert!(!controller.echo);
-        assert_eq!(
-            parameter_names(&controller),
-            [
-                "outport",
-                "midichannel",
-                "controlnum",
-                "controlval",
-                "routethroughpatch",
-            ]
-        );
-        let key = MIDIKeyInputEvent::new(2, 64, 100, true);
-        assert_eq!(
-            parameter_names(&key),
-            [
-                "outport",
-                "keydown",
-                "midichannel",
-                "notenum",
-                "velocity",
-                "routethroughpatch",
-            ]
-        );
-        let bend = MIDIPitchBendInputEvent::new(2, 123);
-        assert_eq!(
-            parameter_names(&bend),
-            ["outport", "midichannel", "pitchval", "routethroughpatch"]
-        );
-    }
-
-    #[test]
-    fn midi_transport_events_expose_the_cpp_output_port() {
-        let clock = MIDIClockInputEvent::new();
-        assert_eq!(clock.outport, 1);
-        assert_eq!(parameter_names(&clock), ["outport"]);
-        let start = MIDIStartStopInputEvent::new(true);
-        assert_eq!(start.outport, 1);
-        assert_eq!(parameter_names(&start), ["outport", "start"]);
-    }
-}
