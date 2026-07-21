@@ -21,170 +21,49 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
-const DEFAULT_RATE: u32 = 48_000;
-const MAX_CALLBACK_FRAMES: usize = 16_384;
-const NO_ERR: i32 = 0;
+use coreaudio_sys::*;
 
-// AudioUnit component and property constants. Keeping this tiny FFI surface
-// local makes the real-time ownership rules auditable and avoids a second
-// abstraction layer around the exact callback shape used by the C++ app.
-const K_AUDIO_UNIT_TYPE_OUTPUT: u32 = 0x6175_6f75; // 'auou'
-const K_AUDIO_UNIT_SUBTYPE_HAL_OUTPUT: u32 = 0x6168_616c; // 'ahal'
-const K_AUDIO_UNIT_MANUFACTURER_APPLE: u32 = 0x6170_706c; // 'appl'
-const K_AUDIO_FORMAT_LINEAR_PCM: u32 = 0x6c70_636d; // 'lpcm'
-const K_AUDIO_FORMAT_FLAG_IS_FLOAT: u32 = 1;
-const K_AUDIO_FORMAT_FLAG_IS_PACKED: u32 = 1 << 3;
-const K_AUDIO_FORMAT_FLAG_IS_NON_INTERLEAVED: u32 = 1 << 5;
-const K_AUDIO_OUTPUT_UNIT_PROPERTY_CURRENT_DEVICE: u32 = 2000;
-const K_AUDIO_OUTPUT_UNIT_PROPERTY_ENABLE_IO: u32 = 2003;
-const K_AUDIO_UNIT_PROPERTY_STREAM_FORMAT: u32 = 8;
-const K_AUDIO_UNIT_PROPERTY_MAXIMUM_FRAMES_PER_SLICE: u32 = 14;
-const K_AUDIO_UNIT_PROPERTY_SET_RENDER_CALLBACK: u32 = 23;
-const K_AUDIO_HARDWARE_PROPERTY_DEFAULT_INPUT_DEVICE: u32 = 0x6449_6e20; // 'dIn '
-const K_AUDIO_HARDWARE_PROPERTY_DEFAULT_OUTPUT_DEVICE: u32 = 0x644f_7574; // 'dOut'
-const K_AUDIO_DEVICE_PROPERTY_NOMINAL_SAMPLE_RATE: u32 = 0x6e73_7274; // 'nsrt'
-const K_AUDIO_DEVICE_PROPERTY_BUFFER_FRAME_SIZE: u32 = 0x6673_697a; // 'fsiz'
-const K_AUDIO_DEVICE_PROPERTY_LATENCY: u32 = 0x6c74_6e63; // 'ltnc'
-const K_AUDIO_DEVICE_PROPERTY_SAFETY_OFFSET: u32 = 0x7361_6674; // 'saft'
-const K_AUDIO_OBJECT_SYSTEM_OBJECT: u32 = 1;
-const K_AUDIO_OBJECT_SCOPE_GLOBAL: u32 = 0;
-const K_AUDIO_OBJECT_ELEMENT_MAIN: u32 = 0;
-const K_AUDIO_OBJECT_SCOPE_INPUT: u32 = 0x696e_7074; // 'inpt'
-const K_AUDIO_OBJECT_SCOPE_OUTPUT: u32 = 0x6f75_7470; // 'outp'
-const K_AUDIO_UNIT_SCOPE_GLOBAL: u32 = 0;
-const K_AUDIO_UNIT_SCOPE_INPUT: u32 = 1;
-const K_AUDIO_UNIT_SCOPE_OUTPUT: u32 = 2;
-const ROUTE_POLL_INTERVAL_MS: u64 = 250;
-
-type AudioUnit = *mut c_void;
-type AudioComponent = *mut c_void;
-
-#[repr(C)]
-struct AudioComponentDescription {
-    component_type: u32,
-    component_sub_type: u32,
-    component_manufacturer: u32,
-    component_flags: u32,
-    component_flags_mask: u32,
-}
-
-#[repr(C)]
-struct AudioObjectPropertyAddress {
-    selector: u32,
-    scope: u32,
-    element: u32,
-}
-
-#[repr(C)]
-struct AudioStreamBasicDescription {
-    sample_rate: f64,
-    format_id: u32,
-    format_flags: u32,
-    bytes_per_packet: u32,
-    frames_per_packet: u32,
-    bytes_per_frame: u32,
-    channels_per_frame: u32,
-    bits_per_channel: u32,
-    reserved: u32,
-}
-
-#[repr(C)]
-struct AudioTimeStamp {
-    sample_time: f64,
-    host_time: u64,
-    rate_scalar: f64,
-    word_clock_time: u64,
-    smpte_time: [u8; 32],
-    flags: u32,
-    reserved: u32,
-}
-
-#[repr(C)]
-struct AudioBuffer {
-    number_channels: u32,
-    data_byte_size: u32,
-    data: *mut c_void,
-}
-
-// CoreAudio declares one trailing buffer; the fixed two-buffer form is ABI
-// compatible and is exactly what the non-interleaved stereo input needs.
+// Keep AudioBufferList2 for non-interleaved stereo capture (coreaudio_sys
+// AudioBufferList has exactly 1 trailing buffer).
 #[repr(C)]
 struct AudioBufferList2 {
     number_buffers: u32,
     buffers: [AudioBuffer; NUM_CHANNELS],
 }
 
-#[repr(C)]
-struct AudioBufferList1 {
-    number_buffers: u32,
-    first_buffer: AudioBuffer,
-}
-
-type RenderProc = unsafe extern "C" fn(
-    *mut c_void,
-    *mut u32,
-    *const AudioTimeStamp,
-    u32,
-    u32,
-    *mut AudioBufferList1,
-) -> i32;
-
-#[repr(C)]
-struct AURenderCallbackStruct {
-    input_proc: Option<RenderProc>,
-    input_proc_ref_con: *mut c_void,
-}
-
-#[link(name = "AudioToolbox", kind = "framework")]
-unsafe extern "C" {
-    fn AudioComponentFindNext(
-        component: AudioComponent,
-        desc: *const AudioComponentDescription,
-    ) -> AudioComponent;
-    fn AudioComponentInstanceNew(component: AudioComponent, unit: *mut AudioUnit) -> i32;
-    fn AudioComponentInstanceDispose(unit: AudioUnit) -> i32;
-    fn AudioUnitSetProperty(
-        unit: AudioUnit,
-        id: u32,
-        scope: u32,
-        element: u32,
-        data: *const c_void,
-        data_size: u32,
-    ) -> i32;
-    fn AudioUnitInitialize(unit: AudioUnit) -> i32;
-    fn AudioUnitUninitialize(unit: AudioUnit) -> i32;
-    fn AudioUnitRender(
-        unit: AudioUnit,
-        flags: *mut u32,
-        timestamp: *const AudioTimeStamp,
-        bus: u32,
-        frames: u32,
-        data: *mut AudioBufferList1,
-    ) -> i32;
-    fn AudioOutputUnitStart(unit: AudioUnit) -> i32;
-    fn AudioOutputUnitStop(unit: AudioUnit) -> i32;
-}
-
-#[link(name = "CoreAudio", kind = "framework")]
-unsafe extern "C" {
-    fn AudioObjectGetPropertyData(
-        object: u32,
-        address: *const AudioObjectPropertyAddress,
-        qualifier_size: u32,
-        qualifier: *const c_void,
-        data_size: *mut u32,
-        data: *mut c_void,
-    ) -> i32;
-    fn AudioObjectSetPropertyData(
-        object: u32,
-        address: *const AudioObjectPropertyAddress,
-        qualifier_size: u32,
-        qualifier: *const c_void,
-        data_size: u32,
-        data: *const c_void,
-    ) -> i32;
-}
-
+// AudioToolbox/CoreAudio property and format constants. These FourCharCode
+// values are stable ABI from macOS 10.0 onward; pulling them out of
+// coreaudio_sys just avoids churn when the SDK bindings are regenerated.
+const NO_ERR: i32 = 0;
+const K_AUDIO_FORMAT_LINEAR_PCM: u32 = 0x6c70_636d; // 'lpcm'
+const K_AUDIO_FORMAT_FLAG_IS_FLOAT: u32 = 1;
+const K_AUDIO_FORMAT_FLAG_IS_PACKED: u32 = 1 << 3;
+const K_AUDIO_FORMAT_FLAG_IS_NON_INTERLEAVED: u32 = 1 << 5;
+const K_AUDIO_UNIT_TYPE_OUTPUT: u32 = 0x6175_6f75;
+const K_AUDIO_UNIT_SUBTYPE_HAL_OUTPUT: u32 = 0x6168_616c;
+const K_AUDIO_UNIT_MANUFACTURER_APPLE: u32 = 0x6170_706c;
+const K_AUDIO_HARDWARE_PROPERTY_DEFAULT_INPUT_DEVICE: u32 = 0x6449_6e20;
+const K_AUDIO_HARDWARE_PROPERTY_DEFAULT_OUTPUT_DEVICE: u32 = 0x644f_7574;
+const K_AUDIO_OUTPUT_UNIT_PROPERTY_CURRENT_DEVICE: u32 = 2000;
+const K_AUDIO_OUTPUT_UNIT_PROPERTY_ENABLE_IO: u32 = 2003;
+const K_AUDIO_UNIT_PROPERTY_STREAM_FORMAT: u32 = 8;
+const K_AUDIO_UNIT_PROPERTY_MAXIMUM_FRAMES_PER_SLICE: u32 = 14;
+const K_AUDIO_UNIT_PROPERTY_SET_RENDER_CALLBACK: u32 = 23;
+const K_AUDIO_DEVICE_PROPERTY_NOMINAL_SAMPLE_RATE: u32 = 0x6e73_7274;
+const K_AUDIO_DEVICE_PROPERTY_BUFFER_FRAME_SIZE: u32 = 0x6673_697a;
+const K_AUDIO_DEVICE_PROPERTY_LATENCY: u32 = 0x6c74_6e63;
+const K_AUDIO_DEVICE_PROPERTY_SAFETY_OFFSET: u32 = 0x7361_6674;
+const K_AUDIO_OBJECT_SYSTEM_OBJECT: u32 = 1;
+const K_AUDIO_OBJECT_SCOPE_GLOBAL: u32 = 0;
+const K_AUDIO_OBJECT_ELEMENT_MAIN: u32 = 0;
+const K_AUDIO_OBJECT_SCOPE_INPUT: u32 = 0x696e_7074;
+const K_AUDIO_OBJECT_SCOPE_OUTPUT: u32 = 0x6f75_7470;
+const K_AUDIO_UNIT_SCOPE_GLOBAL: u32 = 0;
+const K_AUDIO_UNIT_SCOPE_INPUT: u32 = 1;
+const K_AUDIO_UNIT_SCOPE_OUTPUT: u32 = 2;
+const ROUTE_POLL_INTERVAL_MS: u64 = 250;
+const DEFAULT_RATE: u32 = 48_000;
+const MAX_CALLBACK_FRAMES: usize = 16_384;
 #[derive(Default)]
 struct SharedMetrics {
     xruns: AtomicU64,
@@ -254,14 +133,14 @@ impl CallbackState {
             number_buffers: 2,
             buffers: [
                 AudioBuffer {
-                    number_channels: 1,
-                    data_byte_size: 0,
-                    data: input_left.as_mut_ptr().cast(),
+                    mNumberChannels: 1,
+                    mDataByteSize: 0,
+                    mData: input_left.as_mut_ptr().cast(),
                 },
                 AudioBuffer {
-                    number_channels: 1,
-                    data_byte_size: 0,
-                    data: input_right.as_mut_ptr().cast(),
+                    mNumberChannels: 1,
+                    mDataByteSize: 0,
+                    mData: input_right.as_mut_ptr().cast(),
                 },
             ],
         };
@@ -372,11 +251,11 @@ impl MacosAudioUnitBackend {
 
     fn configure(&mut self) -> Result<BackendInfo, String> {
         let desc = AudioComponentDescription {
-            component_type: K_AUDIO_UNIT_TYPE_OUTPUT,
-            component_sub_type: K_AUDIO_UNIT_SUBTYPE_HAL_OUTPUT,
-            component_manufacturer: K_AUDIO_UNIT_MANUFACTURER_APPLE,
-            component_flags: 0,
-            component_flags_mask: 0,
+            componentType: K_AUDIO_UNIT_TYPE_OUTPUT,
+            componentSubType: K_AUDIO_UNIT_SUBTYPE_HAL_OUTPUT,
+            componentManufacturer: K_AUDIO_UNIT_MANUFACTURER_APPLE,
+            componentFlags: 0,
+            componentFlagsMask: 0,
         };
         // SAFETY: CoreAudio takes the description only for this call and writes
         // a fresh AudioUnit instance into `unit`.
@@ -464,8 +343,8 @@ impl MacosAudioUnitBackend {
             ));
             state.unit = unit;
             let callback = AURenderCallbackStruct {
-                input_proc: Some(render_callback),
-                input_proc_ref_con: (&mut *state as *mut CallbackState).cast(),
+                inputProc: Some(render_callback),
+                inputProcRefCon: (&mut *state as *mut CallbackState).cast(),
             };
             set_property(
                 unit,
@@ -752,7 +631,7 @@ unsafe extern "C" fn render_callback(
     timestamp: *const AudioTimeStamp,
     _bus: u32,
     frames: u32,
-    io_data: *mut AudioBufferList1,
+    io_data: *mut AudioBufferList,
 ) -> i32 {
     if ref_con.is_null()
         || timestamp.is_null()
@@ -774,8 +653,8 @@ unsafe extern "C" fn render_callback(
         state.cpu_sample_start = Some(started);
     }
     let count = frames as usize;
-    state.capture.buffers[0].data_byte_size = frames * std::mem::size_of::<f32>() as u32;
-    state.capture.buffers[1].data_byte_size = frames * std::mem::size_of::<f32>() as u32;
+    state.capture.buffers[0].mDataByteSize = frames * std::mem::size_of::<f32>() as u32;
+    state.capture.buffers[1].mDataByteSize = frames * std::mem::size_of::<f32>() as u32;
     // SAFETY: all pointers are valid for the duration of the callback and the
     // capture list points at preallocated buffers with MAX_CALLBACK_FRAMES.
     if unsafe {
@@ -798,15 +677,15 @@ unsafe extern "C" fn render_callback(
         // callback's `frames` cannot exceed either supplied buffer size.
         let output = unsafe { &mut *io_data };
         let left_buffer = unsafe { buffer_at(io_data, 0) };
-        let left = left_buffer.data.cast::<f32>();
-        if left.is_null() || left_buffer.data_byte_size < frames * 4 {
+        let left = left_buffer.mData.cast::<f32>();
+        if left.is_null() || left_buffer.mDataByteSize < frames * 4 {
             return;
         }
         let left = unsafe { std::slice::from_raw_parts_mut(left, count) };
-        let right = if output.number_buffers > 1 {
+        let right = if output.mNumberBuffers > 1 {
             let right_buffer = unsafe { buffer_at(io_data, 1) };
-            let pointer = right_buffer.data.cast::<f32>();
-            if pointer.is_null() || right_buffer.data_byte_size < frames * 4 {
+            let pointer = right_buffer.mData.cast::<f32>();
+            if pointer.is_null() || right_buffer.mDataByteSize < frames * 4 {
                 None
             } else {
                 Some(unsafe { std::slice::from_raw_parts_mut(pointer, count) })
@@ -880,17 +759,17 @@ unsafe extern "C" fn render_callback(
     NO_ERR
 }
 
-fn zero_output(io_data: *mut AudioBufferList1) {
+fn zero_output(io_data: *mut AudioBufferList) {
     if io_data.is_null() {
         return;
     }
     // SAFETY: CoreAudio owns `io_data`; only clear the buffers it reports.
     unsafe {
         let output = &mut *io_data;
-        for index in 0..output.number_buffers.min(2) as usize {
+        for index in 0..output.mNumberBuffers.min(2) as usize {
             let buffer = buffer_at(io_data, index);
-            if !buffer.data.is_null() {
-                ptr::write_bytes(buffer.data, 0, buffer.data_byte_size as usize);
+            if !buffer.mData.is_null() {
+                ptr::write_bytes(buffer.mData, 0, buffer.mDataByteSize as usize);
             }
         }
     }
@@ -899,10 +778,9 @@ fn zero_output(io_data: *mut AudioBufferList1) {
 /// # Safety
 /// `list` must point to a CoreAudio AudioBufferList containing `index + 1`
 /// buffers. The caller checks `number_buffers` before requesting an index.
-unsafe fn buffer_at<'a>(list: *mut AudioBufferList1, index: usize) -> &'a mut AudioBuffer {
-    // SAFETY: AudioBufferList stores its trailing array immediately after the
-    // count field. `first_buffer` begins at the same location as mBuffers[0].
-    unsafe { &mut *(ptr::addr_of_mut!((*list).first_buffer).add(index)) }
+unsafe fn buffer_at<'a>(list: *mut AudioBufferList, index: usize) -> &'a mut AudioBuffer {
+    // SAFETY: caller guarantees `index < list.mNumberBuffers`.
+    unsafe { &mut (*list).mBuffers[index] }
 }
 
 fn device_info(id: u32) -> AudioDeviceInfo {
@@ -945,9 +823,9 @@ fn set_property<T>(
 
 fn default_device(selector: u32) -> Result<u32, String> {
     let address = AudioObjectPropertyAddress {
-        selector,
-        scope: K_AUDIO_OBJECT_SCOPE_GLOBAL,
-        element: K_AUDIO_OBJECT_ELEMENT_MAIN,
+        mSelector: selector,
+        mScope: K_AUDIO_OBJECT_SCOPE_GLOBAL,
+        mElement: K_AUDIO_OBJECT_ELEMENT_MAIN,
     };
     let mut device = 0u32;
     let mut size = std::mem::size_of::<u32>() as u32;
@@ -972,9 +850,9 @@ fn default_device(selector: u32) -> Result<u32, String> {
 
 fn nominal_rate(device: u32) -> Result<f64, String> {
     let address = AudioObjectPropertyAddress {
-        selector: K_AUDIO_DEVICE_PROPERTY_NOMINAL_SAMPLE_RATE,
-        scope: K_AUDIO_OBJECT_SCOPE_GLOBAL,
-        element: K_AUDIO_OBJECT_ELEMENT_MAIN,
+    mSelector: K_AUDIO_DEVICE_PROPERTY_NOMINAL_SAMPLE_RATE,
+    mScope: K_AUDIO_OBJECT_SCOPE_GLOBAL,
+        mElement: K_AUDIO_OBJECT_ELEMENT_MAIN,
     };
     let mut rate = DEFAULT_RATE as f64;
     let mut size = std::mem::size_of::<f64>() as u32;
@@ -1030,9 +908,9 @@ fn set_low_latency_buffer(device: u32, requested: u32) -> Result<(u32, u32), Str
 
 fn device_u32(device: u32, selector: u32, scope: u32) -> Result<u32, String> {
     let address = AudioObjectPropertyAddress {
-        selector,
-        scope,
-        element: K_AUDIO_OBJECT_ELEMENT_MAIN,
+        mSelector: selector,
+        mScope: scope,
+        mElement: K_AUDIO_OBJECT_ELEMENT_MAIN,
     };
     let mut value = 0u32;
     let mut size = std::mem::size_of::<u32>() as u32;
@@ -1053,11 +931,16 @@ fn device_u32(device: u32, selector: u32, scope: u32) -> Result<u32, String> {
     Ok(value)
 }
 
-fn set_device_u32(device: u32, selector: u32, scope: u32, value: u32) -> Result<(), String> {
+fn set_device_u32(
+    device: u32,
+    selector: u32,
+    scope: u32,
+    value: u32,
+) -> Result<(), String> {
     let address = AudioObjectPropertyAddress {
-        selector,
-        scope,
-        element: K_AUDIO_OBJECT_ELEMENT_MAIN,
+        mSelector: selector,
+        mScope: scope,
+        mElement: K_AUDIO_OBJECT_ELEMENT_MAIN,
     };
     // SAFETY: CoreAudio consumes the scalar synchronously.
     check(
@@ -1127,16 +1010,16 @@ fn latency_estimate(
 
 fn pcm_format(rate: u32) -> AudioStreamBasicDescription {
     AudioStreamBasicDescription {
-        sample_rate: rate as f64,
-        format_id: K_AUDIO_FORMAT_LINEAR_PCM,
-        format_flags: K_AUDIO_FORMAT_FLAG_IS_FLOAT
+        mSampleRate: rate as f64,
+        mFormatID: K_AUDIO_FORMAT_LINEAR_PCM,
+        mFormatFlags: K_AUDIO_FORMAT_FLAG_IS_FLOAT
             | K_AUDIO_FORMAT_FLAG_IS_PACKED
             | K_AUDIO_FORMAT_FLAG_IS_NON_INTERLEAVED,
-        bytes_per_packet: 4,
-        frames_per_packet: 1,
-        bytes_per_frame: 4,
-        channels_per_frame: 2,
-        bits_per_channel: 32,
-        reserved: 0,
+        mBytesPerPacket: 4,
+        mFramesPerPacket: 1,
+        mBytesPerFrame: 4,
+        mChannelsPerFrame: 2,
+        mBitsPerChannel: 32,
+        mReserved: 0,
     }
 }

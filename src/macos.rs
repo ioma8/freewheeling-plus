@@ -80,54 +80,22 @@ pub fn create_application_support_path(home: &Path) -> std::io::Result<PathBuf> 
 #[cfg(target_os = "macos")]
 mod cocoa {
     use super::*;
-    use std::ffi::c_void;
-    use std::ptr;
+    use objc2::MainThreadMarker;
+    use objc2_foundation::NSAutoreleasePool;
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 
-    #[link(name = "Cocoa", kind = "framework")]
-    #[link(name = "objc")]
-    unsafe extern "C" {
-        fn objc_getClass(name: *const i8) -> *mut c_void;
-        fn sel_registerName(name: *const i8) -> *mut c_void;
-        fn objc_msgSend() -> *mut c_void;
-    }
-
-    /// Cocoa-backed implementation.  The pool is deliberately owned here so
-    /// setup and teardown remain paired even when the caller uses a worker
-    /// thread (the behavior of FweelinMac::Setup/TakedownCocoaThread).
+    /// Cocoa-backed implementation backed by safe objc2 bindings.
     pub struct CocoaPlatform {
-        pool: *mut c_void,
+        pool: Option<objc2::rc::Retained<NSAutoreleasePool>>,
         initialized: bool,
     }
 
     impl CocoaPlatform {
         pub fn new() -> Self {
             Self {
-                pool: ptr::null_mut(),
+                pool: None,
                 initialized: false,
             }
-        }
-
-        unsafe fn send(receiver: *mut c_void, selector: &[u8]) -> *mut c_void {
-            let selector = unsafe { sel_registerName(selector.as_ptr().cast()) };
-            // objc_msgSend has a variadic, selector-dependent ABI. These two
-            // calls have no arguments and return an object pointer.
-            unsafe {
-                std::mem::transmute::<
-                    unsafe extern "C" fn() -> *mut c_void,
-                    unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void,
-                >(objc_msgSend)(receiver, selector)
-            }
-        }
-
-        unsafe fn send_bool(receiver: *mut c_void, selector: &[u8], value: bool) {
-            let selector = unsafe { sel_registerName(selector.as_ptr().cast()) };
-            let send = unsafe {
-                std::mem::transmute::<
-                    unsafe extern "C" fn() -> *mut c_void,
-                    unsafe extern "C" fn(*mut c_void, *mut c_void, bool),
-                >(objc_msgSend)
-            };
-            unsafe { send(receiver, selector, value) };
         }
     }
 
@@ -147,42 +115,26 @@ mod cocoa {
         }
 
         fn initialize(&mut self) -> Result<(), Self::Error> {
-            unsafe {
-                let class = objc_getClass(c"NSAutoreleasePool".as_ptr());
-                self.pool = Self::send(class, b"alloc\0");
-                self.pool = Self::send(self.pool, b"init\0");
-            }
-            self.initialized = !self.pool.is_null();
-            self.initialized
-                .then_some(())
-                .ok_or_else(|| "could not create autorelease pool".into())
+            // SAFETY: NSAutoreleasePool::new is unsafe because the pool
+            // interacts with the ObjC runtime's autorelease mechanism, but
+            // this is the standard, safe-on-main-thread creation pattern.
+            self.pool = Some(unsafe { NSAutoreleasePool::new() });
+            self.initialized = true;
+            Ok(())
         }
 
         fn set_menu_and_foreground(&mut self) -> Result<(), Self::Error> {
-            unsafe {
-                let app = objc_getClass(c"NSApplication".as_ptr());
-                let app = Self::send(app, b"sharedApplication\0");
-                // SDL may create the menu later; setting a regular activation
-                // policy here makes Finder launches own a Dock icon and menu
-                // bar immediately. NSApplicationActivationPolicyRegular == 0.
-                let selector = sel_registerName(c"setActivationPolicy:".as_ptr());
-                let send = std::mem::transmute::<
-                    unsafe extern "C" fn() -> *mut c_void,
-                    unsafe extern "C" fn(*mut c_void, *mut c_void, i64) -> bool,
-                >(objc_msgSend);
-                let _ = send(app, selector, 0);
-                Self::send_bool(app, b"activateIgnoringOtherApps:\0", true);
-            }
+            let marker = MainThreadMarker::new()
+                .ok_or_else(|| "CocoaPlatform must be used on the main thread".to_string())?;
+            let app = NSApplication::sharedApplication(marker);
+            app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+            #[allow(deprecated)]
+            app.activateIgnoringOtherApps(true);
             Ok(())
         }
 
         fn cleanup(&mut self) {
-            if !self.pool.is_null() {
-                unsafe {
-                    let _ = Self::send(self.pool, b"drain\0");
-                }
-                self.pool = ptr::null_mut();
-            }
+            drop(self.pool.take());
             self.initialized = false;
         }
     }
