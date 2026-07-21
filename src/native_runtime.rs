@@ -2978,6 +2978,14 @@ impl NativeStartupAdapter for NativeRuntime {
                         }
                     }
                 };
+                let backend_name = match &backend {
+                    AnyAudioBackend::Cpal(_) => "CPAL",
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    AnyAudioBackend::Jack(_) => "JACK",
+                    #[cfg(target_os = "macos")]
+                    AnyAudioBackend::AudioUnit(_) => "AudioUnit",
+                };
+                eprintln!("FreeWheeling: audio backend: {backend_name}");
                 let mut audio = AudioIO::new(backend);
                 audio.open("FreeWheeling")?;
                 r.sample_rate = audio.get_srate();
@@ -3077,11 +3085,14 @@ impl NativeStartupAdapter for NativeRuntime {
                 // skip the standalone Midir backend to avoid duplicate paths.
                 let use_jack_midi = r.audio.as_ref().map_or(false, |a| a.backend().is_jack());
                 if !use_jack_midi {
+                    eprintln!("FreeWheeling: MIDI backend: Midir");
                     let mut midi = MidiIo::new(MidirMidiBackend::new(None));
                     midi.set_sink(bridge.clone());
                     let outputs = r.config.borrow().midi_outputs;
                     midi.activate(MIDI_INPUTS, outputs)?;
                     r.midi = Some(midi);
+                } else {
+                    eprintln!("FreeWheeling: MIDI backend: JACK");
                 }
                 r.event_bridge = Some(bridge);
                 r.input.as_mut().ok_or("SDL input missing")?.activate();
