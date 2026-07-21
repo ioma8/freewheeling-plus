@@ -41,3 +41,16 @@ short_description = "Live looping instrument"
 copyright = "FreeWheeling contributors"
 osx_minimum_system_version = "11.0"
 resources = ["data"]
+
+[package.metadata.android]
+package = "org.freewheeling.freewheeling_plus"
+min_sdk_version = 26
+target_sdk_version = 34
+install_location = "auto"
+icon = "data/icon.png"
+# Builds APK in release mode; debug builds use `cargo apk run`
+release = true
+assets = "data/"
+
+# If ANDROID_NDK_HOME is not set, uncomment and set the path:
+# ndk_path = "$HOME/Library/Android/sdk/ndk/27.0.12077973"
