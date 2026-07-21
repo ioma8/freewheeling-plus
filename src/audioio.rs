@@ -145,7 +145,7 @@ pub enum AnyAudioBackend {
     /// Cross-platform CPAL backend (default on Linux, fallback on macOS).
     Cpal(crate::audio_native_cpal::CpalAudioBackend),
     /// JACK backend (Linux and macOS).
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     Jack(crate::jack::JackAudioMidiBackend),
     /// Native CoreAudio/AudioUnit backend (macOS only).
     #[cfg(target_os = "macos")]
@@ -157,7 +157,7 @@ impl AnyAudioBackend {
     pub fn is_jack(&self) -> bool {
         match self {
             AnyAudioBackend::Cpal(_) => false,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             AnyAudioBackend::Jack(_) => true,
             #[cfg(target_os = "macos")]
             AnyAudioBackend::AudioUnit(_) => false,
@@ -169,7 +169,7 @@ impl AudioBackend for AnyAudioBackend {
     fn open(&mut self, client_name: &str) -> Result<BackendInfo, String> {
         match self {
             AnyAudioBackend::Cpal(backend) => backend.open(client_name),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             AnyAudioBackend::Jack(backend) => backend.open(client_name),
             #[cfg(target_os = "macos")]
             AnyAudioBackend::AudioUnit(backend) => backend.open(client_name),
@@ -179,7 +179,7 @@ impl AudioBackend for AnyAudioBackend {
     fn activate(&mut self, callback: AudioCallbackFn) -> Result<(), String> {
         match self {
             AnyAudioBackend::Cpal(backend) => backend.activate(callback),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             AnyAudioBackend::Jack(backend) => backend.activate(callback),
             #[cfg(target_os = "macos")]
             AnyAudioBackend::AudioUnit(backend) => backend.activate(callback),
@@ -189,7 +189,7 @@ impl AudioBackend for AnyAudioBackend {
     fn close(&mut self) {
         match self {
             AnyAudioBackend::Cpal(backend) => backend.close(),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             AnyAudioBackend::Jack(backend) => backend.close(),
             #[cfg(target_os = "macos")]
             AnyAudioBackend::AudioUnit(backend) => backend.close(),
@@ -199,7 +199,7 @@ impl AudioBackend for AnyAudioBackend {
     fn relocate(&mut self, frame: NFrames) {
         match self {
             AnyAudioBackend::Cpal(backend) => backend.relocate(frame),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             AnyAudioBackend::Jack(backend) => backend.relocate(frame),
             #[cfg(target_os = "macos")]
             AnyAudioBackend::AudioUnit(backend) => backend.relocate(frame),
@@ -209,7 +209,7 @@ impl AudioBackend for AnyAudioBackend {
     fn metrics(&self) -> AudioMetrics {
         match self {
             AnyAudioBackend::Cpal(backend) => backend.metrics(),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             AnyAudioBackend::Jack(backend) => backend.metrics(),
             #[cfg(target_os = "macos")]
             AnyAudioBackend::AudioUnit(backend) => backend.metrics(),
@@ -219,7 +219,7 @@ impl AudioBackend for AnyAudioBackend {
     fn cpu_load(&self) -> Option<f32> {
         match self {
             AnyAudioBackend::Cpal(backend) => backend.cpu_load(),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             AnyAudioBackend::Jack(backend) => backend.cpu_load(),
             #[cfg(target_os = "macos")]
             AnyAudioBackend::AudioUnit(backend) => backend.cpu_load(),
@@ -229,7 +229,7 @@ impl AudioBackend for AnyAudioBackend {
     fn input_latency_frames(&self) -> NFrames {
         match self {
             AnyAudioBackend::Cpal(backend) => backend.input_latency_frames(),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             AnyAudioBackend::Jack(backend) => backend.input_latency_frames(),
             #[cfg(target_os = "macos")]
             AnyAudioBackend::AudioUnit(backend) => backend.input_latency_frames(),
@@ -239,7 +239,7 @@ impl AudioBackend for AnyAudioBackend {
     fn recovery_requested(&self) -> bool {
         match self {
             AnyAudioBackend::Cpal(backend) => backend.recovery_requested(),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             AnyAudioBackend::Jack(backend) => backend.recovery_requested(),
             #[cfg(target_os = "macos")]
             AnyAudioBackend::AudioUnit(backend) => backend.recovery_requested(),
@@ -249,7 +249,7 @@ impl AudioBackend for AnyAudioBackend {
     fn recover(&mut self) -> Result<BackendInfo, String> {
         match self {
             AnyAudioBackend::Cpal(backend) => backend.recover(),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             AnyAudioBackend::Jack(backend) => backend.recover(),
             #[cfg(target_os = "macos")]
             AnyAudioBackend::AudioUnit(backend) => backend.recover(),
@@ -259,7 +259,7 @@ impl AudioBackend for AnyAudioBackend {
     fn recovery_metrics(&self) -> AudioRecoveryMetrics {
         match self {
             AnyAudioBackend::Cpal(backend) => backend.recovery_metrics(),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             AnyAudioBackend::Jack(backend) => backend.recovery_metrics(),
             #[cfg(target_os = "macos")]
             AnyAudioBackend::AudioUnit(backend) => backend.recovery_metrics(),
@@ -269,7 +269,7 @@ impl AudioBackend for AnyAudioBackend {
     fn transport_state(&self) -> TransportState {
         match self {
             AnyAudioBackend::Cpal(backend) => backend.transport_state(),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             AnyAudioBackend::Jack(backend) => backend.transport_state(),
             #[cfg(target_os = "macos")]
             AnyAudioBackend::AudioUnit(backend) => backend.transport_state(),
@@ -279,7 +279,7 @@ impl AudioBackend for AnyAudioBackend {
     fn receive_midi(&mut self) -> Option<crate::midiio::MidiPortMessage> {
         match self {
             AnyAudioBackend::Cpal(backend) => backend.receive_midi(),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             AnyAudioBackend::Jack(backend) => backend.receive_midi(),
             #[cfg(target_os = "macos")]
             AnyAudioBackend::AudioUnit(backend) => backend.receive_midi(),
@@ -293,7 +293,7 @@ impl AudioBackend for AnyAudioBackend {
     ) -> Result<(), String> {
         match self {
             AnyAudioBackend::Cpal(backend) => backend.send_midi(msg, offset),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             AnyAudioBackend::Jack(backend) => backend.send_midi(msg, offset),
             #[cfg(target_os = "macos")]
             AnyAudioBackend::AudioUnit(backend) => backend.send_midi(msg, offset),
@@ -307,7 +307,7 @@ impl AnyAudioBackend {
     pub fn status(&self) -> Option<crate::audio_native_cpal::CpalAudioStatus> {
         match self {
             AnyAudioBackend::Cpal(backend) => Some(backend.status()),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             AnyAudioBackend::Jack(_) => None,
             #[cfg(target_os = "macos")]
             AnyAudioBackend::AudioUnit(backend) => Some(backend.status()),

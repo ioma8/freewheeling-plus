@@ -1,27 +1,27 @@
 //! JACK audio/MIDI/transport backend for Linux and macOS.
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use crate::audioio::{
     AudioBackend, AudioCallback, AudioCallbackFn, AudioMetrics, BackendInfo, JackPosition, NFrames,
     NUM_CHANNELS, TransportState,
 };
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use crate::midiio::{decode, encode, MidiPortMessage};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use crate::realtime_guard::RealtimeMetrics;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use jack::{
     AsyncClient, AudioIn, AudioOut, Client, ClientOptions, Control, MidiIn, MidiOut,
     NotificationHandler, Port, ProcessHandler, ProcessScope, RawMidi,
     TransportState as JackTransportState,
 };
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use rtrb::{Consumer, Producer, RingBuffer};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::sync::Arc;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::time::Instant;
 
 /// Configuration options for opening a JACK client.
@@ -51,13 +51,13 @@ impl Default for JackOptions {
 
 // --- Platform-gated types ---
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 const MIDI_INLINE_BYTES: usize = 256;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 const DEFAULT_QUEUE_CAPACITY: usize = 1_024;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransportCommand {
     Start,
@@ -65,7 +65,7 @@ pub enum TransportCommand {
     Relocate(NFrames),
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Timebase {
     pub beats_per_minute: f64,
@@ -74,7 +74,7 @@ pub struct Timebase {
     pub ticks_per_beat: i32,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl Default for Timebase {
     fn default() -> Self {
         Self {
@@ -86,7 +86,7 @@ impl Default for Timebase {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl Timebase {
     pub fn validate(&self) -> Result<(), String> {
         if self.beats_per_minute <= 0.0 {
@@ -141,7 +141,7 @@ impl Timebase {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct InlineMidi {
     port: u16,
@@ -150,7 +150,7 @@ struct InlineMidi {
     bytes: [u8; MIDI_INLINE_BYTES],
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl InlineMidi {
     fn new(port: usize, frame_offset: u32, bytes: &[u8]) -> Result<Self, String> {
         if port > usize::from(u16::MAX) {
@@ -176,7 +176,7 @@ impl InlineMidi {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[derive(Default)]
 struct Shared {
     xruns: AtomicU64,
@@ -191,13 +191,13 @@ struct Shared {
     frame: AtomicU32,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 struct Notifications {
     shared: Arc<Shared>,
     realtime_metrics: Option<Arc<RealtimeMetrics>>,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl NotificationHandler for Notifications {
     unsafe fn shutdown(&mut self, _: jack::ClientStatus, _: &str) {
         self.shared.stream_errors.fetch_add(1, Ordering::Relaxed);
@@ -212,7 +212,7 @@ impl NotificationHandler for Notifications {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 struct JackProcess {
     audio_in: [Port<AudioIn>; NUM_CHANNELS],
     audio_out: [Port<AudioOut>; NUM_CHANNELS],
@@ -226,7 +226,7 @@ struct JackProcess {
     realtime_metrics: Option<Arc<RealtimeMetrics>>,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl ProcessHandler for JackProcess {
     fn process(&mut self, client: &Client, ps: &ProcessScope) -> Control {
         let _guard = self
@@ -330,14 +330,14 @@ impl ProcessHandler for JackProcess {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 type PendingQueues = (
     Producer<InlineMidi>,
     Consumer<InlineMidi>,
     Consumer<TransportCommand>,
 );
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[allow(clippy::type_complexity)]
 pub struct JackAudioMidiBackend {
     client: Option<Client>,
@@ -358,7 +358,7 @@ pub struct JackAudioMidiBackend {
     realtime_metrics: Option<Arc<RealtimeMetrics>>,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl JackAudioMidiBackend {
     pub fn new(midi_inputs: usize, midi_outputs: usize) -> Self {
         Self {
@@ -395,14 +395,14 @@ impl JackAudioMidiBackend {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl Default for JackAudioMidiBackend {
     fn default() -> Self {
         Self::new(1, 1)
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl AudioBackend for JackAudioMidiBackend {
     fn open(&mut self, client_name: &str) -> Result<BackendInfo, String> {
         self.close();

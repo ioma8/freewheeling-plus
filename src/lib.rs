@@ -24,7 +24,7 @@ pub mod fluidsynth;
 pub mod fweelin_app;
 pub mod library_helper;
 pub mod linux_native;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub mod jack;
 pub mod logo;
 pub mod looplibrary;
