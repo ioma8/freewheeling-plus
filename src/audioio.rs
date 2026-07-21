@@ -74,6 +74,19 @@ pub struct AudioRecoveryMetrics {
     pub failures: u64,
 }
 
+/// Transport state reported by backends that support external sync (JACK).
+/// Backends without transport (CPAL, CoreAudio) return the default.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TransportState {
+    pub rolling: bool,
+    pub frame: u32,
+    pub bar: i32,
+    pub beat: i32,
+    pub bpm: f64,
+    pub beats_per_bar: f32,
+    pub beat_type: i32,
+}
+
 pub trait AudioBackend: Send {
     fn open(&mut self, client_name: &str) -> Result<BackendInfo, String>;
     fn activate(&mut self, callback: AudioCallbackFn) -> Result<(), String>;
@@ -82,30 +95,38 @@ pub trait AudioBackend: Send {
     fn metrics(&self) -> AudioMetrics {
         AudioMetrics::default()
     }
-    /// Most recent callback-window DSP load, when the native backend can
-    /// measure it.  C++ AudioIO updates this every 16 callbacks.
     fn cpu_load(&self) -> Option<f32> {
         None
     }
-    /// Capture-to-DSP latency in frames for recording alignment. This is not
-    /// round-trip latency: output latency is shared by the pulse and every
-    /// loop, while this value describes how far captured input trails the
-    /// DSP/output clock.
     fn input_latency_frames(&self) -> NFrames {
         0
     }
-    /// True after a route change or device loss. Reopening is deliberately
-    /// controlled by the non-realtime owner rather than an audio callback.
     fn recovery_requested(&self) -> bool {
         false
     }
-    /// Rebuild active streams on the non-realtime owner thread. Implementors
-    /// must retain (or safely return) the callback if rebuilding fails.
     fn recover(&mut self) -> Result<BackendInfo, String> {
         Err("audio backend does not support controlled recovery".to_string())
     }
     fn recovery_metrics(&self) -> AudioRecoveryMetrics {
         AudioRecoveryMetrics::default()
+    }
+
+    /// Transport state from the backend (JACK). Default impl returns not-rolling.
+    fn transport_state(&self) -> TransportState {
+        TransportState::default()
+    }
+
+    /// Receive pending MIDI events from backends that integrate MIDI (JACK).
+    /// Standalone MIDI backends (Midir) use the separate MidiBackend trait.
+    /// Returns None when no event or when MIDI is not integrated.
+    fn receive_midi(&mut self) -> Option<crate::midiio::MidiPortMessage> {
+        None
+    }
+
+    /// Send a MIDI event through the backend (JACK). Returns error when
+    /// the backend does not support MIDI output integrated with audio.
+    fn send_midi(&mut self, _msg: crate::midiio::MidiPortMessage, _offset: NFrames) -> Result<(), String> {
+        Err("MIDI not supported by this audio backend".into())
     }
 }
 
@@ -113,6 +134,172 @@ pub trait AudioBackend: Send {
 pub struct BackendInfo {
     pub sample_rate: NFrames,
     pub buffer_size: NFrames,
+}
+
+/// Runtime-selected audio backend.
+///
+/// Wraps one of the platform-specific backends so `AudioIO` can be
+/// constructed from a common type regardless of which backend is selected
+/// at startup.
+pub enum AnyAudioBackend {
+    /// Cross-platform CPAL backend (default on Linux, fallback on macOS).
+    Cpal(crate::audio_native_cpal::CpalAudioBackend),
+    /// JACK backend (Linux and macOS).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Jack(crate::jack::JackAudioMidiBackend),
+    /// Native CoreAudio/AudioUnit backend (macOS only).
+    #[cfg(target_os = "macos")]
+    AudioUnit(crate::macos_audio_unit::MacosAudioUnitBackend),
+}
+
+impl AudioBackend for AnyAudioBackend {
+    fn open(&mut self, client_name: &str) -> Result<BackendInfo, String> {
+        match self {
+            AnyAudioBackend::Cpal(backend) => backend.open(client_name),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            AnyAudioBackend::Jack(backend) => backend.open(client_name),
+            #[cfg(target_os = "macos")]
+            AnyAudioBackend::AudioUnit(backend) => backend.open(client_name),
+        }
+    }
+
+    fn activate(&mut self, callback: AudioCallbackFn) -> Result<(), String> {
+        match self {
+            AnyAudioBackend::Cpal(backend) => backend.activate(callback),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            AnyAudioBackend::Jack(backend) => backend.activate(callback),
+            #[cfg(target_os = "macos")]
+            AnyAudioBackend::AudioUnit(backend) => backend.activate(callback),
+        }
+    }
+
+    fn close(&mut self) {
+        match self {
+            AnyAudioBackend::Cpal(backend) => backend.close(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            AnyAudioBackend::Jack(backend) => backend.close(),
+            #[cfg(target_os = "macos")]
+            AnyAudioBackend::AudioUnit(backend) => backend.close(),
+        }
+    }
+
+    fn relocate(&mut self, frame: NFrames) {
+        match self {
+            AnyAudioBackend::Cpal(backend) => backend.relocate(frame),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            AnyAudioBackend::Jack(backend) => backend.relocate(frame),
+            #[cfg(target_os = "macos")]
+            AnyAudioBackend::AudioUnit(backend) => backend.relocate(frame),
+        }
+    }
+
+    fn metrics(&self) -> AudioMetrics {
+        match self {
+            AnyAudioBackend::Cpal(backend) => backend.metrics(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            AnyAudioBackend::Jack(backend) => backend.metrics(),
+            #[cfg(target_os = "macos")]
+            AnyAudioBackend::AudioUnit(backend) => backend.metrics(),
+        }
+    }
+
+    fn cpu_load(&self) -> Option<f32> {
+        match self {
+            AnyAudioBackend::Cpal(backend) => backend.cpu_load(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            AnyAudioBackend::Jack(backend) => backend.cpu_load(),
+            #[cfg(target_os = "macos")]
+            AnyAudioBackend::AudioUnit(backend) => backend.cpu_load(),
+        }
+    }
+
+    fn input_latency_frames(&self) -> NFrames {
+        match self {
+            AnyAudioBackend::Cpal(backend) => backend.input_latency_frames(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            AnyAudioBackend::Jack(backend) => backend.input_latency_frames(),
+            #[cfg(target_os = "macos")]
+            AnyAudioBackend::AudioUnit(backend) => backend.input_latency_frames(),
+        }
+    }
+
+    fn recovery_requested(&self) -> bool {
+        match self {
+            AnyAudioBackend::Cpal(backend) => backend.recovery_requested(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            AnyAudioBackend::Jack(backend) => backend.recovery_requested(),
+            #[cfg(target_os = "macos")]
+            AnyAudioBackend::AudioUnit(backend) => backend.recovery_requested(),
+        }
+    }
+
+    fn recover(&mut self) -> Result<BackendInfo, String> {
+        match self {
+            AnyAudioBackend::Cpal(backend) => backend.recover(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            AnyAudioBackend::Jack(backend) => backend.recover(),
+            #[cfg(target_os = "macos")]
+            AnyAudioBackend::AudioUnit(backend) => backend.recover(),
+        }
+    }
+
+    fn recovery_metrics(&self) -> AudioRecoveryMetrics {
+        match self {
+            AnyAudioBackend::Cpal(backend) => backend.recovery_metrics(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            AnyAudioBackend::Jack(backend) => backend.recovery_metrics(),
+            #[cfg(target_os = "macos")]
+            AnyAudioBackend::AudioUnit(backend) => backend.recovery_metrics(),
+        }
+    }
+
+    fn transport_state(&self) -> TransportState {
+        match self {
+            AnyAudioBackend::Cpal(backend) => backend.transport_state(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            AnyAudioBackend::Jack(backend) => backend.transport_state(),
+            #[cfg(target_os = "macos")]
+            AnyAudioBackend::AudioUnit(backend) => backend.transport_state(),
+        }
+    }
+
+    fn receive_midi(&mut self) -> Option<crate::midiio::MidiPortMessage> {
+        match self {
+            AnyAudioBackend::Cpal(backend) => backend.receive_midi(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            AnyAudioBackend::Jack(backend) => backend.receive_midi(),
+            #[cfg(target_os = "macos")]
+            AnyAudioBackend::AudioUnit(backend) => backend.receive_midi(),
+        }
+    }
+
+    fn send_midi(
+        &mut self,
+        msg: crate::midiio::MidiPortMessage,
+        offset: NFrames,
+    ) -> Result<(), String> {
+        match self {
+            AnyAudioBackend::Cpal(backend) => backend.send_midi(msg, offset),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            AnyAudioBackend::Jack(backend) => backend.send_midi(msg, offset),
+            #[cfg(target_os = "macos")]
+            AnyAudioBackend::AudioUnit(backend) => backend.send_midi(msg, offset),
+        }
+    }
+}
+
+impl AnyAudioBackend {
+    /// Snapshot of non-realtime diagnostic state. Returns `None` for backends
+    /// that do not expose device-level status (JACK).
+    pub fn status(&self) -> Option<crate::audio_native_cpal::CpalAudioStatus> {
+        match self {
+            AnyAudioBackend::Cpal(backend) => Some(backend.status()),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            AnyAudioBackend::Jack(_) => None,
+            #[cfg(target_os = "macos")]
+            AnyAudioBackend::AudioUnit(backend) => Some(backend.status()),
+        }
+    }
 }
 
 pub struct AudioIO<B: AudioBackend> {

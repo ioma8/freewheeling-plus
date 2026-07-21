@@ -47,8 +47,10 @@ impl Default for ProcessorCommand {
     }
 }
 
-// Raw pointers are handles only.  The queue never dereferences them, and the
+// Raw pointers are handles only. The queue never dereferences them, and the
 // C++ implementation likewise permits commands to cross thread boundaries.
+// SAFETY: ProcessorCommand holds raw pointers that are never dereferenced
+// through the Send boundary — they are only accessed by the owning thread.
 unsafe impl Send for ProcessorCommand {}
 
 pub struct ProcessorCommandQueue {

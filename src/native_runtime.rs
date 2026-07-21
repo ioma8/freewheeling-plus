@@ -6,11 +6,24 @@
 
 use super::{NativeComponentAdapter, ProductionApp};
 use crate::amixer::{AlsaMixerBackend, HardwareMixerInterface};
-#[cfg(not(target_os = "macos"))]
-use crate::audio_native_cpal::CpalAudioBackend as NativeAudioBackend;
 use crate::audio_native_cpal::{CpalAudioOptions, DeviceSelection};
-use crate::audioio::{AudioBackend, AudioCallback, AudioIO, AudioProcessor};
+#[cfg(not(target_os = "macos"))]
+use crate::audio_native_cpal::CpalAudioBackend;
+use crate::audioio::{AnyAudioBackend, AudioBackend, AudioIO};
 use crate::block::{AudioBlock, AudioBlockIterator, Codec, ExtraChannel};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use crate::jack::JackAudioMidiBackend;
+#[cfg(target_os = "macos")]
+use crate::macos_audio_unit::MacosAudioUnitBackend;
+
+/// Audio backend kind selected via `FWEELIN_AUDIO_BACKEND` environment variable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AudioBackendKind {
+    #[default]
+    Auto,
+    Jack,
+    Cpal,
+}
 use crate::config::{ConfigVariableValue, FloConfig};
 use crate::core::{CoreEvent, LoopSnapshot, LoopStatus, Snapshot, StreamState};
 use crate::core_startup::StartupConfig;
@@ -19,11 +32,10 @@ use crate::event::{
     Event, EventListener, EventManager, EventProducer, EventType,
 };
 use crate::file_codecs::{
-    IFileDecoder, IFileEncoder, SndFileDecoder, SndFileEncoder, encode_audio_file,
+    IFileDecoder, SndFileDecoder, encode_audio_file,
 };
+use crate::file_streamer::AudioStreamer;
 use crate::fluidsynth::{FluidLiteBackend, FluidLiteConfig, FluidSynthBackend};
-#[cfg(target_os = "macos")]
-use crate::macos_audio_unit::MacosAudioUnitBackend as NativeAudioBackend;
 use crate::mem::MemoryManager;
 use crate::midiio::{MidiIo, MidiMessage};
 use crate::midiio_platform::MidirMidiBackend;
@@ -56,13 +68,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const INPUTS: usize = 2;
 const LAST_RECORDS: usize = 8;
 const MIDI_INPUTS: usize = 1;
-const STREAM_RING_FRAMES: usize = 48_000 * 4;
 /// Renderer state must be refreshed even while the user is idle. This runs
 /// only on the main thread and keeps the realtime command queue bounded.
 const UI_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(33);
@@ -141,6 +151,7 @@ fn codec_extension(codec: Codec) -> Result<&'static str, String> {
         Codec::Unknown => Err("unknown audio codec".into()),
     }
 }
+
 
 trait RecoverableAudio {
     fn recovery_requested(&self) -> bool;
@@ -230,11 +241,6 @@ impl AudioRecoveryController {
     }
 }
 
-struct StreamingProcessor {
-    inner: RuntimeAudioProcessor,
-    stream: rtrb::Producer<[f32; 2]>,
-    enabled: Arc<AtomicBool>,
-}
 
 /// Cocoa requires creation, presentation and destruction of NSWindow-backed
 /// SDL objects on the process main thread. This owner is intentionally used
@@ -385,23 +391,6 @@ impl MainThreadVideo {
     }
 }
 
-impl AudioProcessor for StreamingProcessor {
-    fn process(&mut self, callback: &mut AudioCallback<'_>) {
-        self.inner.process(callback);
-        if self.enabled.load(Ordering::Relaxed) {
-            for index in 0..callback.nframes as usize {
-                if self
-                    .stream
-                    .push([callback.outputs[0][index], callback.outputs[1][index]])
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        }
-    }
-}
-
 pub struct SharedFloConfig(Rc<RefCell<FloConfig>>);
 
 impl StartupConfig for SharedFloConfig {
@@ -429,7 +418,7 @@ struct RuntimeResources {
     event_inbox: Arc<crossbeam_queue::ArrayQueue<Event>>,
     input: Option<SdlIo<Sdl2InputBackend>>,
     video: Option<MainThreadVideo>,
-    audio: Option<AudioIO<NativeAudioBackend>>,
+    audio: Option<AudioIO<AnyAudioBackend>>,
     midi: Option<MidiIo<MidirMidiBackend>>,
     controls: Option<RuntimeControls>,
     osc: Option<OscClient<UdpBackend>>,
@@ -472,9 +461,7 @@ struct RuntimeResources {
     sample_rate: u32,
     max_callback_frames: usize,
     library_dir: std::path::PathBuf,
-    stream_enabled: Arc<AtomicBool>,
-    stream_reader: Option<rtrb::Consumer<[f32; 2]>>,
-    stream_encoder: Option<SndFileEncoder>,
+    streamer: Option<AudioStreamer>,
     memory_manager: Option<MemoryManager>,
     rcu_registry: Option<RcuRegistry>,
     audio_recovery: AudioRecoveryController,
@@ -898,9 +885,7 @@ impl NativeRuntime {
                 sample_rate: 0,
                 max_callback_frames: 0,
                 library_dir,
-                stream_enabled: Arc::new(AtomicBool::new(false)),
-                stream_reader: None,
-                stream_encoder: None,
+                streamer: None,
                 memory_manager: None,
                 rcu_registry: None,
                 audio_recovery: AudioRecoveryController::default(),
@@ -925,8 +910,8 @@ impl NativeRuntime {
     }
 
     pub fn with_config<R>(&self, read: impl FnOnce(&FloConfig) -> R) -> R {
-        let resources = self.resources.borrow();
-        read(&resources.config.borrow())
+        let r = self.resources.borrow();
+        read(&r.config.borrow())
     }
 
     fn poll_audio_recovery(&mut self, now: Instant) -> Result<(), String> {
@@ -947,18 +932,28 @@ impl NativeRuntime {
         }
         r.last_diagnostic_report = now;
         if let Some(audio) = r.audio.as_ref() {
-            let status = audio.backend().status();
-            eprintln!(
-                "FreeWheeling audio: active={} input={:?} output={:?} format={:?} latency={:?} capture_callbacks={} playback_callbacks={} metrics={:?}",
-                status.active,
-                status.input.as_ref().map(|device| &device.name),
-                status.output.as_ref().map(|device| &device.name),
-                status.format,
-                status.latency,
-                status.capture_callbacks,
-                status.playback_callbacks,
-                status.metrics,
-            );
+            if let Some(status) = audio.backend().status() {
+                eprintln!(
+                    "FreeWheeling audio: active={} input={:?} output={:?} format={:?} latency={:?} capture_callbacks={} playback_callbacks={} metrics={:?}",
+                    status.active,
+                    status.input.as_ref().map(|device| &device.name),
+                    status.output.as_ref().map(|device| &device.name),
+                    status.format,
+                    status.latency,
+                    status.capture_callbacks,
+                    status.playback_callbacks,
+                    status.metrics,
+                );
+            } else {
+                let metrics = audio.metrics();
+                eprintln!(
+                    "FreeWheeling audio (JACK): callbacks={} frames={} peak_ns={} xruns={}",
+                    metrics.callbacks,
+                    metrics.callback_frames,
+                    metrics.callback_peak_nanos,
+                    metrics.xruns,
+                );
+            }
         }
     }
 
@@ -2787,9 +2782,8 @@ impl NativeRuntime {
         match phase {
             StartupPhase::ProcessingElements | StartupPhase::StreamersAndRings => {}
             StartupPhase::SignalProcessing | StartupPhase::Audio => {
-                r.stream_enabled.store(false, Ordering::Release);
-                if let Some(mut encoder) = r.stream_encoder.take() {
-                    let _ = encoder.prepare_file_for_closing();
+                if let Some(mut streamer) = r.streamer.take() {
+                    let _ = streamer.finalize();
                 }
                 r.stream_output_name.clear();
                 if let Some(audio) = r.audio.as_mut() {
@@ -2931,15 +2925,52 @@ impl NativeStartupAdapter for NativeRuntime {
                 }
             }
             StartupPhase::Audio => {
-                let mut options = CpalAudioOptions::default();
-                // The environment remains an explicit diagnostic/operator
-                // override; otherwise honor C++ FloConfig's audiobuffersize.
-                if std::env::var_os("FWEELIN_AUDIO_BUFFER_FRAMES").is_none() {
-                    options.preferred_buffer_frames =
-                        r.config.borrow().preferred_audio_buffer_frames.max(1);
-                }
-                let mut audio =
-                    AudioIO::new(NativeAudioBackend::new(DeviceSelection::default(), options));
+                let kind = std::env::var("FWEELIN_AUDIO_BACKEND")
+                    .ok()
+                    .and_then(|value| match value.to_lowercase().as_str() {
+                        "jack" => Some(AudioBackendKind::Jack),
+                        "cpal" => Some(AudioBackendKind::Cpal),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                let backend: AnyAudioBackend = match kind {
+                    AudioBackendKind::Jack => {
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
+                        {
+                            AnyAudioBackend::Jack(JackAudioMidiBackend::new(1, 1))
+                        }
+                        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                        {
+                            let _ = kind;
+                            return Err("JACK backend is not available on this platform".into());
+                        }
+                    }
+                    AudioBackendKind::Cpal | AudioBackendKind::Auto => {
+                        #[cfg(target_os = "macos")]
+                        {
+                            let back = MacosAudioUnitBackend::new(
+                                DeviceSelection::default(),
+                                CpalAudioOptions::default(),
+                            );
+                            AnyAudioBackend::AudioUnit(back)
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            let mut options = CpalAudioOptions::default();
+                            // The environment remains an explicit diagnostic/operator
+                            // override; otherwise honor C++ FloConfig's audiobuffersize.
+                            if std::env::var_os("FWEELIN_AUDIO_BUFFER_FRAMES").is_none() {
+                                options.preferred_buffer_frames =
+                                    r.config.borrow().preferred_audio_buffer_frames.max(1);
+                            }
+                            AnyAudioBackend::Cpal(CpalAudioBackend::new(
+                                DeviceSelection::default(),
+                                options,
+                            ))
+                        }
+                    }
+                };
+                let mut audio = AudioIO::new(backend);
                 audio.open("FreeWheeling")?;
                 r.sample_rate = audio.get_srate();
                 r.max_callback_frames = audio.getbufsz() as usize;
@@ -3060,13 +3091,6 @@ impl NativeStartupAdapter for NativeRuntime {
                 let processor = PROCESSOR
                     .with(|slot| slot.borrow_mut().take())
                     .ok_or("DSP graph missing")?;
-                let (producer, consumer) = rtrb::RingBuffer::new(STREAM_RING_FRAMES);
-                r.stream_reader = Some(consumer);
-                let processor = StreamingProcessor {
-                    inner: processor,
-                    stream: producer,
-                    enabled: Arc::clone(&r.stream_enabled),
-                };
                 let mut audio = r.audio.take().ok_or("audio missing")?;
                 let activation = std::thread::Builder::new()
                     .name("coreaudio-setup".into())
@@ -3190,31 +3214,8 @@ impl NativeComponentAdapter for NativeRuntime {
                 .as_mut()
                 .ok_or("video is closed")?
                 .update(Instant::now(), state)?;
-            if r.stream_state == StreamState::Writing {
-                let mut left = [0.0_f32; 4096];
-                let mut right = [0.0_f32; 4096];
-                let mut count = 0;
-                if let Some(reader) = r.stream_reader.as_mut() {
-                    while count < left.len() {
-                        match reader.pop() {
-                            Ok(frame) => {
-                                left[count] = frame[0];
-                                right[count] = frame[1];
-                                count += 1;
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                }
-                if count > 0 {
-                    let written = r
-                        .stream_encoder
-                        .as_mut()
-                        .ok_or("stream encoder missing")?
-                        .write_samples_to_disk(&left[..count], Some(&right[..count]))
-                        .map_err(|e| format!("stream write: {e}"))?;
-                    r.stream_bytes = r.stream_bytes.saturating_add((written * 8) as u64);
-                }
+            if let Some(ref streamer) = r.streamer {
+                r.stream_bytes = streamer.bytes_written();
             }
             let mut latest = None;
             let mut latest_modes = None;
@@ -3415,14 +3416,15 @@ impl NativeComponentAdapter for NativeRuntime {
                                     .map_err(|_| "event queue is full".to_string())?;
                             }
                             if let Some((down, button, loopid)) = loop_click {
-                                manager
-                                    .try_post_event(Event::LoopClicked {
-                                        down,
-                                        button,
-                                        loopid,
-                                        in_layout: true,
-                                    })
-                                    .map_err(|_| "event queue is full".to_string())?;
+                            manager
+                                .try_post_event(Event::LoopClicked {
+                                    down,
+                                    button,
+                                    loopid,
+                                    in_layout: true,
+                                    presslen: 0,
+                                })
+                                .map_err(|_| "event queue is full".to_string())?;
                             }
                             continue;
                         }
@@ -3440,26 +3442,17 @@ impl NativeComponentAdapter for NativeRuntime {
             .ok_or("video is closed")?
             .update(Instant::now(), state)?;
         if enabled && r.stream_state == StreamState::Stopped {
-            fs::create_dir_all(&r.library_dir)
-                .map_err(|e| format!("create stream directory: {e}"))?;
             let extension = codec_extension(r.stream_codec)?;
-            let (path, file) = {
+            let path = {
                 let mut candidate = sequence;
                 loop {
                     let path = r.library_dir.join(format!("stream-{candidate}{extension}"));
-                    match fs::OpenOptions::new()
-                        .create_new(true)
-                        .write(true)
-                        .open(&path)
-                    {
-                        Ok(file) => break (path, file),
-                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    match std::fs::metadata(&path) {
+                        Err(_) => break path,
+                        Ok(_) => {
                             candidate = candidate
                                 .checked_add(1)
                                 .ok_or("no available stream filename")?;
-                        }
-                        Err(error) => {
-                            return Err(format!("create stream {}: {error}", path.display()));
                         }
                     }
                 }
@@ -3469,28 +3462,24 @@ impl NativeComponentAdapter for NativeRuntime {
                 .and_then(|stem| stem.to_str())
                 .unwrap_or("stream")
                 .to_owned();
-            let mut encoder = match SndFileEncoder::new(r.sample_rate, true, r.stream_codec) {
-                Ok(encoder) => encoder,
-                Err(error) => {
-                    let _ = fs::remove_file(&path);
-                    return Err(error.to_string());
-                }
-            };
-            if let Err(error) = encoder.setup_file_for_writing(file) {
-                let _ = fs::remove_file(&path);
-                return Err(format!("open stream encoder: {error}"));
-            }
+            let mut streamer = AudioStreamer::new();
+            let pcm_output = streamer.start_writing(
+                path,
+                r.stream_codec,
+                r.sample_rate,
+                true, // stereo
+            )?;
             r.stream_bytes = 0;
-            r.stream_encoder = Some(encoder);
+            r.streamer = Some(streamer);
             r.stream_output_name = output_name;
-            r.stream_enabled.store(true, Ordering::Release);
             r.stream_state = StreamState::Writing;
+            // Send the PcmOutput to the processor via the lock-free stream_queue.
+            if let Some(controls) = r.controls.as_ref() {
+                let _ = controls.stream_queue.push(pcm_output);
+            }
         } else if !enabled && r.stream_state == StreamState::Writing {
-            r.stream_enabled.store(false, Ordering::Release);
-            if let Some(mut encoder) = r.stream_encoder.take() {
-                encoder
-                    .prepare_file_for_closing()
-                    .map_err(|e| format!("finalize stream: {e}"))?;
+            if let Some(mut streamer) = r.streamer.take() {
+                streamer.finalize()?;
             }
             r.stream_output_name.clear();
             r.stream_state = StreamState::Stopped;

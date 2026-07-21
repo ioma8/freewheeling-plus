@@ -1,6 +1,6 @@
 //! Preallocated production DSP graph for native audio callbacks.
 
-use crate::audioio::{AudioCallback, AudioProcessor};
+use crate::audioio::{AudioCallback, AudioProcessor, NFrames};
 use crate::fluidsynth::{FluidLiteBackend, FluidSynthBackend, PITCH_BEND_CENTER};
 use crate::realtime_queue::{RealtimeReceiver, RealtimeSender, bounded};
 use std::cell::UnsafeCell;
@@ -11,6 +11,8 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use crossbeam_queue::ArrayQueue;
+use crate::file_streamer::PcmOutput;
 
 /// Legacy pckeyboard addresses are zero-based and extend through 322.
 pub const MAX_RUNTIME_LOOPS: usize = 323;
@@ -653,6 +655,9 @@ pub struct RuntimeControls {
     statuses: RealtimeReceiver<RuntimeStatus>,
     transfers: Arc<TransferPool>,
     loop_storage_refiller: LoopStorageRefiller,
+    /// Lock-free one-shot queue for receiving a `PcmOutput` from
+    /// `set_streaming` in the runtime.  Capacity 1.
+    pub stream_queue: Arc<ArrayQueue<PcmOutput>>,
 }
 
 impl RuntimeControls {
@@ -855,6 +860,9 @@ struct LoopSlot {
     /// display strip. Keeping this state in the loop makes Snapshot a bounded
     /// metadata copy rather than a long-loop scan on the audio callback.
     scope: Box<LoopScopeCache>,
+    /// Frames recorded at the end of the last recording session, used to
+    /// report the actual length when a recording tail extends the PCM data.
+    pub recorded_frames: NFrames,
 }
 
 #[derive(Clone, Copy)]
@@ -888,6 +896,7 @@ impl LoopSlot {
             overdub_jump: Box::default(),
             recent_peak: 0.0,
             scope: Box::default(),
+            recorded_frames: 0,
         }
     }
 
@@ -1446,6 +1455,11 @@ pub struct RuntimeAudioProcessor<B: FluidSynthBackend = FluidLiteBackend> {
     transfers: Arc<TransferPool>,
     export_job: Option<ExportJob>,
     scope_refresh_slot: usize,
+    /// Streaming PCM output for disk recording (DAW export / stem capture).
+    /// Set by the control thread via `stream_queue` when streaming starts.
+    stream_output: Option<PcmOutput>,
+    /// Lock-free one-shot queue for receiving a `PcmOutput` from the runtime.
+    stream_queue: Arc<ArrayQueue<PcmOutput>>,
 }
 
 /// Constructs the concrete processor and its non-realtime control endpoint.
@@ -1515,6 +1529,7 @@ pub fn runtime_audio_processor_with_backend_settings<B: FluidSynthBackend>(
     let (status_tx, status_rx) = bounded(DEFAULT_STATUS_CAPACITY);
     let transfers = Arc::new(TransferPool::new(DEFAULT_TRANSFER_SLOTS, max_loop_frames));
     let (loop_storage, loop_storage_refiller) = LoopStoragePool::new();
+    let stream_queue: Arc<ArrayQueue<PcmOutput>> = Arc::new(ArrayQueue::new(1));
     // Port `Pulse`'s precomputed metronome material. The original uses the C
     // process-wide PRNG; keep Rust deterministic while preserving its shape,
     // frequencies, amplitudes, and decay exactly.
@@ -1619,12 +1634,15 @@ pub fn runtime_audio_processor_with_backend_settings<B: FluidSynthBackend>(
             transfers: Arc::clone(&transfers),
             export_job: None,
             scope_refresh_slot: 0,
+            stream_output: None,
+            stream_queue: Arc::clone(&stream_queue),
         },
         RuntimeControls {
             commands: command_tx,
             statuses: status_rx,
             transfers,
             loop_storage_refiller,
+            stream_queue,
         },
     )
 }
@@ -1778,6 +1796,11 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 } else {
                     LoopMode::Playing
                 };
+                // Record the final captured frame count before the slot
+                // transitions to Playing. This preserves the user-visible
+                // recorded length independent of any crossfade tail that the
+                // C++ `RecordProcessor::End` appends after the downbeat.
+                slot.recorded_frames = slot.len as NFrames;
                 (extension, completed)
             };
             if let Some(beats) = extension
@@ -2592,6 +2615,12 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
         while let Some(command) = self.commands.try_recv() {
             self.apply_command(command);
         }
+        // Check for a new PcmOutput from the runtime (start streaming).
+        if self.stream_output.is_none() {
+            if let Some(pcm_output) = self.stream_queue.pop() {
+                self.stream_output = Some(pcm_output);
+            }
+        }
     }
 
     fn advance_export(&mut self) {
@@ -2688,6 +2717,77 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
             }
         }
     }
+
+    /// Returns the recorded length of a loop slot.
+    pub fn recorded_frames(&self, slot: u8) -> Option<NFrames> {
+        let idx = slot as usize;
+        self.loops.get(idx).and_then(|s| {
+            if s.len == 0 {
+                None
+            } else {
+                Some(s.recorded_frames)
+            }
+        })
+    }
+
+    /// Reposition a new recording so its position matches the current pulse phase.
+    pub fn resync_recording(&mut self, slot: u8) {
+        let idx = slot as usize;
+        if let Some(s) = self.loops.get_mut(idx) {
+            if matches!(s.mode, LoopMode::Recording) && s.pulse_synced && s.len != 0 {
+                let expected = pulse_synced_loop_position(
+                    self.pulse_frames,
+                    self.pulse_position,
+                    self.pulse_long_count,
+                    s.pulse_beats,
+                    s.len,
+                    s.capture_alignment_frames,
+                );
+                s.position = expected;
+            }
+        }
+    }
+
+    /// Reposition a playing loop to match the current pulse phase after a manual
+    /// pulse-length change.
+    pub fn resync_playback(&mut self, slot: u8) {
+        let idx = slot as usize;
+        if let Some(s) = self.loops.get_mut(idx) {
+            if matches!(s.mode, LoopMode::Playing) && s.pulse_synced && s.pulse_beats != 0 && s.len != 0 {
+                let expected = pulse_synced_loop_position(
+                    self.pulse_frames,
+                    self.pulse_position,
+                    self.pulse_long_count,
+                    s.pulse_beats,
+                    s.len,
+                    s.capture_alignment_frames,
+                );
+                if s.position != expected {
+                    s.boundary_fade_position = Some(0);
+                    s.position = expected;
+                }
+            }
+        }
+    }
+
+    /// Return a [TransportState] derived from this processor's internal pulse
+    /// state, for use by backends that do not provide their own transport
+    /// (CPAL, CoreAudio).
+    pub fn pulse_transport_state(&self, sample_rate: u32) -> crate::audioio::TransportState {
+        let pulse_len = self.pulse_frames;
+        let bpm = if pulse_len == 0 {
+            0.0
+        } else {
+            60.0 * f64::from(sample_rate) / f64::from(pulse_len)
+        };
+        crate::audioio::TransportState {
+            rolling: self.running,
+            frame: self.pulse_position,
+            bpm,
+            beats_per_bar: self.pulse_long_length as f32,
+            ..Default::default()
+        }
+    }
 }
 
 impl RuntimeCommand {
@@ -2711,6 +2811,18 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
     fn process(&mut self, callback: &mut AudioCallback<'_>) {
         self.drain_commands();
         self.advance_export();
+        // When no external JACK transport is available (CPAL / CoreAudio),
+        // populate transport fields from the internal Pulse state so that
+        // downstream consumers see rolling position and tempo.
+        if !callback.transport_rolling {
+            let ts = self.pulse_transport_state(self.sample_rate);
+            // Only populate position/tempo fields from our internal pulse;
+            // leave transport_rolling=false so the pulse-slave sync path
+            // (which follows external JACK transport) is unaffected.
+            callback.position.frame = ts.frame;
+            callback.position.beats_per_minute = ts.bpm;
+            callback.position.beats_per_bar = ts.beats_per_bar;
+        }
         // C++ `Pulse::process` transport-slave block: when an external
         // transport (JACK) rolls and we are not the timebase master (the
         // port never registers as one), the pulse length follows the
@@ -3208,6 +3320,16 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
         for frame in 0..frames {
             output_peak[0] = output_peak[0].max(callback.outputs[0][frame].abs());
             output_peak[1] = output_peak[1].max(callback.outputs[1][frame].abs());
+        }
+        // Push final output to the disk streamer if active.
+        if let Some(pcm) = &mut self.stream_output {
+            if !pcm.is_stopping() {
+                pcm.push_audio(
+                    &callback.outputs[0][..frames],
+                    &callback.outputs[1][..frames],
+                    callback.nframes,
+                );
+            }
         }
         self.sample_clock = self.sample_clock.wrapping_add(frames as u64);
         self.input_peak = input_peak;

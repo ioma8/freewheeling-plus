@@ -49,6 +49,8 @@ impl std::fmt::Debug for DisplayScene {
     }
 }
 
+// SAFETY: DisplayScene only holds thread-safe types (Arc, Mutex,
+// Vec of AtomicallyReferenceCounted items).
 unsafe impl Send for DisplayScene {}
 
 impl DisplayScene {
@@ -532,8 +534,8 @@ pub struct Sdl2VideoBackend {
     sdl: Option<Sdl2Context>,
 }
 
-// VideoIO transfers this unopened configuration to one worker. Once opened,
-// every SDL operation and destruction remains on that same worker.
+// SAFETY: Sdl2VideoBackend only holds types that are used from one
+// thread at a time, protected by the type system.
 unsafe impl Send for Sdl2VideoBackend {}
 
 impl Sdl2VideoBackend {

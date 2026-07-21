@@ -19,6 +19,7 @@ pub fn input_event(event: InputEvent) -> Result<Event, CoreEvent> {
             down,
             button,
             joystick,
+            presslen: 0,
         }),
         InputEvent::MouseMotion { x, y } => Ok(Event::MouseMotionInput { x, y }),
         InputEvent::MouseButton {
@@ -31,6 +32,7 @@ pub fn input_event(event: InputEvent) -> Result<Event, CoreEvent> {
             button,
             x,
             y,
+            presslen: 0,
         }),
         InputEvent::Key {
             down,
@@ -40,6 +42,7 @@ pub fn input_event(event: InputEvent) -> Result<Event, CoreEvent> {
             down,
             keysym,
             unicode,
+            presslen: 0,
         }),
         // The legacy event API has room for one Unicode scalar only. Keep
         // this adapter for existing callers; new integration should use
@@ -51,6 +54,7 @@ pub fn input_event(event: InputEvent) -> Result<Event, CoreEvent> {
                 down: true,
                 keysym,
                 unicode,
+                presslen: 0,
             })
         }
     }
@@ -78,6 +82,7 @@ pub fn text_input_events(text: String) -> Vec<Event> {
                 down: true,
                 keysym: unicode,
                 unicode,
+                presslen: 0,
             }
         })
         .collect()
@@ -376,7 +381,7 @@ mod tests {
         let keys: Vec<(bool, i32, i32)> = events
             .iter()
             .map(|event| {
-                let Event::KeyInput { down, keysym, unicode } = event else {
+                let Event::KeyInput { down, keysym, unicode, .. } = event else {
                     panic!("expected KeyInput");
                 };
                 (*down, *keysym, *unicode)
@@ -400,7 +405,7 @@ mod tests {
         .unwrap()
         .pop()
         .unwrap();
-        let Event::KeyInput { down, keysym, unicode } = event else {
+        let Event::KeyInput { down, keysym, unicode, .. } = event else {
             panic!("expected KeyInput");
         };
         assert_eq!((down, keysym, unicode), (false, 304, 0));

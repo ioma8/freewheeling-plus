@@ -1627,7 +1627,7 @@ impl FloConfig {
     pub fn read_event_parameter(&self, ev: &Event, param: EventParameter) -> UserVariable {
         let mut value = UserVariable::new();
         match ev {
-            Event::KeyInput { down, keysym, unicode } => match param.name {
+            Event::KeyInput { down, keysym, unicode, .. } => match param.name {
                 "keydown" => value.set_char(if *down { 1 } else { 0 }),
                 "key" => value.set_int(*keysym),
                 "unicode" => value.set_int(*unicode),
@@ -1640,20 +1640,20 @@ impl FloConfig {
                 "param3" => value.set_float(*param3),
                 _ => {}
             },
-            Event::LoopClicked { down, button, loopid, in_layout } => match param.name {
+            Event::LoopClicked { down, button, loopid, in_layout, .. } => match param.name {
                 "down" => value.set_char(if *down { 1 } else { 0 }),
                 "button" => value.set_int(*button),
                 "loopid" => value.set_int(*loopid),
                 "in" => value.set_char(if *in_layout { 1 } else { 0 }),
                 _ => {}
             },
-            Event::JoystickButtonInput { down, button, joystick } => match param.name {
+            Event::JoystickButtonInput { down, button, joystick, .. } => match param.name {
                 "down" => value.set_char(if *down { 1 } else { 0 }),
                 "button" => value.set_int(*button),
                 "joystick" => value.set_int(*joystick),
                 _ => {}
             },
-            Event::MouseButtonInput { down, button, x, y } => match param.name {
+            Event::MouseButtonInput { down, button, x, y, .. } => match param.name {
                 "down" => value.set_char(if *down { 1 } else { 0 }),
                 "button" => value.set_int(*button),
                 "x" => value.set_int(*x),
@@ -2267,7 +2267,7 @@ impl FloConfig {
             EventType::TriggerLoop => {
                 let loopid = self.required_int_param(&resolved.parameters, "loopid")?;
                 let vol = self.required_float_param(&resolved.parameters, "vol")?;
-                Ok(Event::TriggerLoop { index: loopid, vol, engage: 0, shot: false, overdub: false })
+                Ok(Event::TriggerLoop { index: loopid, vol, engage: 0, shot: false, overdub: false, overdub_feedback_var: None })
             }
             EventType::SetInVolume => {
                 let input = self.required_int_param(&resolved.parameters, "input")?;

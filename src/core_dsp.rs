@@ -141,6 +141,32 @@ impl SmoothState {
         );
         self.prewritten = false;
     }
+
+    pub fn dopreprocess(
+        &mut self,
+        outputs: &mut [Vec<Sample>],
+        process: &mut dyn FnMut(&mut [Vec<Sample>]),
+    ) {
+        // Store current output as pre-buffer
+        for (i, out) in outputs.iter().enumerate() {
+            if let Some(pre) = self.pre.get_mut(i) {
+                let len = pre.len().min(out.len());
+                pre[..len].copy_from_slice(&out[..len]);
+            }
+        }
+        self.prewritten = true;
+        self.prewriting = true;
+        process(outputs);
+        self.prewriting = false;
+    }
+
+    pub fn fade_or_process(&mut self, outputs: &mut [Vec<Sample>], process: &mut dyn FnMut(&mut [Vec<Sample>])) {
+        if !self.prewritten {
+            process(outputs);
+        } else {
+            self.fade(outputs);
+        }
+    }
 }
 
 pub struct AutoLimitProcessor {
@@ -196,6 +222,16 @@ impl AutoLimitProcessor {
     }
 }
 
+pub struct SyncPosition {
+    pub position: NFrames,
+    pub callback: Box<dyn FnMut(i32, NFrames) + Send>,
+    pub index: i32,
+}
+
+pub trait PulseSyncCallback: Send {
+    fn pulse_sync(&mut self, sync_idx: i32, actual_pos: NFrames);
+}
+
 pub struct Pulse {
     pub len: NFrames,
     pub curpos: NFrames,
@@ -203,6 +239,8 @@ pub struct Pulse {
     pub stopped: bool,
     pub metro_active: bool,
     pub metro_volume: f32,
+    sync_positions: Vec<SyncPosition>,
+    max_sync_positions: usize,
 }
 impl Pulse {
     pub const METRONOME_HIT_LEN: NFrames = 800;
@@ -216,6 +254,8 @@ impl Pulse {
             stopped: false,
             metro_active: false,
             metro_volume: 0.1,
+            sync_positions: Vec::new(),
+            max_sync_positions: 1000,
         }
     }
     pub fn quantize_length(&self, src: NFrames) -> NFrames {
@@ -232,6 +272,7 @@ impl Pulse {
         self.curpos = p
     }
     pub fn process_clock(&mut self, n: NFrames) {
+        let prev_curpos = self.curpos;
         if !self.stopped {
             self.curpos += n;
             if self.curpos >= self.len {
@@ -239,11 +280,35 @@ impl Pulse {
                 self.wrapped = true;
             }
         }
+        self.fire_syncs(prev_curpos, self.curpos);
     }
     pub fn take_wrapped(&mut self) -> bool {
         let v = self.wrapped;
         self.wrapped = false;
         v
+    }
+    pub fn add_sync(&mut self, pos: NFrames, cb: Box<dyn FnMut(i32, NFrames) + Send>) -> Result<i32, String> {
+        if self.sync_positions.len() >= self.max_sync_positions {
+            return Err("max sync positions reached".into());
+        }
+        let idx = self.sync_positions.len() as i32;
+        self.sync_positions.push(SyncPosition { position: pos, callback: cb, index: idx });
+        Ok(idx)
+    }
+    pub fn del_sync(&mut self, index: i32) -> bool {
+        let before = self.sync_positions.len();
+        self.sync_positions.retain(|sp| sp.index != index);
+        self.sync_positions.len() != before
+    }
+    pub fn fire_syncs(&mut self, prev_pos: NFrames, cur_pos: NFrames) {
+        for sp in &mut self.sync_positions {
+            if sp.position > prev_pos && sp.position <= cur_pos {
+                (sp.callback)(sp.index, sp.position);
+            } else if cur_pos < prev_pos && (sp.position > prev_pos || sp.position <= cur_pos) {
+                // wrapped around
+                (sp.callback)(sp.index, sp.position);
+            }
+        }
     }
 }
 

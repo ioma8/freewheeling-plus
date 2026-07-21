@@ -545,6 +545,7 @@ fn test_gosub_paramset_and_mixer_events_preserve_payloads() {
         button: 2,
         loopid: 7,
         in_layout: false,
+        presslen: 0,
     };
     let abs_idx = Event::ParamSetGetAbsoluteParamIdx {
         interfaceid: 1,
@@ -790,6 +791,7 @@ fn test_event_parameter_metadata_for_input_events() {
         down: true,
         keysym: 32,
         unicode: 65,
+        presslen: 0,
     };
     assert_eq!(key.get_num_params(), 3);
     assert_eq!(
@@ -805,6 +807,7 @@ fn test_event_parameter_metadata_for_input_events() {
         down: true,
         button: 4,
         joystick: 1,
+        presslen: 0,
     };
     assert_eq!(
         joy.get_param(2),
@@ -819,6 +822,7 @@ fn test_event_parameter_metadata_for_input_events() {
         button: 2,
         x: 100,
         y: 200,
+        presslen: 0,
     };
     assert_eq!(
         mouse_button.get_param(3),

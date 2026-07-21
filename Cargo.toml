@@ -31,7 +31,7 @@ alsa = "0.11.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 coreaudio-sys = { version = "0.2", features = ["audio_unit"] }
-
+jack = "0.13.5"
 [package.metadata.bundle]
 name = "FreeWheeling"
 identifier = "org.freewheeling.freewheeling-plus"

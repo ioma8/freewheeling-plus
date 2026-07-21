@@ -7,6 +7,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use crate::core::LoopTrayItem;
 
 pub const OUTPUT_LOOP_NAME: &str = "loop";
 pub const OUTPUT_STREAM_NAME: &str = "live";
@@ -138,15 +139,8 @@ pub struct LoopLibraryEntry {
     pub modified: Option<std::time::SystemTime>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LoopTrayItem {
-    pub loop_id: i32,
-    pub name: String,
-    pub default_name: bool,
-    pub place_name: String,
-    pub x: i32,
-    pub y: i32,
-}
+// LoopTrayItem is defined in core.rs — reuse instead of duplicating.
+// See `crate::core::LoopTrayItem`.
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LoopTray {

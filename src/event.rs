@@ -967,23 +967,27 @@ pub enum Event {
         down: bool,
         keysym: i32,
         unicode: i32,
+        presslen: u32,
     },
     LoopClicked {
         down: bool,
         button: i32,
         loopid: i32,
         in_layout: bool,
+        presslen: u32,
     },
     JoystickButtonInput {
         down: bool,
         button: i32,
         joystick: i32,
+        presslen: u32,
     },
     MouseButtonInput {
         down: bool,
         button: i32,
         x: i32,
         y: i32,
+        presslen: u32,
     },
     MouseMotionInput {
         x: i32,
@@ -995,6 +999,7 @@ pub enum Event {
         engage: i32,
         shot: bool,
         overdub: bool,
+        overdub_feedback_var: Option<String>,
     },
     MIDIControllerInput {
         outport: i32,

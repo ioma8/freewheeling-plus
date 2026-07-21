@@ -23,7 +23,7 @@ fn actual_loop_click_binding_tracks_record_mute_trigger_and_overdub_state() {
     let mut config = authoritative_config();
     let registry = config.binding_registry.clone();
     let dispatcher = RuntimeEventDispatcher::<8>::new();
-    let input = Event::LoopClicked { down: true, button: 1, loopid: 7, in_layout: true };
+    let input = Event::LoopClicked { down: true, button: 1, loopid: 7, in_layout: true, presslen: 0 };
     let mut loops = [LoopMode::Empty; MAX_RUNTIME_LOOPS];
     for variable in [
         "VAR_keyheld_shift",
@@ -94,7 +94,7 @@ fn actual_fullscreen_chain_applies_variable_before_application_action() {
     let registry = config.binding_registry.clone();
     let loops = [LoopMode::Empty; MAX_RUNTIME_LOOPS];
     let pause = freewheeling_plus::sdlio::get_sdl_key("pause");
-    let input = Event::KeyInput { down: true, keysym: pause, unicode: 0 };
+    let input = Event::KeyInput { down: true, keysym: pause, unicode: 0, presslen: 0 };
 
     let batch = RuntimeEventDispatcher::<8>::new()
         .dispatch(&mut config, &registry, &input, &loops)
@@ -114,7 +114,7 @@ fn bounded_batch_reports_overflow_instead_of_dropping_continued_actions() {
     let registry = config.binding_registry.clone();
     let loops = [LoopMode::Empty; MAX_RUNTIME_LOOPS];
     let pause = freewheeling_plus::sdlio::get_sdl_key("pause");
-    let input = Event::KeyInput { down: true, keysym: pause, unicode: 0 };
+    let input = Event::KeyInput { down: true, keysym: pause, unicode: 0, presslen: 0 };
     let error = RuntimeEventDispatcher::<0>::new()
         .dispatch(&mut config, &registry, &input, &loops)
         .unwrap_err();
@@ -135,7 +135,7 @@ fn actual_save_loop_and_scene_bindings_carry_configured_codec_and_save_mode() {
     let loops = [LoopMode::Empty; MAX_RUNTIME_LOOPS];
     let dispatcher = RuntimeEventDispatcher::<8>::new();
 
-    let save_loop = Event::KeyInput { down: true, keysym: freewheeling_plus::sdlio::get_sdl_key("f8"), unicode: 0 };
+    let save_loop = Event::KeyInput { down: true, keysym: freewheeling_plus::sdlio::get_sdl_key("f8"), unicode: 0, presslen: 0 };
     let batch = dispatcher
         .dispatch(&mut config, &registry, &save_loop, &loops)
         .unwrap();
@@ -147,7 +147,7 @@ fn actual_save_loop_and_scene_bindings_carry_configured_codec_and_save_mode() {
         }))
     );
 
-    let save_scene = Event::KeyInput { down: true, keysym: freewheeling_plus::sdlio::get_sdl_key("f7"), unicode: 0 };
+    let save_scene = Event::KeyInput { down: true, keysym: freewheeling_plus::sdlio::get_sdl_key("f7"), unicode: 0, presslen: 0 };
     let batch = dispatcher
         .dispatch(&mut config, &registry, &save_scene, &loops)
         .unwrap();
@@ -186,7 +186,7 @@ fn actual_browser_binding_specializes_loop_import_scene_load_and_rename() {
     }
     let loops = [LoopMode::Empty; MAX_RUNTIME_LOOPS];
     let dispatcher = RuntimeEventDispatcher::<8>::new();
-    let enter = Event::KeyInput { down: true, keysym: freewheeling_plus::sdlio::get_sdl_key("return"), unicode: 0 };
+    let enter = Event::KeyInput { down: true, keysym: freewheeling_plus::sdlio::get_sdl_key("return"), unicode: 0, presslen: 0 };
     config
         .get_variable_mut("VAR_keyheld_ctrl")
         .unwrap()
@@ -294,7 +294,7 @@ fn actual_loop_controls_emit_gain_actions_from_shipped_bindings() {
             })
         });
     let loops = [LoopMode::Empty; MAX_RUNTIME_LOOPS];
-    let input = Event::LoopClicked { down: true, button: 1, loopid: 4, in_layout: true };
+    let input = Event::LoopClicked { down: true, button: 1, loopid: 4, in_layout: true, presslen: 0 };
     config
         .get_variable_mut("VAR_keyheld_up")
         .unwrap()
@@ -316,7 +316,7 @@ fn actual_loop_controls_emit_gain_actions_from_shipped_bindings() {
         .get_variable_mut("VAR_keyheld_up")
         .unwrap()
         .set_char(0);
-    let input = Event::LoopClicked { down: true, button: 4, loopid: 4, in_layout: true };
+    let input = Event::LoopClicked { down: true, button: 4, loopid: 4, in_layout: true, presslen: 0 };
     let batch = RuntimeEventDispatcher::<8>::new()
         .dispatch(&mut config, &registry, &input, &loops)
         .unwrap();

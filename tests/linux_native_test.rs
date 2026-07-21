@@ -22,11 +22,11 @@ mod linux_native;
 #[test]
 fn transport_commands_retain_exact_frame_requests() {
     assert_ne!(
-        linux_native::TransportCommand::Start,
-        linux_native::TransportCommand::Stop
+        freewheeling_plus::jack::TransportCommand::Start,
+        freewheeling_plus::jack::TransportCommand::Stop
     );
     assert_eq!(
-        linux_native::TransportCommand::Relocate(u32::MAX),
-        linux_native::TransportCommand::Relocate(u32::MAX)
+        freewheeling_plus::jack::TransportCommand::Relocate(u32::MAX),
+        freewheeling_plus::jack::TransportCommand::Relocate(u32::MAX)
     );
 }

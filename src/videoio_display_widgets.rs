@@ -287,40 +287,6 @@ impl<V: Value> Display for FloDisplaySquares<V> {
     }
 }
 
-pub struct FloLayoutBox {
-    pub left: i32,
-    pub top: i32,
-    pub right: i32,
-    pub bottom: i32,
-    pub lineleft: bool,
-    pub lineright: bool,
-    pub linetop: bool,
-    pub linebottom: bool,
-}
-impl FloLayoutBox {
-    pub fn render(&self, r: &mut dyn Renderer, m: &RenderMetrics, c: Color) {
-        let (l, t, rr, b) = (
-            m.x(self.left),
-            m.y(self.top),
-            m.x(self.right),
-            m.y(self.bottom),
-        );
-        r.draw(DrawOp::Box(l, t, rr, b, c));
-        let black = Color(0, 0, 0, 255);
-        if self.lineleft {
-            r.draw(DrawOp::Line((l, t), (l, b), black))
-        }
-        if self.lineright {
-            r.draw(DrawOp::Line((rr, t), (rr, b), black))
-        }
-        if self.linetop {
-            r.draw(DrawOp::Line((l, t), (rr, t), black))
-        }
-        if self.linebottom {
-            r.draw(DrawOp::Line((l, b), (rr, b), black))
-        }
-    }
-}
 
 pub struct BrowserWidget {
     pub base: FloDisplay,
@@ -589,6 +555,7 @@ impl FloDisplaySnapshots {
 mod tests {
     use super::*;
     use crate::browser::BrowserItemType;
+    use crate::video_layout::FloLayoutBox;
     struct R(Vec<DrawOp>);
     impl Renderer for R {
         fn draw(&mut self, o: DrawOp) {

@@ -68,9 +68,9 @@ pub fn format_signal_message(sig: c_int, buf: &mut [u8]) -> usize {
 }
 
 fn dispatch_write(msg: &[u8]) {
+    // SAFETY: libc::write is async-signal-safe; the fence pairs with
+    // Release in set_signal_test_hooks for consistent hook pointer visibility.
     unsafe {
-        // Acquire fence pairs with Release in set_signal_test_hooks so the
-        // handler sees a consistent (writer, ctx) pair once writer is visible.
         std::sync::atomic::fence(Ordering::Acquire);
         let writer = TEST_WRITER.load(Ordering::Relaxed);
         if writer != 0 {
@@ -92,6 +92,8 @@ fn dispatch_write(msg: &[u8]) {
     }
 }
 fn dispatch_exit(code: c_int) {
+    // SAFETY: libc::_exit is async-signal-safe; the fence pairs with
+    // Release in set_signal_test_hooks for consistent hook pointer visibility.
     unsafe {
         std::sync::atomic::fence(Ordering::Acquire);
         let exiter = TEST_EXITER.load(Ordering::Relaxed);
@@ -155,10 +157,15 @@ extern "C" fn shutdown_trampoline(sig: c_int) {
 fn register(handler: extern "C" fn(c_int), signals: &[c_int]) {
     // This is the same no-flags `sigaction` registration used in fweelin.cc.
     // `signal(3)` may have implementation-dependent reset/restart semantics.
+    // SAFETY: zeroed sigaction is valid initialization; sigemptyset is
+    // async-signal-safe and always succeeds on POSIX systems.
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = handler as usize;
+    // SAFETY: sigemptyset is async-signal-safe.
     unsafe { libc::sigemptyset(&mut action.sa_mask) };
     for &sig in signals {
+        // SAFETY: sigaction is async-signal-safe; handler is a function
+        // pointer, not a closure, so it's safe to call from any thread.
         unsafe {
             libc::sigaction(sig, &action, std::ptr::null_mut());
         }
@@ -191,15 +198,16 @@ mod tests {
     }
 
     fn capture_write(message: *const u8, len: usize, ctx: *mut c_void) {
-        // The test supplies a valid context and the handler is invoked on this
-        // thread, matching the C signal_handler_test hook contract.
+        // SAFETY: test context pointer is set up by the test itself and
+        // guaranteed valid for the duration of the handler invocation.
         let hooks = unsafe { &mut *ctx.cast::<Hooks>() };
+        // SAFETY: message pointer and length come from the test and are valid.
         hooks
             .bytes
             .extend_from_slice(unsafe { std::slice::from_raw_parts(message, len) });
     }
-
     fn capture_exit(code: c_int, ctx: *mut c_void) {
+        // SAFETY: context pointer is test-owned.
         unsafe { (*ctx.cast::<Hooks>()).exit_code = code };
     }
     #[test]

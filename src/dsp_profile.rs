@@ -30,8 +30,13 @@ fn state() -> &'static State {
         let output_path =
             std::env::var_os("FW_PROFILE_DSP_OUT").map(|path| path.to_string_lossy().into_owned());
         if enabled {
-            EXIT_HOOK.call_once(|| unsafe {
-                libc::atexit(report_at_exit);
+            EXIT_HOOK.call_once(|| {
+                // SAFETY: atexit is safe to call from any thread; the registered function
+                // only does I/O during normal process exit, after which global destructors
+                // may have run, so it only calls async-signal-safe libc write().
+                unsafe {
+                    libc::atexit(report_at_exit);
+                }
             });
         }
         State {

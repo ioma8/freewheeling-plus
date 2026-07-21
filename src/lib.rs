@@ -24,6 +24,8 @@ pub mod fluidsynth;
 pub mod fweelin_app;
 pub mod library_helper;
 pub mod linux_native;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod jack;
 pub mod logo;
 pub mod looplibrary;
 pub mod macos;
@@ -34,6 +36,7 @@ pub mod mem;
 pub mod midiio;
 pub mod midiio_platform;
 pub mod native_dsp_graph;
+pub mod file_streamer;
 pub mod native_event_bridge;
 pub mod native_loop_selection;
 pub mod native_patch_browser;

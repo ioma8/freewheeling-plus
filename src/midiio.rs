@@ -1,5 +1,6 @@
 //! MIDI protocol handling and the backend-neutral worker.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 
@@ -33,6 +34,15 @@ pub struct MidiPortMessage {
     pub message: MidiMessage,
 }
 
+pub type PatchRef = String;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PatchMidiRoute {
+    pub port: u8,
+    pub channel: u8,
+    pub bank: u8,
+    pub program: u8,
+}
 pub fn clamp7(value: i32) -> u8 {
     value.clamp(0, 127) as u8
 }
@@ -198,6 +208,10 @@ pub struct MidiIo<B: MidiBackend> {
     /// C++ `MidiIO::bendertune`, applied to pitch-bend values before echo.
     pub bend_tune: i32,
     pub sync_transmit: bool,
+    pub held_notes: Vec<(u8, u8)>,
+    pub note_port: [Option<u8>; 128],
+    pub note_patch: [Option<PatchRef>; 128],
+    pub patch_routes: HashMap<String, PatchMidiRoute>,
 }
 impl<B: MidiBackend> MidiIo<B> {
     pub fn new(backend: B) -> Self {
@@ -214,6 +228,10 @@ impl<B: MidiBackend> MidiIo<B> {
             note_transpose: 0,
             bend_tune: 0,
             sync_transmit: false,
+            held_notes: Vec::new(),
+            note_port: [None; 128],
+            note_patch: [const { None }; 128],
+            patch_routes: HashMap::new(),
         }
     }
     pub fn set_sink(&mut self, sink: Arc<dyn MidiEventSink>) {
@@ -435,6 +453,80 @@ impl<B: MidiBackend> MidiIo<B> {
         }
         self.inputs = 0;
         self.outputs = 0;
+    }
+    pub fn receive(&mut self) -> Option<MidiPortMessage> {
+        let msg = {
+            let mut backend = self.backend.lock().ok()?;
+            backend.receive().ok()?
+        }?;
+        match &msg.message {
+            MidiMessage::NoteOn { channel, note, .. } => {
+                self.held_notes.push((*note, *channel));
+                self.note_port[*note as usize] = Some(msg.port as u8);
+            }
+            MidiMessage::NoteOff { note, .. } => {
+                self.held_notes.retain(|(n, _)| *n != *note);
+                self.note_port[*note as usize] = None;
+            }
+            _ => {}
+        }
+        Some(msg)
+    }
+
+    pub fn release_held_notes(&mut self) {
+        let held: Vec<_> = self.held_notes.drain(..).collect();
+        for (note, channel) in held {
+            let port = self.note_port[note as usize].unwrap_or(0) as usize;
+            let _ = self.send(port, MidiMessage::NoteOff { channel, note, velocity: 0 });
+        }
+    }
+
+    pub fn send_bank_program(
+        &mut self,
+        port: usize,
+        channel: u8,
+        bank: u8,
+        program: u8,
+    ) -> Result<(), String> {
+        self.send(
+            port,
+            MidiMessage::Controller {
+                channel,
+                control: 0,
+                value: bank,
+            },
+        )?;
+        self.send(
+            port,
+            MidiMessage::Controller {
+                channel,
+                control: 32,
+                value: 0,
+            },
+        )?;
+        self.send(
+            port,
+            MidiMessage::ProgramChange { channel, program },
+        )?;
+        Ok(())
+    }
+
+    pub fn set_midi_for_patch(&mut self, patch_id: String, route: PatchMidiRoute) {
+        self.patch_routes.insert(patch_id, route);
+    }
+
+    pub fn apply_patch_route(&mut self, patch_id: &str) -> Result<(), String> {
+        let route = self.patch_routes.get(patch_id).cloned();
+        if let Some(route) = route {
+            self.send_bank_program(
+                route.port as usize,
+                route.channel,
+                route.bank,
+                route.program,
+            )
+        } else {
+            Ok(())
+        }
     }
 }
 impl<B: MidiBackend> Drop for MidiIo<B> {

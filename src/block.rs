@@ -223,9 +223,20 @@ impl<'a> AudioBlockIterator<'a> {
         self.position = offset.min(self.block.total_len());
     }
     pub fn get_fragment(&self) -> &[Sample] {
-        let end = (self.position + self.fragment_size).min(self.block.total_len());
-        &self.block.samples
-            [self.position.min(self.block.samples.len())..end.min(self.block.samples.len())]
+        let mut block: &AudioBlock = &*self.block;
+        let mut offset = self.position;
+        loop {
+            if offset < block.samples.len() {
+                let end = (offset + self.fragment_size).min(block.samples.len());
+                return &block.samples[offset..end];
+            }
+            offset = offset.saturating_sub(block.samples.len());
+            if let Some(ref next) = block.next {
+                block = next;
+            } else {
+                return &[];
+            }
+        }
     }
     pub fn put_fragment(&mut self, data: &[Sample]) -> usize {
         let n = data
