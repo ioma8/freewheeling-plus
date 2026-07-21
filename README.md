@@ -7,30 +7,35 @@ This is an in-progress migration from the original C++ codebase. The architectur
 ## Status
 
 Daily-driver quality on macOS. Linux and Windows should work but get less testing.
-Android: entry point, path handling, and audio tuning implemented; needs build
-toolchain (`cargo-ndk` + `cargo-apk`) and touch input mapping.
+Android: entry point, path handling, and audio tuning implemented; needs
+`cargo-apk` + Android NDK toolchain and touch input mapping.
 
 
 ### Android
 
-Requires the Android NDK and `cargo-ndk` / `cargo-apk`:
+Requires the Android SDK, NDK, and `cargo-apk`:
 
 ```sh
-# 1. Install Android NDK (via Android Studio or standalone)
-#    Set ANDROID_NDK_HOME to the NDK path, e.g.:
-export ANDROID_NDK_HOME=$HOME/Library/Android/sdk/ndk/27.0.12077973
+# 1. Install Android SDK + NDK (via Android Studio)
+#    SDK: Preferences → Appearance & Behavior → System Settings → Android SDK
+#    NDK: SDK Tools tab → check "NDK (Side by side)" → Apply
 
-# 2. Install cargo subcommands
-cargo install cargo-ndk cargo-apk
+# 2. Set environment variables:
+export ANDROID_HOME=$HOME/Library/Android/sdk
+export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973
 
-# 3. Add Rust target
+# 3. Install cargo subcommands and Rust target
+cargo install cargo-apk
 rustup target add aarch64-linux-android
 
-# 4. Build and run on an emulator or connected device
+# 4. Build APK (install + run on connected device/emulator)
+cargo apk build --release
+# or
 cargo apk run --release
 ```
 
-On first build, `cargo-apk` downloads the Android SDK and build tools automatically.
+On first build, `cargo-apk` downloads remaining SDK components automatically.
+The `sdl2` crate's `bundled` feature compiles SDL from source for Android.
 
 ## Build
 

@@ -46,10 +46,6 @@ resources = ["data"]
 package = "org.freewheeling.freewheeling_plus"
 min_sdk_version = 26
 target_sdk_version = 34
-install_location = "auto"
-icon = "data/icon.png"
-# Builds APK in release mode; debug builds use `cargo apk run`
-release = true
 assets = "data/"
 
 # If ANDROID_NDK_HOME is not set, uncomment and set the path:
