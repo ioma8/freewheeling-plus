@@ -1703,6 +1703,27 @@ impl FloConfig {
                 "routethroughpatch" => value.set_char(if *echo { 1 } else { 0 }),
                 _ => {}
             },
+            Event::MIDIPolyphonicPressureInput { channel, notenum, val } => match param.name {
+                "midichannel" => value.set_int(*channel as i32),
+                "notenum" => value.set_int(*notenum as i32),
+                "pressureval" => value.set_int(*val as i32),
+                _ => {}
+            },
+            Event::MIDITimeCodeQuarterFrameInput { value: val } => {
+                if param.name == "value" {
+                    value.set_int(*val as i32);
+                }
+            }
+            Event::MIDISongPositionInput { value: val } => {
+                if param.name == "value" {
+                    value.set_int(*val as i32);
+                }
+            }
+            Event::MIDISongSelectInput { value: val } => {
+                if param.name == "value" {
+                    value.set_int(*val as i32);
+                }
+            }
             Event::MIDIClockInput { outport } => {
                 if param.name == "outport" {
                     value.set_int(*outport);

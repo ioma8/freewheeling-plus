@@ -312,7 +312,6 @@ impl IFileEncoder for SndFileEncoder {
     }
 }
 
-pub type VorbisEncoder = SndFileEncoder;
 
 enum DecoderInput {
     Wav(hound::WavReader<Box<dyn ReadSeek>>),
@@ -611,7 +610,6 @@ impl IFileDecoder for SndFileDecoder {
     }
 }
 
-pub type VorbisDecoder = SndFileDecoder;
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
