@@ -10,6 +10,28 @@ Daily-driver quality on macOS. Linux and Windows should work but get less testin
 Android: entry point, path handling, and audio tuning implemented; needs build
 toolchain (`cargo-ndk` + `cargo-apk`) and touch input mapping.
 
+
+### Android
+
+Requires the Android NDK and `cargo-ndk` / `cargo-apk`:
+
+```sh
+# 1. Install Android NDK (via Android Studio or standalone)
+#    Set ANDROID_NDK_HOME to the NDK path, e.g.:
+export ANDROID_NDK_HOME=$HOME/Library/Android/sdk/ndk/27.0.12077973
+
+# 2. Install cargo subcommands
+cargo install cargo-ndk cargo-apk
+
+# 3. Add Rust target
+rustup target add aarch64-linux-android
+
+# 4. Build and run on an emulator or connected device
+cargo apk run --release
+```
+
+On first build, `cargo-apk` downloads the Android SDK and build tools automatically.
+
 ## Build
 
 ```sh
