@@ -25,10 +25,11 @@ use coreaudio_sys::*;
 
 // Keep AudioBufferList2 for non-interleaved stereo capture (coreaudio_sys
 // AudioBufferList has exactly 1 trailing buffer).
+#[allow(non_snake_case)]
 #[repr(C)]
 struct AudioBufferList2 {
-    number_buffers: u32,
-    buffers: [AudioBuffer; NUM_CHANNELS],
+    mNumberBuffers: u32,
+    mBuffers: [AudioBuffer; NUM_CHANNELS],
 }
 
 // AudioToolbox/CoreAudio property and format constants. These FourCharCode
@@ -130,8 +131,8 @@ impl CallbackState {
         let mut input_left = vec![0.0; MAX_CALLBACK_FRAMES];
         let mut input_right = vec![0.0; MAX_CALLBACK_FRAMES];
         let capture = AudioBufferList2 {
-            number_buffers: 2,
-            buffers: [
+            mNumberBuffers: 2,
+            mBuffers: [
                 AudioBuffer {
                     mNumberChannels: 1,
                     mDataByteSize: 0,
@@ -653,8 +654,8 @@ unsafe extern "C" fn render_callback(
         state.cpu_sample_start = Some(started);
     }
     let count = frames as usize;
-    state.capture.buffers[0].mDataByteSize = frames * std::mem::size_of::<f32>() as u32;
-    state.capture.buffers[1].mDataByteSize = frames * std::mem::size_of::<f32>() as u32;
+    state.capture.mBuffers[0].mDataByteSize = frames * std::mem::size_of::<f32>() as u32;
+    state.capture.mBuffers[1].mDataByteSize = frames * std::mem::size_of::<f32>() as u32;
     // SAFETY: all pointers are valid for the duration of the callback and the
     // capture list points at preallocated buffers with MAX_CALLBACK_FRAMES.
     if unsafe {
@@ -850,8 +851,8 @@ fn default_device(selector: u32) -> Result<u32, String> {
 
 fn nominal_rate(device: u32) -> Result<f64, String> {
     let address = AudioObjectPropertyAddress {
-    mSelector: K_AUDIO_DEVICE_PROPERTY_NOMINAL_SAMPLE_RATE,
-    mScope: K_AUDIO_OBJECT_SCOPE_GLOBAL,
+        mSelector: K_AUDIO_DEVICE_PROPERTY_NOMINAL_SAMPLE_RATE,
+        mScope: K_AUDIO_OBJECT_SCOPE_GLOBAL,
         mElement: K_AUDIO_OBJECT_ELEMENT_MAIN,
     };
     let mut rate = DEFAULT_RATE as f64;
