@@ -399,6 +399,11 @@ impl<B: AudioBackend> AudioIO<B> {
     pub fn backend(&self) -> &B {
         &self.backend
     }
+    /// Mutable access to the backend for control-thread operations that
+    /// don't need the full `AudioIO` lifecycle (MIDI polling, diagnostics).
+    pub fn backend_mut(&mut self) -> &mut B {
+        &mut self.backend
+    }
     pub fn recovery_requested(&self) -> bool {
         self.backend.recovery_requested()
     }

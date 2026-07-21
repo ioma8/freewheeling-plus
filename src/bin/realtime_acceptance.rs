@@ -240,11 +240,11 @@ fn parse_positive_u32(name: &str, value: &str) -> Result<u32, String> {
 }
 
 #[cfg(target_os = "linux")]
-type NativeBackend = freewheeling_plus::linux_native::JackAudioMidiBackend;
+type NativeBackend = freewheeling_plus::jack::JackAudioMidiBackend;
 
 #[cfg(target_os = "linux")]
 fn native_backend(requested: RequestedFormat) -> Result<NativeBackend, String> {
-    let (client, _) = jack::Client::new(
+    let (client, _) = freewheeling_plus::jack::Client::new(
         "freewheeling-realtime-acceptance-config",
         jack::ClientOptions::NO_START_SERVER,
     )

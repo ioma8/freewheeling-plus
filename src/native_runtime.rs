@@ -7,7 +7,6 @@
 use super::{NativeComponentAdapter, ProductionApp};
 use crate::amixer::{AlsaMixerBackend, HardwareMixerInterface};
 use crate::audio_native_cpal::{CpalAudioOptions, DeviceSelection};
-#[cfg(not(target_os = "macos"))]
 use crate::audio_native_cpal::CpalAudioBackend;
 use crate::audioio::{AnyAudioBackend, AudioBackend, AudioIO};
 use crate::block::{AudioBlock, AudioBlockIterator, Codec, ExtraChannel};
@@ -2945,7 +2944,18 @@ impl NativeStartupAdapter for NativeRuntime {
                             return Err("JACK backend is not available on this platform".into());
                         }
                     }
-                    AudioBackendKind::Cpal | AudioBackendKind::Auto => {
+                    AudioBackendKind::Cpal => {
+                        let mut options = CpalAudioOptions::default();
+                        if std::env::var_os("FWEELIN_AUDIO_BUFFER_FRAMES").is_none() {
+                            options.preferred_buffer_frames =
+                                r.config.borrow().preferred_audio_buffer_frames.max(1);
+                        }
+                        AnyAudioBackend::Cpal(CpalAudioBackend::new(
+                            DeviceSelection::default(),
+                            options,
+                        ))
+                    }
+                    AudioBackendKind::Auto => {
                         #[cfg(target_os = "macos")]
                         {
                             let back = MacosAudioUnitBackend::new(
@@ -2957,8 +2967,6 @@ impl NativeStartupAdapter for NativeRuntime {
                         #[cfg(not(target_os = "macos"))]
                         {
                             let mut options = CpalAudioOptions::default();
-                            // The environment remains an explicit diagnostic/operator
-                            // override; otherwise honor C++ FloConfig's audiobuffersize.
                             if std::env::var_os("FWEELIN_AUDIO_BUFFER_FRAMES").is_none() {
                                 options.preferred_buffer_frames =
                                     r.config.borrow().preferred_audio_buffer_frames.max(1);
