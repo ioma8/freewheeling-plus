@@ -20,9 +20,8 @@ Requires the Android SDK, NDK, and `cargo-apk`:
 #    SDK: Preferences → Appearance & Behavior → System Settings → Android SDK
 #    NDK: SDK Tools tab → check "NDK (Side by side)" → Apply
 
-# 2. Set environment variables:
+export ANDROID_HOME=/Users/jakubkolcar/Library/Android/sdk
 export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.15729638
-
 # 3. Install cargo subcommands and Rust target
 cargo install cargo-apk
 rustup target add aarch64-linux-android
