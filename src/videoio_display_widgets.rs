@@ -343,19 +343,17 @@ impl BrowserWidget {
             self.expanded = true;
         }
     }
-    pub fn select_event(&self) -> Option<Box<dyn Event>> {
-        self.browser.current_index.map(|_| {
-            Box::new(super::event::BrowserSelectItemEvent::new(
-                self.browser.browser_id,
-            )) as Box<dyn Event>
+    pub fn select_event(&self) -> Option<Event> {
+        self.browser.current_index.map(|_| Event::BrowserSelectItem {
+            browserid: self.browser.browser_id,
         })
     }
-    pub fn move_event(&self, adjust: i32) -> Box<dyn Event> {
-        Box::new(super::event::BrowserMoveToItemEvent::new(
-            self.browser.browser_id,
+    pub fn move_event(&self, adjust: i32) -> Event {
+        Event::BrowserMoveToItem {
+            browserid: self.browser.browser_id,
             adjust,
-            0,
-        ))
+            jump_adjust: 0,
+        }
     }
 }
 

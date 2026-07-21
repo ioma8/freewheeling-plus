@@ -16,10 +16,7 @@ use crate::core::{CoreEvent, LoopSnapshot, LoopStatus, Snapshot, StreamState};
 use crate::core_startup::StartupConfig;
 use crate::datatypes::Range;
 use crate::event::{
-    Event, EventListener, EventManager, EventProducer, EventType, LoopClickedEvent,
-    MIDIChannelPressureInputEvent, MIDIControllerInputEvent, MIDIKeyInputEvent,
-    MIDIPitchBendInputEvent, MIDIProgramChangeInputEvent, SetMidiTuningEvent, StartInterfaceEvent,
-    StartSessionEvent,
+    Event, EventListener, EventManager, EventProducer, EventType,
 };
 use crate::file_codecs::{
     IFileDecoder, IFileEncoder, SndFileDecoder, SndFileEncoder, encode_audio_file,
@@ -429,7 +426,7 @@ struct RuntimeResources {
     config: Rc<RefCell<FloConfig>>,
     events: Option<Arc<EventManager>>,
     event_bridge: Option<Arc<NativeEventBridge>>,
-    event_inbox: Arc<crossbeam_queue::ArrayQueue<Box<dyn Event>>>,
+    event_inbox: Arc<crossbeam_queue::ArrayQueue<Event>>,
     input: Option<SdlIo<Sdl2InputBackend>>,
     video: Option<MainThreadVideo>,
     audio: Option<AudioIO<NativeAudioBackend>>,
@@ -510,12 +507,12 @@ struct PendingSceneSave {
 }
 
 struct RuntimeInboxListener {
-    inbox: Arc<crossbeam_queue::ArrayQueue<Box<dyn Event>>>,
+    inbox: Arc<crossbeam_queue::ArrayQueue<Event>>,
 }
 
 impl EventListener for RuntimeInboxListener {
-    fn receive_event(&mut self, event: Box<dyn Event>, _from: &dyn EventProducer) {
-        let _ = self.inbox.push(event);
+    fn receive_event(&mut self, event: &Event, _from: &dyn EventProducer) {
+        let _ = self.inbox.push(event.clone());
     }
 }
 
@@ -965,7 +962,7 @@ impl NativeRuntime {
         }
     }
 
-    fn dispatch_one_runtime_event(&mut self, event: &dyn Event) -> Result<(), String> {
+    fn dispatch_one_runtime_event(&mut self, event: &Event) -> Result<(), String> {
         let mut r = self.resources.borrow_mut();
         Self::sync_live_system_variables(&mut r);
         let registry = r.config.borrow().binding_registry.clone();
@@ -1002,13 +999,12 @@ impl NativeRuntime {
                 }
             }
         }
-        if event.get_type() == EventType::SetMidiTuning
-            && let Some(tuning) = event.as_any().downcast_ref::<SetMidiTuningEvent>()
+        if let Event::SetMidiTuning { tuning } = event
             && let Some(midi) = r.midi.as_mut()
         {
             // `MidiIO::ReceiveEvent` owns this setting in C++; the synth
             // command emitted by the dispatcher is intentionally separate.
-            midi.bend_tune = tuning.tuning as i32;
+            midi.bend_tune = *tuning as i32;
         }
         // `MidiIO::ReceiveEvent` invokes `EchoEvent` after configuration has
         // handled the original event.  The configuration binding's `echo`
@@ -1025,57 +1021,52 @@ impl NativeRuntime {
         Ok(())
     }
 
-    fn echoable_midi_message(event: &dyn Event) -> Option<MidiMessage> {
-        match event.get_type() {
-            EventType::InputMIDIKey => {
-                let event = event.as_any().downcast_ref::<MIDIKeyInputEvent>()?;
-                Some(if event.down {
-                    MidiMessage::NoteOn {
-                        channel: event.channel,
-                        note: event.notenum,
-                        velocity: event.vel,
-                    }
-                } else {
-                    MidiMessage::NoteOff {
-                        channel: event.channel,
-                        note: event.notenum,
-                        velocity: event.vel,
-                    }
-                })
-            }
-            EventType::InputMIDIController => {
-                let event = event.as_any().downcast_ref::<MIDIControllerInputEvent>()?;
-                Some(MidiMessage::Controller {
-                    channel: event.channel,
-                    control: event.ctrl,
-                    value: event.val,
-                })
-            }
-            EventType::InputMIDIProgramChange => {
-                let event = event
-                    .as_any()
-                    .downcast_ref::<MIDIProgramChangeInputEvent>()?;
-                Some(MidiMessage::ProgramChange {
-                    channel: event.channel,
-                    program: event.val,
-                })
-            }
-            EventType::InputMIDIChannelPressure => {
-                let event = event
-                    .as_any()
-                    .downcast_ref::<MIDIChannelPressureInputEvent>()?;
-                Some(MidiMessage::ChannelPressure {
-                    channel: event.channel,
-                    value: event.val,
-                })
-            }
-            EventType::InputMIDIPitchBend => {
-                let event = event.as_any().downcast_ref::<MIDIPitchBendInputEvent>()?;
-                Some(MidiMessage::PitchBend {
-                    channel: event.channel,
-                    value: u16::try_from(event.val).ok()?,
-                })
-            }
+    fn echoable_midi_message(event: &Event) -> Option<MidiMessage> {
+        match event {
+            Event::MIDIKeyInput {
+                down,
+                channel,
+                notenum,
+                vel,
+                ..
+            } => Some(if *down {
+                MidiMessage::NoteOn {
+                    channel: *channel,
+                    note: *notenum,
+                    velocity: *vel,
+                }
+            } else {
+                MidiMessage::NoteOff {
+                    channel: *channel,
+                    note: *notenum,
+                    velocity: *vel,
+                }
+            }),
+            Event::MIDIControllerInput {
+                channel, ctrl, val, ..
+            } => Some(MidiMessage::Controller {
+                channel: *channel,
+                control: *ctrl,
+                value: *val,
+            }),
+            Event::MIDIProgramChangeInput {
+                channel, val, ..
+            } => Some(MidiMessage::ProgramChange {
+                channel: *channel,
+                program: *val,
+            }),
+            Event::MIDIChannelPressureInput {
+                channel, val, ..
+            } => Some(MidiMessage::ChannelPressure {
+                channel: *channel,
+                value: *val,
+            }),
+            Event::MIDIPitchBendInput {
+                channel, val, ..
+            } => Some(MidiMessage::PitchBend {
+                channel: *channel,
+                value: u16::try_from(*val).ok()?,
+            }),
             _ => None,
         }
     }
@@ -3128,7 +3119,7 @@ impl NativeComponentAdapter for NativeRuntime {
     fn start_session(&mut self) -> Result<(), String> {
         // `Fweelin::go` first broadcasts StartSession.  Its core XML binding
         // selects the configured initial switchable interface.
-        self.dispatch_one_runtime_event(&StartSessionEvent::new())
+        self.dispatch_one_runtime_event(&Event::StartSession)
     }
     fn start_interfaces(&mut self) -> Result<(), String> {
         let interface_ids = {
@@ -3148,7 +3139,7 @@ impl NativeComponentAdapter for NativeRuntime {
         // event loop. These bindings initialise Mercury/controller variables
         // and issue `video-show-loop` requests for XML layouts.
         for interface_id in interface_ids {
-            self.dispatch_one_runtime_event(&StartInterfaceEvent::new(interface_id))?;
+            self.dispatch_one_runtime_event(&Event::StartInterface { interfaceid: interface_id })?;
         }
         if self.resources.borrow().controls.is_none() {
             return Err("native interfaces are not fully started".into());
@@ -3174,7 +3165,7 @@ impl NativeComponentAdapter for NativeRuntime {
                 // loop pool) must not tear down the entire application. The
                 // historical event graph treated these as a rejected action;
                 // retain the process and leave a diagnostic for the operator.
-                if let Err(error) = self.dispatch_one_runtime_event(event.as_ref()) {
+                if let Err(error) = self.dispatch_one_runtime_event(&event) {
                     eprintln!("FreeWheeling: rejected {:?}: {error}", event.get_type());
                 }
             }
@@ -3425,9 +3416,12 @@ impl NativeComponentAdapter for NativeRuntime {
                             }
                             if let Some((down, button, loopid)) = loop_click {
                                 manager
-                                    .try_post_event(Box::new(LoopClickedEvent::new(
-                                        down, button, loopid, true,
-                                    )))
+                                    .try_post_event(Event::LoopClicked {
+                                        down,
+                                        button,
+                                        loopid,
+                                        in_layout: true,
+                                    })
                                     .map_err(|_| "event queue is full".to_string())?;
                             }
                             continue;
@@ -3669,7 +3663,14 @@ mod tests {
 
     #[test]
     fn routed_midi_inputs_convert_to_their_external_echo_messages() {
-        let note = MIDIKeyInputEvent::with_route(1, 2, 60, 99, true, false);
+        let note = Event::MIDIKeyInput {
+            outport: 1,
+            channel: 2,
+            notenum: 60,
+            vel: 99,
+            down: true,
+            echo: false,
+        };
         assert_eq!(
             NativeRuntime::echoable_midi_message(&note),
             Some(MidiMessage::NoteOn {
@@ -3678,7 +3679,12 @@ mod tests {
                 velocity: 99,
             })
         );
-        let program = MIDIProgramChangeInputEvent::new(1, 3, 42, false);
+        let program = Event::MIDIProgramChangeInput {
+            outport: 1,
+            channel: 3,
+            val: 42,
+            echo: false,
+        };
         assert_eq!(
             NativeRuntime::echoable_midi_message(&program),
             Some(MidiMessage::ProgramChange {
@@ -3686,7 +3692,12 @@ mod tests {
                 program: 42,
             })
         );
-        let pressure = MIDIChannelPressureInputEvent::new(1, 4, 55, false);
+        let pressure = Event::MIDIChannelPressureInput {
+            outport: 1,
+            channel: 4,
+            val: 55,
+            echo: false,
+        };
         assert_eq!(
             NativeRuntime::echoable_midi_message(&pressure),
             Some(MidiMessage::ChannelPressure {
@@ -3694,7 +3705,12 @@ mod tests {
                 value: 55,
             })
         );
-        let bend = MIDIPitchBendInputEvent::with_route(1, 5, 0x1234, false);
+        let bend = Event::MIDIPitchBendInput {
+            outport: 1,
+            channel: 5,
+            val: 0x1234,
+            echo: false,
+        };
         assert_eq!(
             NativeRuntime::echoable_midi_message(&bend),
             Some(MidiMessage::PitchBend {

@@ -1,48 +1,58 @@
 //! Bounded translation from native SDL/MIDI callbacks into FreeWheeling events.
 
 use crate::core::CoreEvent;
-use crate::event::{
-    Event, EventManager, JoystickButtonInputEvent, KeyInputEvent, MIDIActiveSensingInputEvent,
-    MIDIChannelPressureInputEvent, MIDIClockInputEvent, MIDIControllerInputEvent,
-    MIDIKeyInputEvent, MIDIPitchBendInputEvent, MIDIPolyphonicPressureInputEvent,
-    MIDIProgramChangeInputEvent, MIDIResetInputEvent, MIDISongPositionInputEvent,
-    MIDISongSelectInputEvent, MIDIStartStopInputEvent, MIDISystemExclusiveInputEvent,
-    MIDITimeCodeQuarterFrameInputEvent, MIDITuneRequestInputEvent, MouseButtonInputEvent,
-    MouseMotionInputEvent,
-};
+use crate::event::{Event, EventManager};
 use crate::midiio::{MidiEventSink, MidiMessage, MidiPortMessage};
 use crate::sdlio::InputEvent;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 
-pub fn input_event(event: InputEvent) -> Result<Box<dyn Event>, CoreEvent> {
+pub fn input_event(event: InputEvent) -> Result<Event, CoreEvent> {
     match event {
         InputEvent::Quit => Err(CoreEvent::ExitSession),
         InputEvent::JoystickButton {
             joystick,
             button,
             down,
-        } => Ok(Box::new(JoystickButtonInputEvent::new(
-            down, button, joystick,
-        ))),
-        InputEvent::MouseMotion { x, y } => Ok(Box::new(MouseMotionInputEvent::new(x, y))),
-        InputEvent::MouseButton { button, x, y, down } => {
-            Ok(Box::new(MouseButtonInputEvent::new(down, button, x, y)))
-        }
+        } => Ok(Event::JoystickButtonInput {
+            down,
+            button,
+            joystick,
+        }),
+        InputEvent::MouseMotion { x, y } => Ok(Event::MouseMotionInput { x, y }),
+        InputEvent::MouseButton {
+            button,
+            x,
+            y,
+            down,
+        } => Ok(Event::MouseButtonInput {
+            down,
+            button,
+            x,
+            y,
+        }),
         InputEvent::Key {
             down,
             keysym,
             unicode,
-        } => Ok(Box::new(KeyInputEvent::new(down, keysym, unicode))),
+        } => Ok(Event::KeyInput {
+            down,
+            keysym,
+            unicode,
+        }),
         // The legacy event API has room for one Unicode scalar only. Keep
         // this adapter for existing callers; new integration should use
         // `text_input_events` so no committed text is discarded.
-        InputEvent::Text(text) => Ok(Box::new(KeyInputEvent::new(
-            true,
-            text.chars().next().map_or(0, |ch| ch as i32),
-            text.chars().next().map_or(0, |ch| ch as i32),
-        ))),
+        InputEvent::Text(text) => {
+            let keysym = text.chars().next().map_or(0, |ch| ch as i32);
+            let unicode = text.chars().next().map_or(0, |ch| ch as i32);
+            Ok(Event::KeyInput {
+                down: true,
+                keysym,
+                unicode,
+            })
+        }
     }
 }
 
@@ -51,7 +61,7 @@ pub fn input_event(event: InputEvent) -> Result<Box<dyn Event>, CoreEvent> {
 /// SDL text input is a UTF-8 payload and may contain more than one Unicode
 /// scalar, so it must be expanded before posting. Other input kinds retain
 /// the legacy one-input/one-event behavior.
-pub fn input_events(event: InputEvent) -> Result<Vec<Box<dyn Event>>, CoreEvent> {
+pub fn input_events(event: InputEvent) -> Result<Vec<Event>, CoreEvent> {
     match event {
         InputEvent::Text(text) => Ok(text_input_events(text)),
         event => input_event(event).map(|event| vec![event]),
@@ -60,16 +70,19 @@ pub fn input_events(event: InputEvent) -> Result<Vec<Box<dyn Event>>, CoreEvent>
 
 /// Expand committed SDL text into the legacy key-event stream. This is the
 /// bridge boundary until the native event model gains a text payload.
-pub fn text_input_events(text: String) -> Vec<Box<dyn Event>> {
+pub fn text_input_events(text: String) -> Vec<Event> {
     text.chars()
         .map(|ch| {
             let unicode = ch as i32;
-            Box::new(KeyInputEvent::new(true, unicode, unicode)) as Box<dyn Event>
+            Event::KeyInput {
+                down: true,
+                keysym: unicode,
+                unicode,
+            }
         })
         .collect()
 }
-
-pub fn midi_event(event: MidiPortMessage) -> Option<Box<dyn Event>> {
+pub fn midi_event(event: MidiPortMessage) -> Option<Event> {
     // C++ MIDI input events default to configured echo port 1.  The physical
     // input-port index is not an output route (and C++ treats outport as
     // one-based), so forwarding the zero-based capture port here previously
@@ -80,58 +93,98 @@ pub fn midi_event(event: MidiPortMessage) -> Option<Box<dyn Event>> {
             channel,
             note,
             velocity,
-        } => Some(Box::new(MIDIKeyInputEvent::new(
-            channel, note, velocity, true,
-        ))),
+        } => Some(Event::MIDIKeyInput {
+            outport,
+            channel,
+            notenum: note,
+            vel: velocity,
+            down: true,
+            echo: false,
+        }),
         MidiMessage::NoteOff {
             channel,
             note,
             velocity,
-        } => Some(Box::new(MIDIKeyInputEvent::new(
-            channel, note, velocity, false,
-        ))),
+        } => Some(Event::MIDIKeyInput {
+            outport,
+            channel,
+            notenum: note,
+            vel: velocity,
+            down: false,
+            echo: false,
+        }),
         MidiMessage::Controller {
             channel,
             control,
             value,
-        } => Some(Box::new(MIDIControllerInputEvent::new(
-            channel, control, value,
-        ))),
-        MidiMessage::ProgramChange { channel, program } => Some(Box::new(
-            MIDIProgramChangeInputEvent::new(outport, channel, program, false),
-        )),
-        MidiMessage::ChannelPressure { channel, value } => Some(Box::new(
-            MIDIChannelPressureInputEvent::new(outport, channel, value, false),
-        )),
-        MidiMessage::PitchBend { channel, value } => Some(Box::new(MIDIPitchBendInputEvent::new(
+        } => Some(Event::MIDIControllerInput {
+            outport,
             channel,
-            i32::from(value),
-        ))),
-        MidiMessage::Clock => Some(Box::new(MIDIClockInputEvent::new())),
-        MidiMessage::Start | MidiMessage::Continue => {
-            Some(Box::new(MIDIStartStopInputEvent::new(true)))
+            ctrl: control,
+            val: value,
+            echo: false,
+        }),
+        MidiMessage::ProgramChange { channel, program } => {
+            Some(Event::MIDIProgramChangeInput {
+                outport,
+                channel,
+                val: program,
+                echo: false,
+            })
         }
-        MidiMessage::Stop => Some(Box::new(MIDIStartStopInputEvent::new(false))),
+        MidiMessage::ChannelPressure { channel, value } => {
+            Some(Event::MIDIChannelPressureInput {
+                outport,
+                channel,
+                val: value,
+                echo: false,
+            })
+        }
+        MidiMessage::PitchBend { channel, value } => Some(Event::MIDIPitchBendInput {
+            outport,
+            channel,
+            val: i32::from(value),
+            echo: false,
+        }),
+        MidiMessage::Clock => Some(Event::MIDIClockInput { outport }),
+        MidiMessage::Start | MidiMessage::Continue => {
+            Some(Event::MIDIStartStopInput {
+                outport,
+                start: true,
+            })
+        }
+        MidiMessage::Stop => Some(Event::MIDIStartStopInput {
+            outport,
+            start: false,
+        }),
         MidiMessage::PolyphonicPressure {
             channel,
             note,
             value,
-        } => Some(Box::new(MIDIPolyphonicPressureInputEvent::new(
-            channel, note, value,
-        ))),
+        } => Some(Event::MIDIPolyphonicPressureInput {
+            channel,
+            notenum: note,
+            val: value,
+        }),
         MidiMessage::SystemExclusive(bytes) => {
-            Some(Box::new(MIDISystemExclusiveInputEvent::new(bytes)))
+            Some(Event::MIDISystemExclusiveInput { bytes })
         }
-        MidiMessage::TimeCodeQuarterFrame(value) => Some(Box::new(
-            MIDITimeCodeQuarterFrameInputEvent::new(u16::from(value)),
-        )),
-        MidiMessage::SongPosition(value) => Some(Box::new(MIDISongPositionInputEvent::new(value))),
+        MidiMessage::TimeCodeQuarterFrame(value) => {
+            Some(Event::MIDITimeCodeQuarterFrameInput {
+                value: u16::from(value),
+            })
+        }
+        MidiMessage::SongPosition(value) => {
+            Some(Event::MIDISongPositionInput { value })
+        }
         MidiMessage::SongSelect(value) => {
-            Some(Box::new(MIDISongSelectInputEvent::new(u16::from(value))))
+            Some(Event::MIDISongSelectInput {
+                value: u16::from(value),
+            })
         }
-        MidiMessage::TuneRequest => Some(Box::new(MIDITuneRequestInputEvent::new())),
-        MidiMessage::ActiveSensing => Some(Box::new(MIDIActiveSensingInputEvent::new())),
-        MidiMessage::Reset => Some(Box::new(MIDIResetInputEvent::new())),
+        MidiMessage::TuneRequest => Some(Event::MIDITuneRequestInput),
+        MidiMessage::ActiveSensing => Some(Event::MIDIActiveSensingInput),
+        MidiMessage::Reset => Some(Event::MIDIResetInput),
     }
 }
 
@@ -244,13 +297,10 @@ mod tests {
             },
         })
         .unwrap();
-        assert_eq!(
-            bend.as_any()
-                .downcast_ref::<MIDIPitchBendInputEvent>()
-                .unwrap()
-                .val,
-            0
-        );
+        let Event::MIDIPitchBendInput { val, .. } = &bend else {
+            panic!("expected MIDIPitchBendInput");
+        };
+        assert_eq!(*val, 0);
 
         let cases = [
             (
@@ -293,15 +343,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(sysex.get_type(), EventType::InputMIDISystemExclusive);
-        assert_eq!(
-            sysex
-                .as_any()
-                .downcast_ref::<MIDISystemExclusiveInputEvent>()
-                .unwrap()
-                .bytes,
-            bytes
-        );
-    }
+        let Event::MIDISystemExclusiveInput { bytes: sysex_bytes } = &sysex else {
+            panic!("expected MIDISystemExclusiveInput");
+        };
+        assert_eq!(*sysex_bytes, bytes);
+}
 
     #[test]
     fn expands_text_without_dropping_scalars() {
@@ -310,16 +356,14 @@ mod tests {
         let unicode: Vec<i32> = events
             .iter()
             .map(|event| {
-                event
-                    .as_any()
-                    .downcast_ref::<KeyInputEvent>()
-                    .unwrap()
-                    .unicode
+                let Event::KeyInput { unicode, .. } = event else {
+                    panic!("expected KeyInput");
+                };
+                *unicode
             })
             .collect();
         assert_eq!(unicode, vec!['a' as i32, '🙂' as i32, 'é' as i32]);
     }
-
     #[test]
     fn expands_empty_and_supplementary_text_deterministically() {
         assert!(
@@ -332,8 +376,10 @@ mod tests {
         let keys: Vec<(bool, i32, i32)> = events
             .iter()
             .map(|event| {
-                let key = event.as_any().downcast_ref::<KeyInputEvent>().unwrap();
-                (key.down, key.keysym, key.unicode)
+                let Event::KeyInput { down, keysym, unicode } = event else {
+                    panic!("expected KeyInput");
+                };
+                (*down, *keysym, *unicode)
             })
             .collect();
         assert_eq!(
@@ -344,7 +390,6 @@ mod tests {
             ]
         );
     }
-
     #[test]
     fn preserves_legacy_key_mapping_through_input_events() {
         let event = input_events(InputEvent::Key {
@@ -355,7 +400,9 @@ mod tests {
         .unwrap()
         .pop()
         .unwrap();
-        let key = event.as_any().downcast_ref::<KeyInputEvent>().unwrap();
-        assert_eq!((key.down, key.keysym, key.unicode), (false, 304, 0));
+        let Event::KeyInput { down, keysym, unicode } = event else {
+            panic!("expected KeyInput");
+        };
+        assert_eq!((down, keysym, unicode), (false, 304, 0));
     }
 }
