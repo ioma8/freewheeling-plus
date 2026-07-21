@@ -6,6 +6,7 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn macos_diagnostic_runner_is_manual_and_non_attesting() {
     let script = fs::read_to_string(root().join("scripts/run_macos_diagnostics.sh")).unwrap();
@@ -134,6 +135,7 @@ fn performance_result_validator_enforces_realtime_acceptance() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn bundle_verifier_requires_executable_resources_license_and_microphone_text() {
     let directory = temporary("bundle");

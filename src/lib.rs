@@ -28,9 +28,11 @@ pub mod linux_native;
 pub mod jack;
 pub mod logo;
 pub mod looplibrary;
+#[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "macos")]
 pub mod macos_audio_unit;
+#[cfg(target_os = "macos")]
 pub mod macos_sdlmain;
 pub mod mem;
 pub mod midiio;
