@@ -36,7 +36,7 @@ use crate::file_codecs::{
 use crate::file_streamer::AudioStreamer;
 use crate::fluidsynth::{FluidLiteBackend, FluidLiteConfig, FluidSynthBackend};
 use crate::mem::MemoryManager;
-use crate::midiio::{MidiIo, MidiMessage};
+use crate::midiio::{MidiEventSink, MidiIo, MidiMessage};
 use crate::midiio_platform::MidirMidiBackend;
 use crate::native_dsp_graph::{
     DspSettings, LoopMode, LoopTransferMetadata, PcmTransferHandle, RuntimeAudioProcessor,
@@ -3072,13 +3072,19 @@ impl NativeStartupAdapter for NativeRuntime {
             StartupPhase::InputAndMidi => {
                 let manager = Arc::clone(r.events.as_ref().ok_or("event manager missing")?);
                 let bridge = Arc::new(NativeEventBridge::new(manager, 1024));
-                let mut midi = MidiIo::new(MidirMidiBackend::new(None));
-                midi.set_sink(bridge.clone());
-                let outputs = r.config.borrow().midi_outputs;
-                midi.activate(MIDI_INPUTS, outputs)?;
+                // When using the JACK audio backend, MIDI arrives through
+                // the audio callback (JACK MIDI ports → ring buffer), so we
+                // skip the standalone Midir backend to avoid duplicate paths.
+                let use_jack_midi = r.audio.as_ref().map_or(false, |a| a.backend().is_jack());
+                if !use_jack_midi {
+                    let mut midi = MidiIo::new(MidirMidiBackend::new(None));
+                    midi.set_sink(bridge.clone());
+                    let outputs = r.config.borrow().midi_outputs;
+                    midi.activate(MIDI_INPUTS, outputs)?;
+                    r.midi = Some(midi);
+                }
                 r.event_bridge = Some(bridge);
                 r.input.as_mut().ok_or("SDL input missing")?.activate();
-                r.midi = Some(midi);
             }
             StartupPhase::OscAndMixer => {
                 let osc = OscClient::new(
@@ -3180,6 +3186,21 @@ impl NativeComponentAdapter for NativeRuntime {
     }
     fn next_event(&mut self) -> Result<Option<CoreEvent>, String> {
         loop {
+
+            // Poll JACK MIDI when the audio backend provides it (no Midir).
+            // Clone the bridge Arc before entering the mutable borrow scope.
+            let jack_bridge = if self.resources.borrow().midi.is_none() {
+                self.resources.borrow().event_bridge.clone()
+            } else {
+                None
+            };
+            if let Some(bridge) = jack_bridge {
+                if let Some(audio) = self.resources.borrow_mut().audio.as_mut() {
+                    while let Some(msg) = audio.backend_mut().receive_midi() {
+                        bridge.midi_event(msg);
+                    }
+                }
+            }
             if crate::signal::shutdown_requested() != 0 {
                 return Ok(Some(CoreEvent::ExitSession));
             }

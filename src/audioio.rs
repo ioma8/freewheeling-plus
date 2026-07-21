@@ -152,6 +152,19 @@ pub enum AnyAudioBackend {
     AudioUnit(crate::macos_audio_unit::MacosAudioUnitBackend),
 }
 
+impl AnyAudioBackend {
+    /// Returns `true` when this backend wraps the JACK Audio Connection Kit.
+    pub fn is_jack(&self) -> bool {
+        match self {
+            AnyAudioBackend::Cpal(_) => false,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            AnyAudioBackend::Jack(_) => true,
+            #[cfg(target_os = "macos")]
+            AnyAudioBackend::AudioUnit(_) => false,
+        }
+    }
+}
+
 impl AudioBackend for AnyAudioBackend {
     fn open(&mut self, client_name: &str) -> Result<BackendInfo, String> {
         match self {
