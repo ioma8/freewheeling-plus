@@ -62,7 +62,7 @@ impl CfgToken {
         }
     }
 
-    pub fn evaluate(&self, cfg: &FloConfig, ev: Option<&dyn Event>) -> UserVariable {
+    pub fn evaluate(&self, cfg: &FloConfig, ev: Option<&Event>) -> UserVariable {
         match self.cvt {
             CfgTokenType::None => UserVariable::new(),
             CfgTokenType::EventParameter => {
@@ -108,7 +108,7 @@ impl ParsedExpression {
         self.evaluate_with_event(cfg, None)
     }
 
-    pub fn evaluate_with_event(&self, cfg: &FloConfig, ev: Option<&dyn Event>) -> UserVariable {
+    pub fn evaluate_with_event(&self, cfg: &FloConfig, ev: Option<&Event>) -> UserVariable {
         let mut cur = self.start.evaluate(cfg, ev);
         for op in &self.ops {
             let tmp = op.operand.evaluate(cfg, ev);
@@ -1624,242 +1624,127 @@ impl FloConfig {
         set_user_variable_from_string(var, value)
     }
 
-    pub fn read_event_parameter(&self, ev: &dyn Event, param: EventParameter) -> UserVariable {
+    pub fn read_event_parameter(&self, ev: &Event, param: EventParameter) -> UserVariable {
         let mut value = UserVariable::new();
-        match ev.get_type() {
-            crate::event::EventType::InputKey => {
-                if let Some(key) = ev.as_any().downcast_ref::<crate::event::KeyInputEvent>() {
-                    match param.name {
-                        "keydown" => value.set_char(if key.down { 1 } else { 0 }),
-                        "key" => value.set_int(key.keysym),
-                        "unicode" => value.set_int(key.unicode),
-                        _ => {}
-                    }
+        match ev {
+            Event::KeyInput { down, keysym, unicode } => match param.name {
+                "keydown" => value.set_char(if *down { 1 } else { 0 }),
+                "key" => value.set_int(*keysym),
+                "unicode" => value.set_int(*unicode),
+                _ => {}
+            },
+            Event::GoSub { sub, param1, param2, param3 } => match param.name {
+                "sub" => value.set_int(*sub),
+                "param1" => value.set_float(*param1),
+                "param2" => value.set_float(*param2),
+                "param3" => value.set_float(*param3),
+                _ => {}
+            },
+            Event::LoopClicked { down, button, loopid, in_layout } => match param.name {
+                "down" => value.set_char(if *down { 1 } else { 0 }),
+                "button" => value.set_int(*button),
+                "loopid" => value.set_int(*loopid),
+                "in" => value.set_char(if *in_layout { 1 } else { 0 }),
+                _ => {}
+            },
+            Event::JoystickButtonInput { down, button, joystick } => match param.name {
+                "down" => value.set_char(if *down { 1 } else { 0 }),
+                "button" => value.set_int(*button),
+                "joystick" => value.set_int(*joystick),
+                _ => {}
+            },
+            Event::MouseButtonInput { down, button, x, y } => match param.name {
+                "down" => value.set_char(if *down { 1 } else { 0 }),
+                "button" => value.set_int(*button),
+                "x" => value.set_int(*x),
+                "y" => value.set_int(*y),
+                _ => {}
+            },
+            Event::MouseMotionInput { x, y } => match param.name {
+                "x" => value.set_int(*x),
+                "y" => value.set_int(*y),
+                _ => {}
+            },
+            Event::MIDIKeyInput { outport, channel, notenum, vel, down, echo } => match param.name {
+                "outport" => value.set_int(*outport),
+                "keydown" => value.set_char(if *down { 1 } else { 0 }),
+                "midichannel" => value.set_int(*channel as i32),
+                "notenum" => value.set_int(*notenum as i32),
+                "velocity" => value.set_int(*vel as i32),
+                "routethroughpatch" => value.set_char(if *echo { 1 } else { 0 }),
+                _ => {}
+            },
+            Event::MIDIControllerInput { outport, channel, ctrl, val, echo } => match param.name {
+                "outport" => value.set_int(*outport),
+                "midichannel" => value.set_int(*channel as i32),
+                "controlnum" => value.set_int(*ctrl as i32),
+                "controlval" => value.set_int(*val as i32),
+                "routethroughpatch" => value.set_char(if *echo { 1 } else { 0 }),
+                _ => {}
+            },
+            Event::MIDIProgramChangeInput { outport, channel, val, echo } => match param.name {
+                "outport" => value.set_int(*outport),
+                "midichannel" => value.set_int(*channel as i32),
+                "programval" => value.set_int(*val as i32),
+                "routethroughpatch" => value.set_char(if *echo { 1 } else { 0 }),
+                _ => {}
+            },
+            Event::MIDIChannelPressureInput { outport, channel, val, echo } => match param.name {
+                "outport" => value.set_int(*outport),
+                "midichannel" => value.set_int(*channel as i32),
+                "pressureval" => value.set_int(*val as i32),
+                "routethroughpatch" => value.set_char(if *echo { 1 } else { 0 }),
+                _ => {}
+            },
+            Event::MIDIPitchBendInput { outport, channel, val, echo } => match param.name {
+                "outport" => value.set_int(*outport),
+                "midichannel" => value.set_int(*channel as i32),
+                "pitchval" => value.set_int(*val),
+                "routethroughpatch" => value.set_char(if *echo { 1 } else { 0 }),
+                _ => {}
+            },
+            Event::MIDIClockInput { outport } => {
+                if param.name == "outport" {
+                    value.set_int(*outport);
                 }
             }
-            crate::event::EventType::GoSub => {
-                if let Some(sub) = ev.as_any().downcast_ref::<crate::event::GoSubEvent>() {
-                    match param.name {
-                        "sub" => value.set_int(sub.sub),
-                        "param1" => value.set_float(sub.param1),
-                        "param2" => value.set_float(sub.param2),
-                        "param3" => value.set_float(sub.param3),
-                        _ => {}
-                    }
+            Event::MIDIStartStopInput { outport, start } => match param.name {
+                "outport" => value.set_int(*outport),
+                "start" => value.set_char(if *start { 1 } else { 0 }),
+                _ => {}
+            },
+            Event::BrowserMoveToItem { browserid, adjust, jump_adjust } => match param.name {
+                "browserid" => value.set_int(*browserid),
+                "adjust" => value.set_int(*adjust),
+                "jumpadjust" => value.set_int(*jump_adjust),
+                _ => {}
+            },
+            Event::BrowserMoveToItemAbsolute { browserid, index } => match param.name {
+                "browserid" => value.set_int(*browserid),
+                "idx" => value.set_int(*index),
+                _ => {}
+            },
+            Event::StartInterface { interfaceid } => {
+                if param.name == crate::event::INTERFACEID {
+                    value.set_int(*interfaceid);
                 }
             }
-            crate::event::EventType::LoopClicked => {
-                if let Some(loop_click) =
-                    ev.as_any().downcast_ref::<crate::event::LoopClickedEvent>()
-                {
-                    match param.name {
-                        "down" => value.set_char(if loop_click.down { 1 } else { 0 }),
-                        "button" => value.set_int(loop_click.button),
-                        "loopid" => value.set_int(loop_click.loopid),
-                        "in" => value.set_char(if loop_click.in_layout { 1 } else { 0 }),
-                        _ => {}
-                    }
-                }
-            }
-            crate::event::EventType::InputJoystickButton => {
-                if let Some(joy) = ev
-                    .as_any()
-                    .downcast_ref::<crate::event::JoystickButtonInputEvent>()
-                {
-                    match param.name {
-                        "down" => value.set_char(if joy.down { 1 } else { 0 }),
-                        "button" => value.set_int(joy.button),
-                        "joystick" => value.set_int(joy.joystick),
-                        _ => {}
-                    }
-                }
-            }
-            crate::event::EventType::InputMouseButton => {
-                if let Some(mouse) = ev
-                    .as_any()
-                    .downcast_ref::<crate::event::MouseButtonInputEvent>()
-                {
-                    match param.name {
-                        "down" => value.set_char(if mouse.down { 1 } else { 0 }),
-                        "button" => value.set_int(mouse.button),
-                        "x" => value.set_int(mouse.x),
-                        "y" => value.set_int(mouse.y),
-                        _ => {}
-                    }
-                }
-            }
-            crate::event::EventType::InputMouseMotion => {
-                if let Some(mouse) = ev
-                    .as_any()
-                    .downcast_ref::<crate::event::MouseMotionInputEvent>()
-                {
-                    match param.name {
-                        "x" => value.set_int(mouse.x),
-                        "y" => value.set_int(mouse.y),
-                        _ => {}
-                    }
-                }
-            }
-            crate::event::EventType::InputMIDIKey => {
-                if let Some(midi) = ev
-                    .as_any()
-                    .downcast_ref::<crate::event::MIDIKeyInputEvent>()
-                {
-                    match param.name {
-                        "outport" => value.set_int(midi.outport),
-                        "keydown" => value.set_char(if midi.down { 1 } else { 0 }),
-                        "midichannel" => value.set_int(midi.channel as i32),
-                        "notenum" => value.set_int(midi.notenum as i32),
-                        "velocity" => value.set_int(midi.vel as i32),
-                        "routethroughpatch" => value.set_char(if midi.echo { 1 } else { 0 }),
-                        _ => {}
-                    }
-                }
-            }
-            crate::event::EventType::InputMIDIController => {
-                if let Some(midi) = ev
-                    .as_any()
-                    .downcast_ref::<crate::event::MIDIControllerInputEvent>()
-                {
-                    match param.name {
-                        "outport" => value.set_int(midi.outport),
-                        "midichannel" => value.set_int(midi.channel as i32),
-                        "controlnum" => value.set_int(midi.ctrl as i32),
-                        "controlval" => value.set_int(midi.val as i32),
-                        "routethroughpatch" => value.set_char(if midi.echo { 1 } else { 0 }),
-                        _ => {}
-                    }
-                }
-            }
-            crate::event::EventType::InputMIDIProgramChange => {
-                if let Some(midi) = ev
-                    .as_any()
-                    .downcast_ref::<crate::event::MIDIProgramChangeInputEvent>()
-                {
-                    match param.name {
-                        "outport" => value.set_int(midi.outport),
-                        "midichannel" => value.set_int(midi.channel as i32),
-                        "programval" => value.set_int(midi.val as i32),
-                        "routethroughpatch" => value.set_char(if midi.echo { 1 } else { 0 }),
-                        _ => {}
-                    }
-                }
-            }
-            crate::event::EventType::InputMIDIChannelPressure => {
-                if let Some(midi) = ev
-                    .as_any()
-                    .downcast_ref::<crate::event::MIDIChannelPressureInputEvent>()
-                {
-                    match param.name {
-                        "outport" => value.set_int(midi.outport),
-                        "midichannel" => value.set_int(midi.channel as i32),
-                        "pressureval" => value.set_int(midi.val as i32),
-                        "routethroughpatch" => value.set_char(if midi.echo { 1 } else { 0 }),
-                        _ => {}
-                    }
-                }
-            }
-            crate::event::EventType::InputMIDIPitchBend => {
-                if let Some(midi) = ev
-                    .as_any()
-                    .downcast_ref::<crate::event::MIDIPitchBendInputEvent>()
-                {
-                    match param.name {
-                        "outport" => value.set_int(midi.outport),
-                        "midichannel" => value.set_int(midi.channel as i32),
-                        "pitchval" => value.set_int(midi.val),
-                        "routethroughpatch" => value.set_char(if midi.echo { 1 } else { 0 }),
-                        _ => {}
-                    }
-                }
-            }
-            crate::event::EventType::InputMIDIClock => {
-                if let Some(midi) = ev
-                    .as_any()
-                    .downcast_ref::<crate::event::MIDIClockInputEvent>()
-                    && param.name == "outport"
-                {
-                    value.set_int(midi.outport);
-                }
-            }
-            crate::event::EventType::InputMIDIStartStop => {
-                if let Some(midi) = ev
-                    .as_any()
-                    .downcast_ref::<crate::event::MIDIStartStopInputEvent>()
-                {
-                    match param.name {
-                        "outport" => value.set_int(midi.outport),
-                        "start" => value.set_char(if midi.start { 1 } else { 0 }),
-                        _ => {}
-                    }
-                }
-            }
-            crate::event::EventType::BrowserMoveToItem => {
-                if let Some(browser) = ev
-                    .as_any()
-                    .downcast_ref::<crate::event::BrowserMoveToItemEvent>()
-                {
-                    match param.name {
-                        "browserid" => value.set_int(browser.browserid),
-                        "adjust" => value.set_int(browser.adjust),
-                        "jumpadjust" => value.set_int(browser.jump_adjust),
-                        _ => {}
-                    }
-                }
-            }
-            crate::event::EventType::BrowserMoveToItemAbsolute => {
-                if let Some(browser) = ev
-                    .as_any()
-                    .downcast_ref::<crate::event::BrowserMoveToItemAbsoluteEvent>()
-                {
-                    match param.name {
-                        "browserid" => value.set_int(browser.browserid),
-                        "idx" => value.set_int(browser.index),
-                        _ => {}
-                    }
-                }
-            }
-            crate::event::EventType::StartInterface => {
-                if let Some(start) = ev
-                    .as_any()
-                    .downcast_ref::<crate::event::StartInterfaceEvent>()
-                    && param.name == crate::event::INTERFACEID
-                {
-                    value.set_int(start.interfaceid);
-                }
-            }
-            crate::event::EventType::SlideInVolume => {
-                if let Some(slide) = ev
-                    .as_any()
-                    .downcast_ref::<crate::event::SlideInVolumeEvent>()
-                {
-                    match param.name {
-                        "input" => value.set_int(slide.input),
-                        "slide" => value.set_float(slide.slide),
-                        _ => {}
-                    }
-                }
-            }
-            crate::event::EventType::SetInVolume => {
-                if let Some(set) = ev.as_any().downcast_ref::<crate::event::SetInVolumeEvent>() {
-                    match param.name {
-                        "input" => value.set_int(set.input),
-                        "vol" => value.set_float(set.vol),
-                        "fadervol" => value.set_float(set.fadervol),
-                        _ => {}
-                    }
-                }
-            }
-            crate::event::EventType::TriggerLoop => {
-                if let Some(loop_ev) = ev.as_any().downcast_ref::<crate::event::TriggerLoopEvent>()
-                {
-                    match param.name {
-                        "loopid" => value.set_int(loop_ev.index),
-                        "vol" => value.set_float(loop_ev.vol),
-                        _ => {}
-                    }
-                }
-            }
+            Event::SlideInVolume { input, slide } => match param.name {
+                "input" => value.set_int(*input),
+                "slide" => value.set_float(*slide),
+                _ => {}
+            },
+            Event::SetInVolume { input, vol, fadervol } => match param.name {
+                "input" => value.set_int(*input),
+                "vol" => value.set_float(*vol),
+                "fadervol" => value.set_float(*fadervol),
+                _ => {}
+            },
+            Event::TriggerLoop { index, vol, .. } => match param.name {
+                "loopid" => value.set_int(*index),
+                "vol" => value.set_float(*vol),
+                _ => {}
+            },
             _ => {}
         }
         value
@@ -1892,7 +1777,7 @@ impl FloConfig {
     pub fn parse_token_with_event(
         &self,
         token: &str,
-        reference_event: Option<&dyn Event>,
+        reference_event: Option<&Event>,
         enable_keynames: bool,
     ) -> CfgToken {
         let token = token.trim();
@@ -1965,7 +1850,7 @@ impl FloConfig {
     pub fn parse_expression_with_event(
         &self,
         expr: &str,
-        reference_event: Option<&dyn Event>,
+        reference_event: Option<&Event>,
         enable_keynames: bool,
     ) -> ParsedExpression {
         let operators = ['/', '*', '+', '-'];
@@ -2044,7 +1929,7 @@ impl FloConfig {
         }
     }
 
-    pub fn check_conditions(&self, input: &dyn Event, bind: &EventBinding) -> bool {
+    pub fn check_conditions(&self, input: &Event, bind: &EventBinding) -> bool {
         for cond in &bind.tokenconds {
             let cmp1 = cond.token.evaluate(self, Some(input));
             let cmp2 = cond.exp.evaluate_with_event(self, Some(input));
@@ -2057,7 +1942,7 @@ impl FloConfig {
 
     pub fn set_dynamic_parameters(
         &self,
-        input: &dyn Event,
+        input: &Event,
         bind: &EventBinding,
     ) -> Vec<(String, StoredParameterValue)> {
         let mut out = bind.static_paramsets.clone();
@@ -2081,7 +1966,7 @@ impl FloConfig {
 
     pub fn match_binding<'a>(
         &self,
-        input: &dyn Event,
+        input: &Event,
         bindings: &'a [EventBinding],
     ) -> Option<&'a EventBinding> {
         self.match_binding_index(input, bindings)
@@ -2090,7 +1975,7 @@ impl FloConfig {
 
     pub fn match_binding_index(
         &self,
-        input: &dyn Event,
+        input: &Event,
         bindings: &[EventBinding],
     ) -> Option<usize> {
         let mut prev_cont = false;
@@ -2120,13 +2005,13 @@ impl FloConfig {
         matched
     }
 
-    pub fn first_indexed_param(ev: &dyn Event) -> Option<EventParameter> {
+    pub fn first_indexed_param(ev: &Event) -> Option<EventParameter> {
         (0..ev.get_num_params())
             .filter_map(|idx| ev.get_param(idx))
             .find(|param| param.max_index >= 0)
     }
 
-    pub fn create_indexed_binding_table(&self, ev: &dyn Event) -> IndexedBindingTable {
+    pub fn create_indexed_binding_table(&self, ev: &Event) -> IndexedBindingTable {
         if let Some(param) = Self::first_indexed_param(ev) {
             IndexedBindingTable {
                 indexed_param: Some(param),
@@ -2156,7 +2041,7 @@ impl FloConfig {
         }
     }
 
-    pub fn event_bucket_index(&self, ev: &dyn Event, table: &IndexedBindingTable) -> Option<usize> {
+    pub fn event_bucket_index(&self, ev: &Event, table: &IndexedBindingTable) -> Option<usize> {
         let param = table.indexed_param?;
         let value = self.read_event_parameter(ev, param);
         self.binding_bucket_index(param, &value)
@@ -2175,7 +2060,7 @@ impl FloConfig {
 
     pub fn match_binding_from_table<'a>(
         &self,
-        input: &dyn Event,
+        input: &Event,
         table: &'a IndexedBindingTable,
     ) -> Option<&'a EventBinding> {
         if table.indexed_param.is_none() {
@@ -2195,7 +2080,7 @@ impl FloConfig {
 
     fn resolve_dispatch_from_bucket(
         &self,
-        input: &dyn Event,
+        input: &Event,
         bindings: &[EventBinding],
     ) -> Option<BindingDispatchResult> {
         let first_index = self.match_binding_index(input, bindings)?;
@@ -2215,7 +2100,7 @@ impl FloConfig {
 
     pub fn dispatch_event_bindings(
         &self,
-        input: &dyn Event,
+        input: &Event,
         table: &IndexedBindingTable,
     ) -> BindingDispatchResult {
         if table.indexed_param.is_none() {
@@ -2256,7 +2141,7 @@ impl FloConfig {
 
     pub fn dispatch_registered_event_bindings(
         &self,
-        input: &dyn Event,
+        input: &Event,
         registry: &BindingRegistry,
     ) -> BindingDispatchResult {
         if let Some(table) = registry.table_for(input.get_type()) {
@@ -2275,9 +2160,9 @@ impl FloConfig {
 
     pub fn emit_bound_events(
         &self,
-        input: &dyn Event,
+        input: &Event,
         table: &IndexedBindingTable,
-    ) -> Result<(bool, Vec<Box<dyn Event>>), String> {
+    ) -> Result<(bool, Vec<Event>), String> {
         let dispatch = self.dispatch_event_bindings(input, table);
         let mut out = Vec::with_capacity(dispatch.matched.len());
         for resolved in &dispatch.matched {
@@ -2288,9 +2173,9 @@ impl FloConfig {
 
     pub fn emit_registered_events(
         &self,
-        input: &dyn Event,
+        input: &Event,
         registry: &BindingRegistry,
-    ) -> Result<(bool, Vec<Box<dyn Event>>), String> {
+    ) -> Result<(bool, Vec<Event>), String> {
         if let Some(table) = registry.table_for(input.get_type()) {
             self.emit_bound_events(input, table)
         } else {
@@ -2305,23 +2190,21 @@ impl FloConfig {
     fn instantiate_bound_event(
         &self,
         resolved: &ResolvedBinding,
-    ) -> Result<Box<dyn Event>, String> {
+    ) -> Result<Event, String> {
         let output = resolved
             .binding
             .output_event
             .ok_or_else(|| "Resolved binding is missing output event type".to_string())?;
 
         match output {
-            EventType::StartSession => Ok(Box::new(crate::event::StartSessionEvent::new())),
-            EventType::ExitSession => Ok(Box::new(crate::event::ExitSessionEvent::new())),
+            EventType::StartSession => Ok(Event::StartSession),
+            EventType::ExitSession => Ok(Event::ExitSession),
             EventType::GoSub => {
                 let sub = self.required_int_param(&resolved.parameters, "sub")?;
                 let param1 = self.required_float_param(&resolved.parameters, "param1")?;
                 let param2 = self.required_float_param(&resolved.parameters, "param2")?;
                 let param3 = self.required_float_param(&resolved.parameters, "param3")?;
-                Ok(Box::new(crate::event::GoSubEvent::new(
-                    sub, param1, param2, param3,
-                )))
+                Ok(Event::GoSub { sub, param1, param2, param3 })
             }
             EventType::ALSAMixerControlSet => {
                 let hwid = self.required_int_param(&resolved.parameters, "hwid")?;
@@ -2330,9 +2213,7 @@ impl FloConfig {
                 let val2 = self.required_int_param(&resolved.parameters, "val2")?;
                 let val3 = self.required_int_param(&resolved.parameters, "val3")?;
                 let val4 = self.required_int_param(&resolved.parameters, "val4")?;
-                Ok(Box::new(crate::event::ALSAMixerControlSetEvent::new(
-                    hwid, numid, val1, val2, val3, val4,
-                )))
+                Ok(Event::ALSAMixerControlSet { hwid, numid, val1, val2, val3, val4 })
             }
             EventType::ParamSetGetAbsoluteParamIdx => {
                 let interfaceid = self.required_int_param(&resolved.parameters, INTERFACEID)?;
@@ -2340,431 +2221,317 @@ impl FloConfig {
                 let paramidx = self.required_int_param(&resolved.parameters, "paramidx")?;
                 let absidx_name =
                     self.required_variable_ref_param(&resolved.parameters, "absidx")?;
-                Ok(Box::new(
-                    crate::event::ParamSetGetAbsoluteParamIdxEvent::new(
-                        interfaceid,
-                        displayid,
-                        paramidx,
-                        Some(absidx_name),
-                    ),
-                ))
+                Ok(Event::ParamSetGetAbsoluteParamIdx { interfaceid, displayid, paramidx, absidx_name: Some(absidx_name) })
             }
             EventType::ParamSetGetParam => {
                 let interfaceid = self.required_int_param(&resolved.parameters, INTERFACEID)?;
                 let displayid = self.required_int_param(&resolved.parameters, "displayid")?;
                 let paramidx = self.required_int_param(&resolved.parameters, "paramidx")?;
                 let var_name = self.required_variable_ref_param(&resolved.parameters, "var")?;
-                Ok(Box::new(crate::event::ParamSetGetParamEvent::new(
-                    interfaceid,
-                    displayid,
-                    paramidx,
-                    Some(var_name),
-                )))
+                Ok(Event::ParamSetGetParam { interfaceid, displayid, paramidx, var_name: Some(var_name) })
             }
             EventType::ParamSetSetParam => {
                 let interfaceid = self.required_int_param(&resolved.parameters, INTERFACEID)?;
                 let displayid = self.required_int_param(&resolved.parameters, "displayid")?;
                 let paramidx = self.required_int_param(&resolved.parameters, "paramidx")?;
                 let value = self.required_float_param(&resolved.parameters, "value")?;
-                Ok(Box::new(crate::event::ParamSetSetParamEvent::new(
-                    interfaceid,
-                    displayid,
-                    paramidx,
-                    value,
-                )))
+                Ok(Event::ParamSetSetParam { interfaceid, displayid, paramidx, value })
             }
             EventType::LogFaderVolToLinear => {
                 let var_name = self.required_variable_ref_param(&resolved.parameters, "var")?;
                 let fadervol = self.required_variable_param(&resolved.parameters, "fadervol")?;
                 let scale = self.required_float_param(&resolved.parameters, "scale")?;
-                Ok(Box::new(crate::event::LogFaderVolToLinearEvent::new(
-                    Some(var_name),
-                    fadervol,
-                    scale,
-                )))
+                Ok(Event::LogFaderVolToLinear { var_name: Some(var_name), fadervol, scale })
             }
             EventType::TriggerLoop => {
                 let loopid = self.required_int_param(&resolved.parameters, "loopid")?;
                 let vol = self.required_float_param(&resolved.parameters, "vol")?;
-                Ok(Box::new(crate::event::TriggerLoopEvent::new(loopid, vol)))
+                Ok(Event::TriggerLoop { index: loopid, vol, engage: 0, shot: false, overdub: false })
             }
             EventType::SetInVolume => {
                 let input = self.required_int_param(&resolved.parameters, "input")?;
                 let vol = self.required_float_param(&resolved.parameters, "vol")?;
                 let fadervol = self.required_float_param(&resolved.parameters, "fadervol")?;
-                Ok(Box::new(crate::event::SetInVolumeEvent::new(
-                    input, vol, fadervol,
-                )))
+                Ok(Event::SetInVolume { input, vol, fadervol })
             }
             EventType::SlideInVolume => {
                 let input = self.required_int_param(&resolved.parameters, "input")?;
                 let slide = self.required_float_param(&resolved.parameters, "slide")?;
-                Ok(Box::new(crate::event::SlideInVolumeEvent::new(
-                    input, slide,
-                )))
+                Ok(Event::SlideInVolume { input, slide })
             }
             EventType::StartInterface => {
                 let interfaceid = self.required_int_param(&resolved.parameters, INTERFACEID)?;
-                Ok(Box::new(crate::event::StartInterfaceEvent::new(
-                    interfaceid,
-                )))
+                Ok(Event::StartInterface { interfaceid })
             }
             EventType::VideoSwitchInterface => {
                 let interfaceid = self.required_int_param(&resolved.parameters, INTERFACEID)?;
-                Ok(Box::new(crate::event::VideoSwitchInterfaceEvent::new(
-                    interfaceid,
-                )))
+                Ok(Event::VideoSwitchInterface { interfaceid })
             }
             EventType::VideoShowDisplay => {
                 let interfaceid = self.required_int_param(&resolved.parameters, INTERFACEID)?;
                 let displayid = self.required_int_param(&resolved.parameters, "displayid")?;
                 let show = self.required_bool_param(&resolved.parameters, "show")?;
-                Ok(Box::new(crate::event::VideoShowDisplayEvent::new(
-                    interfaceid,
-                    displayid,
-                    show,
-                )))
+                Ok(Event::VideoShowDisplay { interfaceid, displayid, show })
             }
             EventType::VideoShowLayout => {
                 let interfaceid = self.required_int_param(&resolved.parameters, INTERFACEID)?;
                 let layoutid = self.required_int_param(&resolved.parameters, "layoutid")?;
                 let show = self.required_bool_param(&resolved.parameters, "show")?;
                 let hideothers = self.required_bool_param(&resolved.parameters, "hideothers")?;
-                Ok(Box::new(crate::event::VideoShowLayoutEvent::new(
-                    interfaceid,
-                    layoutid,
-                    show,
-                    hideothers,
-                )))
+                Ok(Event::VideoShowLayout { interfaceid, layoutid, show, hideothers })
             }
             EventType::VideoShowHelp => {
                 let page = self.required_int_param(&resolved.parameters, "page")?;
-                Ok(Box::new(crate::event::VideoShowHelpEvent::new(page)))
+                Ok(Event::VideoShowHelp { page })
             }
             EventType::VideoFullScreen => {
                 let fullscreen = self.required_bool_param(&resolved.parameters, "fullscreen")?;
-                Ok(Box::new(crate::event::VideoFullScreenEvent::new(
-                    fullscreen,
-                )))
+                Ok(Event::VideoFullScreen { fullscreen })
             }
             EventType::ShowDebugInfo => {
                 let show = self.required_bool_param(&resolved.parameters, "show")?;
-                Ok(Box::new(crate::event::ShowDebugInfoEvent::new(show)))
+                Ok(Event::ShowDebugInfo { show })
             }
             EventType::VideoShowLoop => {
                 let interfaceid = self.required_int_param(&resolved.parameters, INTERFACEID)?;
                 let layoutid = self.required_int_param(&resolved.parameters, "layoutid")?;
                 let loopid = self.required_range_param(&resolved.parameters, "loopid")?;
-                Ok(Box::new(crate::event::VideoShowLoopEvent::new(
-                    interfaceid,
-                    layoutid,
-                    loopid,
-                )))
+                Ok(Event::VideoShowLoop { interfaceid, layoutid, loopid })
             }
             EventType::VideoShowSnapshotPage => {
                 let interfaceid = self.required_int_param(&resolved.parameters, INTERFACEID)?;
                 let displayid = self.required_int_param(&resolved.parameters, "displayid")?;
                 let page = self.required_int_param(&resolved.parameters, "page")?;
-                Ok(Box::new(crate::event::VideoShowSnapshotPageEvent::new(
-                    interfaceid,
-                    displayid,
-                    page,
-                )))
+                Ok(Event::VideoShowSnapshotPage { interfaceid, displayid, page })
             }
             EventType::VideoShowParamSetBank => {
                 let interfaceid = self.required_int_param(&resolved.parameters, INTERFACEID)?;
                 let displayid = self.required_int_param(&resolved.parameters, "displayid")?;
                 let bank = self.required_int_param(&resolved.parameters, "bank")?;
-                Ok(Box::new(crate::event::VideoShowParamSetBankEvent::new(
-                    interfaceid,
-                    displayid,
-                    bank,
-                )))
+                Ok(Event::VideoShowParamSetBank { interfaceid, displayid, bank })
             }
             EventType::VideoShowParamSetPage => {
                 let interfaceid = self.required_int_param(&resolved.parameters, INTERFACEID)?;
                 let displayid = self.required_int_param(&resolved.parameters, "displayid")?;
                 let page = self.required_int_param(&resolved.parameters, "page")?;
-                Ok(Box::new(crate::event::VideoShowParamSetPageEvent::new(
-                    interfaceid,
-                    displayid,
-                    page,
-                )))
+                Ok(Event::VideoShowParamSetPage { interfaceid, displayid, page })
             }
             EventType::FluidSynthEnable => {
                 let enable = self.required_bool_param(&resolved.parameters, "enable")?;
-                Ok(Box::new(crate::event::FluidSynthEnableEvent::new(enable)))
+                Ok(Event::FluidSynthEnable { enable })
             }
             EventType::SetMidiTuning => {
                 let tuning = self.required_float_param(&resolved.parameters, "tuning")?;
-                Ok(Box::new(crate::event::SetMidiTuningEvent::new(tuning)))
+                Ok(Event::SetMidiTuning { tuning })
             }
             EventType::SlideMasterInVolume => {
                 let slide = self.required_float_param(&resolved.parameters, "slide")?;
-                Ok(Box::new(crate::event::SlideMasterInVolumeEvent::new(slide)))
+                Ok(Event::SlideMasterInVolume { slide })
             }
             EventType::SlideMasterOutVolume => {
                 let slide = self.required_float_param(&resolved.parameters, "slide")?;
-                Ok(Box::new(crate::event::SlideMasterOutVolumeEvent::new(
-                    slide,
-                )))
+                Ok(Event::SlideMasterOutVolume { slide })
             }
             EventType::BrowserMoveToItem => {
                 let browserid = self.required_int_param(&resolved.parameters, "browserid")?;
                 let adjust = self.required_int_param(&resolved.parameters, "adjust")?;
                 let jumpadjust = self.required_int_param(&resolved.parameters, "jumpadjust")?;
-                Ok(Box::new(crate::event::BrowserMoveToItemEvent::new(
-                    browserid, adjust, jumpadjust,
-                )))
+                Ok(Event::BrowserMoveToItem { browserid, adjust, jump_adjust: jumpadjust })
             }
             EventType::BrowserMoveToItemAbsolute => {
                 let browserid = self.required_int_param(&resolved.parameters, "browserid")?;
                 let idx = self.required_int_param(&resolved.parameters, "idx")?;
-                Ok(Box::new(crate::event::BrowserMoveToItemAbsoluteEvent::new(
-                    browserid, idx,
-                )))
+                Ok(Event::BrowserMoveToItemAbsolute { browserid, index: idx })
             }
             EventType::BrowserSelectItem => {
                 let browserid = self.required_int_param(&resolved.parameters, "browserid")?;
-                Ok(Box::new(crate::event::BrowserSelectItemEvent::new(
-                    browserid,
-                )))
+                Ok(Event::BrowserSelectItem { browserid })
             }
             EventType::BrowserRenameItem => {
                 let browserid = self.required_int_param(&resolved.parameters, "browserid")?;
-                Ok(Box::new(crate::event::BrowserRenameItemEvent::new(
-                    browserid,
-                )))
+                Ok(Event::BrowserRenameItem { browserid })
             }
             EventType::BrowserItemBrowsed => {
                 let browserid = self.required_int_param(&resolved.parameters, "browserid")?;
-                Ok(Box::new(crate::event::BrowserItemBrowsedEvent::new(
-                    browserid,
-                )))
+                Ok(Event::BrowserItemBrowsed { browserid })
             }
             EventType::PatchBrowserMoveToBank => {
                 let direction = self.required_int_param(&resolved.parameters, "direction")?;
-                Ok(Box::new(crate::event::PatchBrowserMoveToBankEvent::new(
-                    direction,
-                )))
+                Ok(Event::PatchBrowserMoveToBank { direction })
             }
             EventType::PatchBrowserMoveToBankByIndex => {
                 let idx = self.required_int_param(&resolved.parameters, "idx")?;
-                Ok(Box::new(
-                    crate::event::PatchBrowserMoveToBankByIndexEvent::new(idx),
-                ))
+                Ok(Event::PatchBrowserMoveToBankByIndex { index: idx })
             }
             EventType::SetMasterInVolume => {
                 let vol = self.required_float_param(&resolved.parameters, "vol")?;
                 let fadervol = self.required_float_param(&resolved.parameters, "fadervol")?;
-                Ok(Box::new(crate::event::SetMasterInVolumeEvent::new(
-                    vol, fadervol,
-                )))
+                Ok(Event::SetMasterInVolume { vol, fadervol })
             }
             EventType::SetMasterOutVolume => {
                 let vol = self.required_float_param(&resolved.parameters, "vol")?;
                 let fadervol = self.required_float_param(&resolved.parameters, "fadervol")?;
-                Ok(Box::new(crate::event::SetMasterOutVolumeEvent::new(
-                    vol, fadervol,
-                )))
+                Ok(Event::SetMasterOutVolume { vol, fadervol })
             }
             EventType::ToggleInputRecord => {
                 let input = self.required_int_param(&resolved.parameters, "input")?;
-                Ok(Box::new(crate::event::ToggleInputRecordEvent::new(input)))
+                Ok(Event::ToggleInputRecord { input })
             }
             EventType::SetMidiEchoPort => {
                 let echoport = self.required_int_param(&resolved.parameters, "echoport")?;
-                Ok(Box::new(crate::event::SetMidiEchoPortEvent::new(echoport)))
+                Ok(Event::SetMidiEchoPort { echoport })
             }
             EventType::SetMidiEchoChannel => {
                 let echochannel = self.required_int_param(&resolved.parameters, "echochannel")?;
-                Ok(Box::new(crate::event::SetMidiEchoChannelEvent::new(
-                    echochannel,
-                )))
+                Ok(Event::SetMidiEchoChannel { echochannel })
             }
             EventType::AdjustMidiTranspose => {
                 let adjust = self.required_int_param(&resolved.parameters, "adjust")?;
-                Ok(Box::new(crate::event::AdjustMidiTransposeEvent::new(
-                    adjust,
-                )))
+                Ok(Event::AdjustMidiTranspose { adjust })
             }
             EventType::SetTriggerVolume => {
                 let loopid = self.required_int_param(&resolved.parameters, "loopid")?;
                 let vol = self.required_float_param(&resolved.parameters, "vol")?;
-                Ok(Box::new(crate::event::SetTriggerVolumeEvent::new(
-                    loopid, vol,
-                )))
+                Ok(Event::SetTriggerVolume { index: loopid, vol })
             }
             EventType::SlideLoopAmp => {
                 let loopid = self.required_int_param(&resolved.parameters, "loopid")?;
                 let slide = self.required_float_param(&resolved.parameters, "slide")?;
-                Ok(Box::new(crate::event::SlideLoopAmpEvent::new(
-                    loopid, slide,
-                )))
+                Ok(Event::SlideLoopAmp { index: loopid, slide })
             }
             EventType::SetLoopAmp => {
                 let loopid = self.required_int_param(&resolved.parameters, "loopid")?;
                 let amp = self.required_float_param(&resolved.parameters, "amp")?;
-                Ok(Box::new(crate::event::SetLoopAmpEvent::new(loopid, amp)))
+                Ok(Event::SetLoopAmp { index: loopid, amp })
             }
             EventType::AdjustLoopAmp => {
                 let loopid = self.required_int_param(&resolved.parameters, "loopid")?;
                 let ampfactor = self.required_float_param(&resolved.parameters, "ampfactor")?;
-                Ok(Box::new(crate::event::AdjustLoopAmpEvent::new(
-                    loopid, ampfactor,
-                )))
+                Ok(Event::AdjustLoopAmp { index: loopid, ampfactor })
             }
             EventType::RenameLoop => {
                 let loopid = self.required_int_param(&resolved.parameters, "loopid")?;
                 let in_layout = self.required_bool_param(&resolved.parameters, "in")?;
-                Ok(Box::new(crate::event::RenameLoopEvent::new(
-                    loopid, in_layout,
-                )))
+                Ok(Event::RenameLoop { loopid, in_layout })
             }
             EventType::ToggleSelectLoop => {
                 let setid = self.required_int_param(&resolved.parameters, "setid")?;
                 let loopid = self.required_int_param(&resolved.parameters, "loopid")?;
-                Ok(Box::new(crate::event::ToggleSelectLoopEvent::new(
-                    setid, loopid,
-                )))
+                Ok(Event::ToggleSelectLoop { setid, loopid })
             }
             EventType::SelectOnlyPlayingLoops => {
                 let setid = self.required_int_param(&resolved.parameters, "setid")?;
                 let playing = self.required_bool_param(&resolved.parameters, "playing")?;
-                Ok(Box::new(crate::event::SelectOnlyPlayingLoopsEvent::new(
-                    setid, playing,
-                )))
+                Ok(Event::SelectOnlyPlayingLoops { setid, playing })
             }
             EventType::SelectAllLoops => {
                 let setid = self.required_int_param(&resolved.parameters, "setid")?;
                 let select = self.required_bool_param(&resolved.parameters, "select")?;
-                Ok(Box::new(crate::event::SelectAllLoopsEvent::new(
-                    setid, select,
-                )))
+                Ok(Event::SelectAllLoops { setid, select })
             }
             EventType::TriggerSelectedLoops => {
                 let setid = self.required_int_param(&resolved.parameters, "setid")?;
                 let vol = self.required_float_param(&resolved.parameters, "vol")?;
                 let toggleloops = self.required_bool_param(&resolved.parameters, "toggleloops")?;
-                Ok(Box::new(crate::event::TriggerSelectedLoopsEvent::new(
-                    setid,
-                    vol,
-                    toggleloops,
-                )))
+                Ok(Event::TriggerSelectedLoops { setid, vol, toggleloops })
             }
             EventType::SetSelectedLoopsTriggerVolume => {
                 let setid = self.required_int_param(&resolved.parameters, "setid")?;
                 let vol = self.required_float_param(&resolved.parameters, "vol")?;
-                Ok(Box::new(
-                    crate::event::SetSelectedLoopsTriggerVolumeEvent::new(setid, vol),
-                ))
+                Ok(Event::SetSelectedLoopsTriggerVolume { setid, vol })
             }
             EventType::AdjustSelectedLoopsAmp => {
                 let setid = self.required_int_param(&resolved.parameters, "setid")?;
                 let ampfactor = self.required_float_param(&resolved.parameters, "ampfactor")?;
-                Ok(Box::new(crate::event::AdjustSelectedLoopsAmpEvent::new(
-                    setid, ampfactor,
-                )))
+                Ok(Event::AdjustSelectedLoopsAmp { setid, ampfactor })
             }
             EventType::InvertSelection => {
                 let setid = self.required_int_param(&resolved.parameters, "setid")?;
-                Ok(Box::new(crate::event::InvertSelectionEvent::new(setid)))
+                Ok(Event::InvertSelection { setid })
             }
             EventType::CreateSnapshot => {
                 let snapid = self.required_int_param(&resolved.parameters, "snapid")?;
-                Ok(Box::new(crate::event::CreateSnapshotEvent::new(snapid)))
+                Ok(Event::CreateSnapshot { snapid })
             }
             EventType::SwapSnapshots => {
                 let snapid1 = self.required_int_param(&resolved.parameters, "snapid1")?;
                 let snapid2 = self.required_int_param(&resolved.parameters, "snapid2")?;
-                Ok(Box::new(crate::event::SwapSnapshotsEvent::new(
-                    snapid1, snapid2,
-                )))
+                Ok(Event::SwapSnapshots { snapid1, snapid2 })
             }
             EventType::RenameSnapshot => {
                 let snapid = self.required_int_param(&resolved.parameters, "snapid")?;
-                Ok(Box::new(crate::event::RenameSnapshotEvent::new(snapid)))
+                Ok(Event::RenameSnapshot { snapid })
             }
             EventType::TriggerSnapshot => {
                 let snapid = self.required_int_param(&resolved.parameters, "snapid")?;
-                Ok(Box::new(crate::event::TriggerSnapshotEvent::new(snapid)))
+                Ok(Event::TriggerSnapshot { snapid })
             }
             EventType::MoveLoop => {
                 let oldloopid = self.required_int_param(&resolved.parameters, "oldloopid")?;
                 let newloopid = self.required_int_param(&resolved.parameters, "newloopid")?;
-                Ok(Box::new(crate::event::MoveLoopEvent::new(
-                    oldloopid, newloopid,
-                )))
+                Ok(Event::MoveLoop { oldloopid, newloopid })
             }
             EventType::EraseLoop => {
                 let loopid = self.required_int_param(&resolved.parameters, "loopid")?;
-                Ok(Box::new(crate::event::EraseLoopEvent::new(loopid)))
+                Ok(Event::EraseLoop { index: loopid })
             }
-            EventType::EraseAllLoops => Ok(Box::new(crate::event::EraseAllLoopsEvent::new())),
+            EventType::EraseAllLoops => Ok(Event::EraseAllLoops),
             EventType::EraseSelectedLoops => {
                 let setid = self.required_int_param(&resolved.parameters, "setid")?;
-                Ok(Box::new(crate::event::EraseSelectedLoopsEvent::new(setid)))
+                Ok(Event::EraseSelectedLoops { setid })
             }
-            EventType::ToggleDiskOutput => Ok(Box::new(crate::event::ToggleDiskOutputEvent::new())),
+            EventType::ToggleDiskOutput => Ok(Event::ToggleDiskOutput),
             EventType::SetAutoLoopSaving => {
                 let save = self.required_bool_param(&resolved.parameters, "save")?;
-                Ok(Box::new(crate::event::SetAutoLoopSavingEvent::new(save)))
+                Ok(Event::SetAutoLoopSaving { save })
             }
             EventType::SaveLoop => {
                 let loopid = self.required_int_param(&resolved.parameters, "loopid")?;
-                Ok(Box::new(crate::event::SaveLoopEvent::new(loopid)))
+                Ok(Event::SaveLoop { index: loopid })
             }
-            EventType::SaveNewScene => Ok(Box::new(crate::event::SaveNewSceneEvent::new())),
-            EventType::SaveCurrentScene => Ok(Box::new(crate::event::SaveCurrentSceneEvent::new())),
+            EventType::SaveNewScene => Ok(Event::SaveNewScene),
+            EventType::SaveCurrentScene => Ok(Event::SaveCurrentScene),
             EventType::SetLoadLoopId => {
                 let loopid = self.required_int_param(&resolved.parameters, "loopid")?;
-                Ok(Box::new(crate::event::SetLoadLoopIdEvent::new(loopid)))
+                Ok(Event::SetLoadLoopId { index: loopid })
             }
             EventType::SetDefaultLoopPlacement => {
                 let looprange = self.required_range_param(&resolved.parameters, "looprange")?;
-                Ok(Box::new(crate::event::SetDefaultLoopPlacementEvent::new(
-                    looprange,
-                )))
+                Ok(Event::SetDefaultLoopPlacement { looprange })
             }
             EventType::SelectPulse => {
                 let pulse = self.required_int_param(&resolved.parameters, "pulse")?;
-                Ok(Box::new(crate::event::SelectPulseEvent::new(pulse)))
+                Ok(Event::SelectPulse { pulse })
             }
             EventType::DeletePulse => {
                 let pulse = self.required_int_param(&resolved.parameters, "pulse")?;
-                Ok(Box::new(crate::event::DeletePulseEvent::new(pulse)))
+                Ok(Event::DeletePulse { pulse })
             }
             EventType::TapPulse => {
                 let pulse = self.required_int_param(&resolved.parameters, "pulse")?;
                 let newlen = self.required_bool_param(&resolved.parameters, "newlen")?;
-                Ok(Box::new(crate::event::TapPulseEvent::new(pulse, newlen)))
+                Ok(Event::TapPulse { pulse, newlen })
             }
             EventType::SwitchMetronome => {
                 let pulse = self.required_int_param(&resolved.parameters, "pulse")?;
                 let metronome = self.required_bool_param(&resolved.parameters, "metronome")?;
-                Ok(Box::new(crate::event::SwitchMetronomeEvent::new(
-                    pulse, metronome,
-                )))
+                Ok(Event::SwitchMetronome { pulse, metronome })
             }
             EventType::SetSyncType => {
                 let stype = self.required_bool_param(&resolved.parameters, "stype")?;
-                Ok(Box::new(crate::event::SetSyncTypeEvent::new(stype)))
+                Ok(Event::SetSyncType { stype })
             }
             EventType::SetSyncSpeed => {
                 let sspd = self.required_int_param(&resolved.parameters, "sspd")?;
-                Ok(Box::new(crate::event::SetSyncSpeedEvent::new(sspd)))
+                Ok(Event::SetSyncSpeed { sspd })
             }
             EventType::SetMidiSync => {
                 let midisync = self.required_int_param(&resolved.parameters, "midisync")?;
-                Ok(Box::new(crate::event::SetMidiSyncEvent::new(midisync)))
+                Ok(Event::SetMidiSync { midisync })
             }
-            EventType::PulseSync => Ok(Box::new(crate::event::PulseSyncEvent::new())),
-            EventType::SlideLoopAmpStopAll => {
-                Ok(Box::new(crate::event::SlideLoopAmpStopAllEvent::new()))
-            }
-            EventType::TransmitPlayingLoopsToDAW => {
-                Ok(Box::new(crate::event::TransmitPlayingLoopsToDAWEvent::new()))
-            }
+            EventType::PulseSync => Ok(Event::PulseSync),
+            EventType::SlideLoopAmpStopAll => Ok(Event::SlideLoopAmpStopAll),
+            EventType::TransmitPlayingLoopsToDAW => Ok(Event::TransmitPlayingLoopsToDAW),
             EventType::SetVariable => {
                 let var_name = self.required_variable_ref_param(&resolved.parameters, "var")?;
                 let value = self.required_variable_param(&resolved.parameters, "value")?;
@@ -2774,32 +2541,19 @@ impl FloConfig {
                 let maxjump = self
                     .optional_variable_param(&resolved.parameters, "maxjump")
                     .unwrap_or_default();
-                Ok(Box::new(crate::event::SetVariableEvent::new(
-                    Some(var_name),
-                    value,
-                    maxjumpcheck,
-                    maxjump,
-                )))
+                Ok(Event::SetVariable { var_name: Some(var_name), value, maxjumpcheck, maxjump })
             }
             EventType::ToggleVariable => {
                 let var_name = self.required_variable_ref_param(&resolved.parameters, "var")?;
                 let maxvalue = self.required_int_param(&resolved.parameters, "maxvalue")?;
                 let minvalue = self.required_int_param(&resolved.parameters, "minvalue")?;
-                Ok(Box::new(crate::event::ToggleVariableEvent::new(
-                    Some(var_name),
-                    maxvalue,
-                    minvalue,
-                )))
+                Ok(Event::ToggleVariable { var_name: Some(var_name), maxvalue, minvalue })
             }
             EventType::SplitVariableMSBLSB => {
                 let var = self.required_variable_param(&resolved.parameters, "var")?;
                 let msb_name = self.required_variable_ref_param(&resolved.parameters, "msb")?;
                 let lsb_name = self.required_variable_ref_param(&resolved.parameters, "lsb")?;
-                Ok(Box::new(crate::event::SplitVariableMSBLSBEvent::new(
-                    var,
-                    Some(msb_name),
-                    Some(lsb_name),
-                )))
+                Ok(Event::SplitVariableMSBLSB { var, msb_name: Some(msb_name), lsb_name: Some(lsb_name) })
             }
             other => Err(format!(
                 "Output event '{}' is not yet constructible from config bindings",
@@ -3206,7 +2960,7 @@ mod authoritative_xml_tests {
     #[test]
     fn midi_route_parameters_are_available_to_binding_expressions() {
         let cfg = FloConfig::new();
-        let key = crate::event::MIDIKeyInputEvent::with_route(3, 2, 64, 90, true, true);
+        let key = Event::MIDIKeyInput { outport: 3, channel: 2, notenum: 64, vel: 90, down: true, echo: true };
         assert_eq!(
             cfg.read_event_parameter(&key, key.get_param(0).unwrap())
                 .as_i32(),
@@ -3218,7 +2972,7 @@ mod authoritative_xml_tests {
             1
         );
 
-        let controller = crate::event::MIDIControllerInputEvent::with_route(4, 1, 7, 99, false);
+        let controller = Event::MIDIControllerInput { outport: 4, channel: 1, ctrl: 7, val: 99, echo: false };
         assert_eq!(
             cfg.read_event_parameter(&controller, controller.get_param(0).unwrap())
                 .as_i32(),
@@ -3230,13 +2984,13 @@ mod authoritative_xml_tests {
             0
         );
 
-        let clock = crate::event::MIDIClockInputEvent::with_outport(2);
+        let clock = Event::MIDIClockInput { outport: 2 };
         assert_eq!(
             cfg.read_event_parameter(&clock, clock.get_param(0).unwrap())
                 .as_i32(),
             2
         );
-        let transport = crate::event::MIDIStartStopInputEvent::with_outport(4, true);
+        let transport = Event::MIDIStartStopInput { outport: 4, start: true };
         assert_eq!(
             cfg.read_event_parameter(&transport, transport.get_param(0).unwrap())
                 .as_i32(),
