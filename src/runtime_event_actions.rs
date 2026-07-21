@@ -310,7 +310,7 @@ impl<const N: usize> RuntimeEventDispatcher<N> {
         &self,
         config: &mut FloConfig,
         registry: &BindingRegistry,
-        input: &dyn Event,
+        input: &Event,
         loops: &impl RuntimeLoopState,
     ) -> Result<ActionBatch<N>, DispatchError> {
         self.dispatch_at_depth(config, registry, input, loops, 0)
@@ -320,7 +320,7 @@ impl<const N: usize> RuntimeEventDispatcher<N> {
         &self,
         config: &mut FloConfig,
         registry: &BindingRegistry,
-        input: &dyn Event,
+        input: &Event,
         loops: &impl RuntimeLoopState,
         depth: usize,
     ) -> Result<ActionBatch<N>, DispatchError> {
@@ -347,96 +347,60 @@ impl<const N: usize> RuntimeEventDispatcher<N> {
 
     fn map_unbound_native_input(
         &self,
-        input: &dyn Event,
+        input: &Event,
         out: &mut ActionBatch<N>,
     ) -> Result<(), DispatchError> {
-        use crate::event::{
-            AdjustMidiTransposeEvent, MIDIControllerInputEvent, MIDIKeyInputEvent,
-            MIDIPitchBendInputEvent, MIDIProgramChangeInputEvent, MIDIStartStopInputEvent,
-        };
         let runtime = |command| DispatchOutput::Runtime(command);
         let app = |action| DispatchOutput::Application(action);
-        match input.get_type() {
-            EventType::EndRecord => out.push(runtime(RuntimeCommand::StopRecord))?,
-            EventType::InputMIDIClock => out.push(app(ApplicationAction::MidiClock))?,
-            EventType::SetSyncType => {
-                let event = input
-                    .as_any()
-                    .downcast_ref::<crate::event::SetSyncTypeEvent>()
-                    .ok_or(DispatchError::InvalidParameter("stype"))?;
-                out.push(app(ApplicationAction::SetSyncType(event.stype as i32)))?
+        match input {
+            Event::EndRecord { .. } => out.push(runtime(RuntimeCommand::StopRecord))?,
+            Event::MIDIClockInput { .. } => out.push(app(ApplicationAction::MidiClock))?,
+            Event::SetSyncType { stype } => {
+                out.push(app(ApplicationAction::SetSyncType(*stype as i32)))?
             }
-            EventType::SetSyncSpeed => {
-                let event = input
-                    .as_any()
-                    .downcast_ref::<crate::event::SetSyncSpeedEvent>()
-                    .ok_or(DispatchError::InvalidParameter("sspd"))?;
-                out.push(app(ApplicationAction::SetSyncSpeed(event.sspd)))?
+            Event::SetSyncSpeed { sspd } => {
+                out.push(app(ApplicationAction::SetSyncSpeed(*sspd)))?
             }
-            EventType::AdjustMidiTranspose => {
-                let event = input
-                    .as_any()
-                    .downcast_ref::<AdjustMidiTransposeEvent>()
-                    .ok_or(DispatchError::InvalidParameter("adjust"))?;
-                out.push(app(ApplicationAction::AdjustMidiTranspose(event.adjust)))?
+            Event::AdjustMidiTranspose { adjust } => {
+                out.push(app(ApplicationAction::AdjustMidiTranspose(*adjust)))?
             }
-            EventType::InputMIDIStartStop => {
-                let event = input
-                    .as_any()
-                    .downcast_ref::<MIDIStartStopInputEvent>()
-                    .ok_or(DispatchError::InvalidParameter("start"))?;
+            Event::MIDIStartStopInput { start, .. } => {
                 out.push(app(ApplicationAction::MidiTransport {
-                    running: event.start,
+                    running: *start,
                 }))?;
             }
-            EventType::InputMIDIKey => {
-                let event = input
-                    .as_any()
-                    .downcast_ref::<MIDIKeyInputEvent>()
-                    .ok_or(DispatchError::InvalidParameter("midikey"))?;
+            Event::MIDIKeyInput { notenum, down, vel, .. } => {
                 out.push(runtime(RuntimeCommand::SynthNote {
-                    note: event.notenum,
-                    velocity: if event.down { event.vel } else { 0 },
+                    note: *notenum,
+                    velocity: if *down { *vel } else { 0 },
                 }))?;
             }
-            EventType::InputMIDIController => {
-                let event = input
-                    .as_any()
-                    .downcast_ref::<MIDIControllerInputEvent>()
-                    .ok_or(DispatchError::InvalidParameter("midicontroller"))?;
+            Event::MIDIControllerInput { channel, ctrl, val, .. } => {
                 out.push(runtime(RuntimeCommand::SynthController {
-                    channel: event.channel,
-                    control: event.ctrl,
-                    value: event.val,
+                    channel: *channel,
+                    control: *ctrl,
+                    value: *val,
                 }))?;
             }
-            EventType::InputMIDIPitchBend => {
-                let event = input
-                    .as_any()
-                    .downcast_ref::<MIDIPitchBendInputEvent>()
-                    .ok_or(DispatchError::InvalidParameter("midipitchbend"))?;
+            Event::MIDIPitchBendInput { channel, val, .. } => {
                 out.push(runtime(RuntimeCommand::SynthPitchBend {
-                    channel: event.channel,
-                    value: u16::try_from(event.val)
+                    channel: *channel,
+                    value: u16::try_from(*val)
                         .map_err(|_| DispatchError::InvalidParameter("pitchval"))?,
                 }))?;
             }
-            EventType::InputMIDIProgramChange => {
-                let event = input
-                    .as_any()
-                    .downcast_ref::<MIDIProgramChangeInputEvent>()
-                    .ok_or(DispatchError::InvalidParameter("midiprogramchange"))?;
+            Event::MIDIProgramChangeInput { channel, val, .. } => {
                 out.push(runtime(RuntimeCommand::SynthPatch {
-                    channel: event.channel,
+                    channel: *channel,
                     soundfont_id: 0,
                     bank: 0,
-                    program: event.val as i32,
+                    program: *val as i32,
                 }))?;
             }
             _ => {}
         }
         Ok(())
-    }
+}
 
     fn apply_variable_output(
         &self,
@@ -498,12 +462,12 @@ impl<const N: usize> RuntimeEventDispatcher<N> {
             EventType::StartSession | EventType::StartInterface => {}
             EventType::ExitSession => out.push(app(ApplicationAction::ExitSession))?,
             EventType::GoSub => {
-                let event = crate::event::GoSubEvent::new(
-                    int(p, "sub")?,
-                    float(p, "param1")?,
-                    float(p, "param2")?,
-                    float(p, "param3")?,
-                );
+                let event = crate::event::Event::GoSub {
+                    sub: int(p, "sub")?,
+                    param1: float(p, "param1")?,
+                    param2: float(p, "param2")?,
+                    param3: float(p, "param3")?,
+                };
                 let nested = self.dispatch_at_depth(config, registry, &event, loops, depth + 1)?;
                 out.append(nested)?;
             }
@@ -1258,7 +1222,7 @@ mod tests {
             .dispatch(
                 &mut config,
                 &registry,
-                &crate::event::SetSyncTypeEvent::new(true),
+                &crate::event::Event::SetSyncType { stype: true },
                 &modes,
             )
             .unwrap();
@@ -1272,7 +1236,7 @@ mod tests {
             .dispatch(
                 &mut config,
                 &registry,
-                &crate::event::SetSyncSpeedEvent::new(3),
+                &crate::event::Event::SetSyncSpeed { sspd: 3 },
                 &modes,
             )
             .unwrap();
@@ -1292,7 +1256,7 @@ mod tests {
             .dispatch(
                 &mut config,
                 &registry,
-                &crate::event::AdjustMidiTransposeEvent::new(-12),
+                &crate::event::Event::AdjustMidiTranspose { adjust: -12 },
                 &[LoopMode::Empty; MAX_RUNTIME_LOOPS],
             )
             .unwrap();
