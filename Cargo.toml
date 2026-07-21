@@ -44,6 +44,6 @@ resources = ["data"]
 
 [package.metadata.android]
 package = "org.freewheeling.freewheeling_plus"
-min_sdk_version = 34
+sdk.min_sdk_version = 34
 sdk.target_sdk_version = 34
 assets = "data/"
