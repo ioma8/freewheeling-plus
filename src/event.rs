@@ -1571,6 +1571,12 @@ impl EventManager {
     }
 }
 
+impl Default for EventManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for EventManager {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Release);

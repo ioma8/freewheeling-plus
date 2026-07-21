@@ -274,7 +274,7 @@ fn test_loop_management_events_preserve_payloads() {
     assert_eq!(sl, 7);
 
     let lr = match &placement {
-        Event::SetDefaultLoopPlacement { looprange } => looprange.clone(),
+        Event::SetDefaultLoopPlacement { looprange } => *looprange,
         _ => unreachable!(),
     };
     assert_eq!(lr, Range::new(20, 29));
@@ -507,7 +507,7 @@ fn test_display_control_events_preserve_payloads() {
     let (lid, lr) = match &show_loop {
         Event::VideoShowLoop {
             layoutid, loopid, ..
-        } => (*layoutid, loopid.clone()),
+        } => (*layoutid, *loopid),
         _ => unreachable!(),
     };
     assert_eq!(lid, 9);

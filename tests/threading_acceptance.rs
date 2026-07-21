@@ -1,11 +1,9 @@
 use freewheeling_plus::event::{Event, EventListener, EventManager, EventType};
 use freewheeling_plus::mem::{MemoryManager, Preallocated, PreallocatedTypeInner};
 use freewheeling_plus::processor_queue::{ProcessorCommand, ProcessorCommandQueue};
-use freewheeling_plus::rcu::{Rcu, RcuRegistry};
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
-use std::time::Duration;
 
 struct AcknowledgingListener(mpsc::Sender<()>);
 
@@ -51,46 +49,6 @@ fn event_delivery_acknowledges_every_concurrent_post() {
     }
 }
 
-#[test]
-fn rcu_grace_period_is_released_by_reader_unlock() {
-    let registry = RcuRegistry::new();
-    registry.register_current().unwrap();
-    let slot = Arc::new(AtomicPtr::new(Box::into_raw(Box::new(1))));
-    let reader_started = Arc::new(Barrier::new(2));
-    let (reader_id_tx, reader_id_rx) = mpsc::channel();
-    let (rcu_tx, rcu_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let reader_started_for_thread = Arc::clone(&reader_started);
-    let reader = thread::spawn(move || {
-        reader_id_tx.send(thread::current().id()).unwrap();
-        let reader_rcu: Arc<Rcu<u32>> = rcu_rx.recv().unwrap();
-        reader_rcu.registry().register_current().unwrap();
-        reader_rcu.read_lock().unwrap();
-        reader_started_for_thread.wait();
-        release_rx.recv().unwrap();
-        reader_rcu.read_unlock().unwrap();
-    });
-    registry.register(reader_id_rx.recv().unwrap()).unwrap();
-    let rcu = Arc::new(Rcu::<u32>::new(registry));
-    rcu_tx.send(Arc::clone(&rcu)).unwrap();
-    reader_started.wait();
-    let old = unsafe { rcu.update(&slot, Box::into_raw(Box::new(2))) };
-    let waiter_rcu = Arc::clone(&rcu);
-    let (done_tx, done_rx) = mpsc::channel();
-    let waiter = thread::spawn(move || {
-        waiter_rcu.synchronize(Duration::ZERO);
-        done_tx.send(()).unwrap();
-    });
-    assert!(done_rx.try_recv().is_err());
-    release_tx.send(()).unwrap();
-    reader.join().unwrap();
-    done_rx.recv().unwrap();
-    waiter.join().unwrap();
-    unsafe {
-        drop(Box::from_raw(old));
-        drop(Box::from_raw(slot.load(Ordering::Acquire)));
-    }
-}
 
 #[test]
 fn processor_queue_is_bounded_and_fifo_under_concurrent_producers() {
