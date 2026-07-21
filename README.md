@@ -6,9 +6,9 @@ This is an in-progress migration from the original C++ codebase. The architectur
 
 ## Status
 
-Daily-driver quality on macOS. Linux should work but gets less testing. Windows untested.
-
-The port currently preserves the full feature set of the original: multi-track loop recording, pulse-synced overdubbing, scene management, snapshot recall, FluidSynth-backed patch browser, OSC control, and the complete FreeWheeling XML configuration system.
+Daily-driver quality on macOS. Linux and Windows should work but get less testing.
+Android: entry point, path handling, and audio tuning implemented; needs build
+toolchain (`cargo-ndk` + `cargo-apk`) and touch input mapping.
 
 ## Build
 
@@ -22,11 +22,11 @@ cargo test
 
 The audio backend is selected at startup via the `FWEELIN_AUDIO_BACKEND` environment variable:
 
-| Value | macOS | Linux |
-|-------|-------|-------|
-| *unset* | CoreAudio AudioUnit (native) | CPAL (cross-platform) |
-| `jack` | JACK (requires `brew install jack`) | JACK |
-| `cpal` | CPAL (explicit override) | CPAL |
+| Value | macOS | Linux | Windows | Android |
+|-------|-------|-------|---------|---------|
+| *unset* | CoreAudio AudioUnit | CPAL (ALSA) | CPAL (WASAPI) | CPAL (OpenSL ES) |
+| `jack` | JACK (`brew install jack`) | JACK | JACK ([jackaudio.org](https://jackaudio.org)) | — |
+| `cpal` | CPAL (explicit override) | CPAL | CPAL | CPAL |
 
 **JACK** provides external transport sync (bar/beat/bpm from a DAW) and integrated MIDI ports. On macOS, install JACK via Homebrew: `brew install jack`.
 

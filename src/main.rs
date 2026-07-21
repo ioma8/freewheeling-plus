@@ -66,7 +66,16 @@ fn run_initialized<A: Application>(app: &mut A) -> i32 {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "android")]
+fn register_signal_handlers() {
+    // Android is Linux-kernel-based; SIGSEGV etc. handlers work,
+    // but SIGUSR1/SIGUSR2 are reserved by the Android runtime
+    // (bionic/libc uses them for thread cancellation).
+    signal::register_fatal_signal_handlers();
+    signal::register_shutdown_signal_handlers();
+}
+
+#[cfg(not(any(windows, target_os = "android")))]
 fn register_signal_handlers() {
     signal::register_fatal_signal_handlers();
     signal::register_info_signal_handlers();
@@ -324,5 +333,21 @@ mod tests {
             invocation([OsString::from("fweelin"), OsString::from("--wat")]).unwrap_err(),
             "Unknown option: --wat"
         );
+    }
+}
+
+/// Android entry point called by SDL2's Java glue (SDLActivity).
+/// `argc`/`argv` may be null when launched without arguments.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn SDL_main(_argc: i32, _argv: *const *const i8) -> i32 {
+    let args: Vec<_> = std::env::args_os().collect();
+    initialize_process(args.clone());
+    match production_application() {
+        Ok(mut app) => run_initialized(&mut app),
+        Err(error) => {
+            eprintln!("Error starting FreeWheeling: {error}");
+            1
+        }
     }
 }

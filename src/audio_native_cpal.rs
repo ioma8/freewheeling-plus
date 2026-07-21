@@ -26,7 +26,11 @@ const DEFAULT_RATE: u32 = 48_000;
 // 64-frame request. FWEELIN_AUDIO_BUFFER_FRAMES overrides either default.
 #[cfg(target_os = "macos")]
 const DEFAULT_BUFFER_FRAMES: u32 = 16;
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "android")]
+// Android OpenSL ES needs larger buffers for reliable performance
+// on the wide range of device capabilities.
+const DEFAULT_BUFFER_FRAMES: u32 = 256;
+#[cfg(not(any(target_os = "macos", target_os = "android")))]
 const DEFAULT_BUFFER_FRAMES: u32 = 64;
 const MIN_RING_PERIODS: usize = 2;
 // Capture and playback are separate streams on the non-aggregate macOS

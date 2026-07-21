@@ -76,7 +76,14 @@ pub fn application_support_path(home: &Path) -> PathBuf {
             .join("Application Support")
             .join("Fweelin")
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "android")]
+    {
+        // Android internal storage: /data/data/<package>/
+        // Matches Cargo.toml [package.metadata.bundle].identifier on Android.
+        // SDL2's SDL_GetPrefPath is also available after init.
+        Path::new("/data/data/org.freewheeling.freewheeling-plus/files/.fweelin").to_path_buf()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "android")))]
     home.join(".fweelin")
 }
 

@@ -145,9 +145,14 @@ The existing macOS bundling test (`bundle_verifier_requires_executable...`) need
 - **SDL2**: Android Java glue via `SDLActivity` + `SDLSurface`
 - All pure-Rust dependencies (codecs, fonts, images)
 - `libc` signals — Android is Linux kernel
-- Threading (`std::thread`) — works on Android (pthreads)
+### Already Works — Plus Implemented
 
-### Blockers
+- ✅ `src/main.rs` — `SDL_main` entry point for Android JNI glue
+- ✅ `src/main.rs` — Signal handlers (fatal + shutdown only, avoids SIGUSR*)
+- ✅ `src/native_startup.rs` — `application_support_path` returns Android internal storage
+- ✅ `src/audio_native_cpal.rs` — `DEFAULT_BUFFER_FRAMES = 256` for Android OpenSL ES
+
+### Remaining Blockers
 
 #### 2.1 Build Toolchain
 
@@ -236,19 +241,19 @@ InputEvent::Touch { x: f32, y: f32, down: bool, finger_id: i64 }
 
 The FreeWheeling UI is designed for a mouse-driven interface. Touch mapping needs testing but SDL2 handles the translation.
 
-### Files Changed
+### Files Changed — Status
 
-| File | Change |
-|------|--------|
-| `Cargo.toml` | Add `[target.'cfg(target_os = "android")'.dependencies]` overrides if needed |
-| `src/lib.rs` | Add `#[cfg(target_os = "android")] pub mod android;` |
-| `src/android.rs` | **New** — `AndroidPlatform` impl |
-| `src/main.rs` | Add `#[cfg(target_os = "android")] extern "C" fn SDL_main(...)` |
-| `src/audio_native_cpal.rs` | Android buffer size tuning (256 frames) |
-| `src/sdlio.rs` | Optionally handle `SDL_FINGERDOWN/UP/MOTION` |
-| `native_runtime.rs` | Use `AndroidPlatform` when `#[cfg(target_os = "android")]` |
-| `Cargo.toml` | Move `objc2*` + `jack` behind macOS-only cfg |
-
+| File | Change | Status |
+|------|--------|--------|
+| `Cargo.toml` | Add `[target.'cfg(target_os = "android")'.dependencies]` overrides | ✅ Not needed (CPAL+SDL2 work via bundled deps) |
+| `src/lib.rs` | Add `#[cfg(target_os = "android")] pub mod android;` | ❌ Not needed — Platform trait unused in production |
+| `src/android.rs` | **New** — `AndroidPlatform` impl | ❌ Not needed (Platform trait is dead code in production) |
+| `src/main.rs` | Add `#[cfg(target_os = "android")] extern "C" fn SDL_main(...)` | ✅ Done |
+| `src/native_startup.rs` | Android `application_support_path` | ✅ Done |
+| `src/main.rs` | Android signal handler registration | ✅ Done |
+| `src/audio_native_cpal.rs` | Android buffer size tuning (256 frames) | ✅ Done |
+| `src/sdlio.rs` | Handle `SDL_FINGERDOWN/UP/MOTION` | ❌ Future — needs touch event support in InputEvent |
+| `native_runtime.rs` | Use `AndroidPlatform` | ❌ Not needed (Platform trait unused in production) |
 ---
 
 ## 3. iOS
