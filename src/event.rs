@@ -924,7 +924,7 @@ pub trait EventProducer: Send {
 impl EventProducer for () {}
 
 pub trait EventListener: Send {
-    fn receive_event(&mut self, ev: Box<dyn Event>, from: &dyn EventProducer);
+    fn receive_event(&mut self, ev: &Event, from: &dyn EventProducer);
 }
 
 // ============================================================
@@ -1444,7 +1444,7 @@ struct ListenerEntry {
 
 pub struct EventManager {
     listeners: Arc<Mutex<HashMap<EventType, Vec<ListenerEntry>>>>,
-    queue: Arc<Mutex<VecDeque<Box<dyn Event>>>>,
+    queue: Arc<Mutex<VecDeque<Event>>>,
     capacity: usize,
     dropped: Arc<std::sync::atomic::AtomicU64>,
     lock: Arc<(Mutex<bool>, Condvar)>,
@@ -1463,7 +1463,7 @@ impl EventManager {
 
         let worker_lock = lock.clone();
         let worker_running = running.clone();
-        let worker_queue = Arc::new(Mutex::new(VecDeque::<Box<dyn Event>>::new()));
+        let worker_queue = Arc::new(Mutex::new(VecDeque::<Event>::new()));
         let dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let worker_listeners: Arc<Mutex<HashMap<EventType, Vec<ListenerEntry>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -1487,7 +1487,7 @@ impl EventManager {
                         if let Some(entries) = lists.get(&ev.get_type()) {
                             for entry in entries {
                                 if let Ok(mut listener) = entry.listener.lock() {
-                                    listener.receive_event(ev.clone_box(), &());
+                                    listener.receive_event(&ev, &());
                                 }
                             }
                         }
@@ -1527,7 +1527,7 @@ impl EventManager {
 
     /// Enqueue without waiting for delivery. The newest event is rejected
     /// when the bounded queue is full.
-    pub fn try_post_event(&self, ev: Box<dyn Event>) -> Result<(), Box<dyn Event>> {
+    pub fn try_post_event(&self, ev: Event) -> Result<(), Event> {
         let mut queue = self.queue.lock().unwrap();
         if queue.len() >= self.capacity {
             self.dropped.fetch_add(1, Ordering::Relaxed);
@@ -1541,7 +1541,7 @@ impl EventManager {
         Ok(())
     }
 
-    pub fn post_event(&self, ev: Box<dyn Event>) {
+    pub fn post_event(&self, ev: Event) {
         let _ = self.try_post_event(ev);
     }
 
@@ -1558,7 +1558,7 @@ impl EventManager {
                 for entry in entries {
                     if let Ok(mut listener) = entry.listener.lock() {
                         let stub: () = ();
-                        listener.receive_event(ev.clone_box(), &stub);
+                        listener.receive_event(&ev, &stub);
                     }
                 }
             }
