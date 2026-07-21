@@ -47,6 +47,5 @@ package = "org.freewheeling.freewheeling_plus"
 min_sdk_version = 26
 target_sdk_version = 34
 assets = "data/"
-
-# If ANDROID_NDK_HOME is not set, uncomment and set the path:
-# ndk_path = "$HOME/Library/Android/sdk/ndk/30.0.15729638"
+sdk_path = "/Users/jakubkolcar/Library/Android/sdk"
+ndk_path = "/Users/jakubkolcar/Library/Android/sdk/ndk/30.0.15729638"
