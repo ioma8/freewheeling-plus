@@ -1066,7 +1066,7 @@ fn input_slot(id: i32) -> Result<u8, DispatchError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{KeyInputEvent, LoopClickedEvent, MouseButtonInputEvent};
+    use crate::event::Event;
     use std::path::Path;
 
     fn shipped_config() -> FloConfig {
@@ -1090,7 +1090,7 @@ mod tests {
         let mut config = shipped_config();
         // SDL 1.2-compatible F3 keycode. This module is also compiled by an
         // integration-test path where `sdlkey_compat` is not re-exported.
-        let input = KeyInputEvent::new(true, 284, 0);
+        let input = Event::KeyInput { down: true, keysym: 284, unicode: 0 };
         let registry = config.binding_registry.clone();
         let batch = RuntimeEventDispatcher::<32>::new()
             .dispatch(
@@ -1112,7 +1112,7 @@ mod tests {
     #[test]
     fn shipped_loop_mouse_binding_reaches_record_command() {
         let mut config = shipped_config();
-        let input = LoopClickedEvent::new(true, 1, 3, true);
+        let input = Event::LoopClicked { down: true, button: 1, loopid: 3, in_layout: true };
         let registry = config.binding_registry.clone();
         let batch = RuntimeEventDispatcher::<32>::new()
             .dispatch(
@@ -1133,7 +1133,7 @@ mod tests {
     fn shipped_loop_wheel_bindings_adjust_gain() {
         let registry_and_batch = |button| {
             let mut config = shipped_config();
-            let input = LoopClickedEvent::new(true, button, 3, true);
+            let input = Event::LoopClicked { down: true, button, loopid: 3, in_layout: true };
             let registry = config.binding_registry.clone();
             RuntimeEventDispatcher::<32>::new()
                 .dispatch(
@@ -1171,7 +1171,7 @@ mod tests {
         // The pckeyboard XML and graphics both address Q as SDL/ASCII 113.
         // Do not renumber this to a compact internal slot: doing so makes a
         // working keypress appear inert because the visible element is 113.
-        let input = KeyInputEvent::new(true, b'q' as i32, 0);
+        let input = Event::KeyInput { down: true, keysym: b'q' as i32, unicode: 0 };
         let registry = config.binding_registry.clone();
         let batch = RuntimeEventDispatcher::<32>::new()
             .dispatch(
@@ -1193,7 +1193,7 @@ mod tests {
     #[test]
     fn shipped_f1_binding_selects_the_primary_pulse() {
         let mut config = shipped_config();
-        let input = KeyInputEvent::new(true, 282, 0);
+        let input = Event::KeyInput { down: true, keysym: 282, unicode: 0 };
         let registry = config.binding_registry.clone();
         let batch = RuntimeEventDispatcher::<32>::new()
             .dispatch(
@@ -1284,7 +1284,7 @@ mod tests {
             .dispatch(
                 &mut config,
                 &registry,
-                &KeyInputEvent::new(true, 65, 0),
+                &Event::KeyInput { down: true, keysym: 65, unicode: 0 },
                 &[LoopMode::Empty; MAX_RUNTIME_LOOPS],
             )
             .unwrap();
@@ -1312,7 +1312,7 @@ mod tests {
     #[test]
     fn raw_mouse_button_is_not_mapped_by_shipped_config() {
         let mut config = shipped_config();
-        let input = MouseButtonInputEvent::new(true, 1, 100, 100);
+        let input = Event::MouseButtonInput { down: true, button: 1, x: 100, y: 100 };
         let registry = config.binding_registry.clone();
         let batch = RuntimeEventDispatcher::<32>::new()
             .dispatch(

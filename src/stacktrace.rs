@@ -14,6 +14,7 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
+#[allow(dead_code)]
 fn bounded(dst: &mut [u8], value: &str) -> i32 {
     if dst.is_empty() || value.len() >= dst.len() {
         if let Some(last) = dst.last_mut() {
@@ -31,11 +32,6 @@ pub fn build_nm_command(progname: &str) -> Option<String> {
     Some(format!("nm -B {}", shell_quote(progname)))
 }
 
-pub fn stacktrace_build_nm_command(dst: &mut [u8], use_gnu_nm: bool, progname: &str) -> i32 {
-    let _ = use_gnu_nm; // The C implementation currently emits this prefix on Unix too.
-    build_nm_command(progname).map_or(-1, |s| bounded(dst, &s))
-}
-
 pub fn build_debugger_command(progname: &str, command_file: &str) -> Option<String> {
     Some(format!(
         "gdb -q {} {} 2>/dev/null <{} >fweelin-stackdump",
@@ -43,14 +39,6 @@ pub fn build_debugger_command(progname: &str, command_file: &str) -> Option<Stri
         std::process::id(),
         shell_quote(command_file)
     ))
-}
-
-pub fn stacktrace_build_debugger_command(
-    dst: &mut [u8],
-    progname: &str,
-    command_file: &str,
-) -> i32 {
-    build_debugger_command(progname, command_file).map_or(-1, |s| bounded(dst, &s))
 }
 
 pub fn parse_nm_symbol_line(line: &str) -> Option<(u64, char, String)> {
@@ -67,28 +55,6 @@ pub fn parse_nm_symbol_line(line: &str) -> Option<(u64, char, String)> {
     let typ = p.next()?.chars().next()?;
     let name = p.next()?.to_owned();
     Some((addr, typ, name))
-}
-
-/// C-buffer equivalent of `stacktrace_parse_nm_symbol_line`.
-pub fn stacktrace_parse_nm_symbol_line(
-    line: &str,
-    addr: &mut u64,
-    typ: &mut char,
-    name: &mut [u8],
-) -> i32 {
-    if name.is_empty() {
-        return 0;
-    }
-    name[0] = 0;
-    let Some((parsed_addr, parsed_type, parsed_name)) = parse_nm_symbol_line(line) else {
-        return 0;
-    };
-    *addr = parsed_addr;
-    *typ = parsed_type;
-    let n = parsed_name.len().min(name.len() - 1);
-    name[..n].copy_from_slice(&parsed_name.as_bytes()[..n]);
-    name[n] = 0;
-    1
 }
 
 /// Byte-oriented counterpart of C's bounded symbol-name copy.
@@ -117,29 +83,8 @@ pub fn format_symbol_entry(
         None => format!("[{index}] 0x{address:08x} ???\n"),
     }
 }
-
-pub fn stacktrace_copy_symbol_name(dst: &mut [u8], src: &str) -> i32 {
-    if dst.is_empty() {
-        return -1;
-    }
-    let n = src.len().min(dst.len() - 1);
-    dst[..n].copy_from_slice(&src.as_bytes()[..n]);
-    dst[n] = 0;
-    0
-}
-
-pub fn stacktrace_format_symbol_entry(
-    dst: &mut [u8],
-    index: i32,
-    address: u64,
-    name: Option<&str>,
-    offset: u64,
-    typ: char,
-) -> i32 {
-    bounded(dst, &format_symbol_entry(index, address, name, offset, typ))
-}
-
 fn write_output(bytes: &[u8], handle: i32) {
+
     #[cfg(unix)]
     {
         let fd = if handle == -1 {
@@ -206,10 +151,6 @@ pub fn stack_trace_from_safe_context(file: &str) -> bool {
     true
 }
 
-// Names used by the original C API.
-pub use stack_trace as StackTrace;
-pub use stack_trace_from_safe_context as StackTraceFromSafeContext;
-pub use stack_trace_init as StackTraceInit;
 
 #[cfg(test)]
 mod tests {
@@ -232,35 +173,15 @@ mod tests {
     }
 
     #[test]
-    fn c_command_builder_contract() {
-        let long = "p".repeat(127);
-        let mut small = [b'x'; 32];
-        assert_eq!(stacktrace_build_nm_command(&mut small, true, &long), -1);
-        assert_eq!(small[31], 0);
+    fn command_builder_contract() {
+        // build_nm_command shell injection
+        let cmd = build_nm_command("/tmp/fweelin';touch /tmp/pwned #").unwrap();
+        assert_eq!(cmd, "nm -B '/tmp/fweelin'\"'\"';touch /tmp/pwned #'");
 
-        let mut nm = [0; 256];
+        // build_debugger_command format
+        let cmd = build_debugger_command("/tmp/fweelin", "/tmp/cmds.gdb").unwrap();
         assert_eq!(
-            stacktrace_build_nm_command(&mut nm, false, "/tmp/fweelin';touch /tmp/pwned #"),
-            0
-        );
-        assert_eq!(
-            std::ffi::CStr::from_bytes_until_nul(&nm)
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "nm -B '/tmp/fweelin'\"'\"';touch /tmp/pwned #'"
-        );
-
-        let mut debugger = [0; 512];
-        assert_eq!(
-            stacktrace_build_debugger_command(&mut debugger, "/tmp/fweelin", "/tmp/cmds.gdb"),
-            0
-        );
-        assert_eq!(
-            std::ffi::CStr::from_bytes_until_nul(&debugger)
-                .unwrap()
-                .to_str()
-                .unwrap(),
+            cmd,
             format!(
                 "gdb -q '/tmp/fweelin' {} 2>/dev/null <'/tmp/cmds.gdb' >fweelin-stackdump",
                 process::id()
@@ -269,44 +190,22 @@ mod tests {
     }
 
     #[test]
-    fn c_nm_parse_and_symbol_copy_contract() {
-        let mut address = 0;
-        let mut typ = '\0';
-        let mut name = [b'x'; 8];
-        assert_eq!(
-            stacktrace_parse_nm_symbol_line(
-                "0x1234abcd T long_symbol",
-                &mut address,
-                &mut typ,
-                &mut name
-            ),
-            1
-        );
-        assert_eq!(address, 0x1234_abcd);
+    fn nm_parse_and_symbol_copy() {
+        // parse_nm_symbol_line parsing
+        let (addr, typ, name) = parse_nm_symbol_line("0x1234abcd T long_symbol").unwrap();
+        assert_eq!(addr, 0x1234_abcd);
         assert_eq!(typ, 'T');
-        assert_eq!(&name, b"long_sy\0");
+        assert_eq!(name, "long_symbol");
 
-        let mut copied = [b'x'; 8];
-        assert_eq!(stacktrace_copy_symbol_name(&mut copied, "123456789"), 0);
-        assert_eq!(&copied, b"1234567\0");
+        // copy_symbol_name truncation
+        assert_eq!(copy_symbol_name("123456789", 7), "1234567");
+
+        // copy_symbol_name_bytes with NUL
         assert_eq!(copy_symbol_name_bytes(b"abc\0def", 8), b"abc");
     }
-
     #[test]
-    fn c_symbol_format_contract() {
-        let mut short = [b'q'; 32];
-        assert_eq!(
-            stacktrace_format_symbol_entry(
-                &mut short,
-                7,
-                0x1234_5678,
-                Some(&"A".repeat(255)),
-                0x44,
-                'T'
-            ),
-            -1
-        );
-        assert_eq!(short[31], 0);
+    fn symbol_format() {
+        // format_symbol_entry formatting
         assert_eq!(
             format_symbol_entry(-1, 0x1234, Some("short_name"), 0x20, 't'),
             "[-1] 0x00001234 <short_name + 0x20> t\n"

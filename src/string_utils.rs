@@ -59,14 +59,7 @@ pub fn dup_token_bytes(span: &ByteTokenSpan<'_>) -> Vec<u8> {
         .collect()
 }
 
-pub fn split_token(src: Option<&str>, delim: u8) -> TokenSpan<'_> {
-    let Some(src) = src else {
-        return TokenSpan {
-            begin: "",
-            len: 0,
-            next: None,
-        };
-    };
+pub fn split_token(src: &str, delim: u8) -> TokenSpan<'_> {
     let bytes = c_string_bytes(src.as_bytes());
     let len = if delim == 0 {
         bytes.len()
@@ -92,23 +85,23 @@ pub fn dup_token(span: &TokenSpan<'_>) -> String {
     span.begin.get(..span.len).unwrap_or("").to_owned()
 }
 
-pub fn copy_truncate_bytes(dst: Option<&mut [u8]>, src: Option<&[u8]>) -> usize {
+pub fn copy_truncate_bytes(dst: Option<&mut [u8]>, src: &[u8]) -> usize {
     let Some(dst) = dst else { return 0 };
     if dst.is_empty() {
         return 0;
     }
-    let bytes = src.map(c_string_bytes).unwrap_or_default();
+    let bytes = c_string_bytes(src);
     let n = bytes.len().min(dst.len() - 1);
     dst[..n].copy_from_slice(&bytes[..n]);
     dst[n] = 0;
     n
 }
 
-pub fn copy_truncate(dst: Option<&mut [u8]>, src: Option<&str>) -> usize {
-    copy_truncate_bytes(dst, src.map(str::as_bytes))
+pub fn copy_truncate(dst: Option<&mut [u8]>, src: &str) -> usize {
+    copy_truncate_bytes(dst, src.as_bytes())
 }
 
-pub fn append_truncate_bytes(dst: Option<&mut [u8]>, src: Option<&[u8]>) -> usize {
+pub fn append_truncate_bytes(dst: Option<&mut [u8]>, src: &[u8]) -> usize {
     let Some(dst) = dst else { return 0 };
     if dst.is_empty() {
         return 0;
@@ -118,7 +111,7 @@ pub fn append_truncate_bytes(dst: Option<&mut [u8]>, src: Option<&[u8]>) -> usiz
         dst[pos - 1] = 0;
         return pos - 1;
     }
-    let bytes = src.map(c_string_bytes).unwrap_or_default();
+    let bytes = c_string_bytes(src);
     let n = bytes.len().min(dst.len() - 1 - pos);
     dst[pos..pos + n].copy_from_slice(&bytes[..n]);
     pos += n;
@@ -126,19 +119,19 @@ pub fn append_truncate_bytes(dst: Option<&mut [u8]>, src: Option<&[u8]>) -> usiz
     pos
 }
 
-pub fn append_truncate(dst: Option<&mut [u8]>, src: Option<&str>) -> usize {
-    append_truncate_bytes(dst, src.map(str::as_bytes))
+pub fn append_truncate(dst: Option<&mut [u8]>, src: &str) -> usize {
+    append_truncate_bytes(dst, src.as_bytes())
 }
 
-pub fn copy_filename_truncate(dst: Option<&mut [u8]>, src: Option<&str>) -> bool {
+pub fn copy_filename_truncate(dst: Option<&mut [u8]>, src: &str) -> bool {
     let copied = copy_truncate(dst, src);
-    src.is_some_and(|s| copied < c_string_bytes(s.as_bytes()).len())
+    copied < c_string_bytes(src.as_bytes()).len()
 }
 
 pub fn expand_home_path(
     dst: Option<&mut [u8]>,
-    src: Option<&str>,
-    home_dir: Option<&str>,
+    src: &str,
+    home_dir: &str,
 ) -> PathExpandResult {
     let Some(dst) = dst else {
         return PathExpandResult::Truncated;
@@ -146,24 +139,21 @@ pub fn expand_home_path(
     if dst.is_empty() {
         return PathExpandResult::Truncated;
     }
-    let Some(src) = src else {
-        dst[0] = 0;
-        return PathExpandResult::Ok;
-    };
     let src_bytes = c_string_bytes(src.as_bytes());
     if src_bytes.first() != Some(&b'~') {
-        return if copy_filename_truncate(Some(&mut *dst), Some(src)) {
+        return if copy_filename_truncate(Some(&mut *dst), src) {
             PathExpandResult::Truncated
         } else {
             PathExpandResult::Ok
         };
     }
-    let Some(home) = home_dir.filter(|s| !s.is_empty()) else {
+    if home_dir.is_empty() {
         dst[0] = 0;
         return PathExpandResult::MissingHome;
-    };
-    let copied = copy_truncate_bytes(Some(&mut *dst), Some(home.as_bytes()));
-    let expanded = append_truncate_bytes(Some(&mut *dst), Some(&src_bytes[1..]));
+    }
+    let home = home_dir;
+    let copied = copy_truncate_bytes(Some(&mut *dst), home.as_bytes());
+    let expanded = append_truncate_bytes(Some(&mut *dst), &src_bytes[1..]);
     if copied < c_string_bytes(home.as_bytes()).len() || expanded - copied < src_bytes[1..].len() {
         PathExpandResult::Truncated
     } else {
@@ -172,17 +162,13 @@ pub fn expand_home_path(
 }
 
 pub fn alloc_saveable_stub(
-    basename: Option<&str>,
-    hashtext: Option<&str>,
-    objname: Option<&str>,
-    ext: Option<&str>,
+    basename: &str,
+    hashtext: &str,
+    objname: &str,
+    ext: &str,
 ) -> String {
-    let basename = basename.unwrap_or("");
-    let hashtext = hashtext.unwrap_or("");
-    let objname = objname.filter(|s| !s.is_empty());
-    let ext = ext.unwrap_or("");
     let mut out = format!("{basename}-{hashtext}");
-    if let Some(objname) = objname {
+    if !objname.is_empty() {
         out.push('-');
         out.push_str(objname);
     }
@@ -191,15 +177,15 @@ pub fn alloc_saveable_stub(
 }
 
 pub fn alloc_saveable_path(
-    library_path: Option<&str>,
-    basename: Option<&str>,
-    hashtext: Option<&str>,
-    objname: Option<&str>,
-    ext: Option<&str>,
+    library_path: &str,
+    basename: &str,
+    hashtext: &str,
+    objname: &str,
+    ext: &str,
 ) -> String {
     format!(
         "{}/{}",
-        library_path.unwrap_or(""),
+        library_path,
         alloc_saveable_stub(basename, hashtext, objname, ext)
     )
 }
@@ -222,19 +208,19 @@ mod tests {
     #[test]
     fn bounded_copy_append_and_home_expansion_stop_at_c_nul() {
         let mut buffer = [0xaa; 6];
-        assert_eq!(copy_truncate_bytes(Some(&mut buffer), Some(b"abc\0def")), 3);
+        assert_eq!(copy_truncate_bytes(Some(&mut buffer), b"abc\0def"), 3);
         assert_eq!(&buffer[..4], b"abc\0");
-        assert_eq!(append_truncate_bytes(Some(&mut buffer), Some(b"XY\0z")), 5);
+        assert_eq!(append_truncate_bytes(Some(&mut buffer), b"XY\0z"), 5);
         assert_eq!(&buffer, b"abcXY\0");
 
         let mut path = [0; 12];
         assert_eq!(
-            expand_home_path(Some(&mut path), Some("~/x"), Some("/home/a")),
+            expand_home_path(Some(&mut path), "~/x", "/home/a"),
             PathExpandResult::Ok
         );
         assert_eq!(&path[..10], b"/home/a/x\0");
         assert_eq!(
-            expand_home_path(Some(&mut path), Some("~/long"), Some("/home/abcdef")),
+            expand_home_path(Some(&mut path), "~/long", "/home/abcdef"),
             PathExpandResult::Truncated
         );
     }
@@ -242,11 +228,11 @@ mod tests {
     #[test]
     fn saveable_names_match_cpp_separator_rules() {
         assert_eq!(
-            alloc_saveable_stub(Some("loop"), Some("hash"), Some("name"), Some(".wav")),
+            alloc_saveable_stub("loop", "hash", "name", ".wav"),
             "loop-hash-name.wav"
         );
         assert_eq!(
-            alloc_saveable_path(Some(""), Some("loop"), Some("hash"), None, Some(".wav")),
+            alloc_saveable_path("", "loop", "hash", "", ".wav"),
             "/loop-hash.wav"
         );
     }

@@ -131,6 +131,14 @@ impl SmoothState {
                 out[n] = out[n] * r + self.pre[i][n] * (1.0 - r);
             }
         }
+        // Invariant: after fade, the output converges to the new signal.
+        // At n=0: out*0 + pre*1 = pre (old signal).
+        // At n=pre_len: out*1 + pre*0 = out (new signal).
+        debug_assert!(
+            self.pre_len <= outputs.iter().map(|o| o.len()).min().unwrap_or(0),
+            "fade: output shorter than pre_len={}, convergence not guaranteed",
+            self.pre_len,
+        );
         self.prewritten = false;
     }
 }

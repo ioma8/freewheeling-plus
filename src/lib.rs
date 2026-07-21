@@ -62,3 +62,5 @@ pub mod videoio;
 pub mod videoio_display_widgets;
 pub mod videoio_displays;
 pub mod videoio_platform;
+/// Pure-function extraction for Aeneas formal verification.
+pub mod verification_extractions;

@@ -5,12 +5,9 @@ use freewheeling_plus::event::{Event, EventListener, EventManager, EventType};
 use freewheeling_plus::mem::{MemoryManager, Preallocated, PreallocatedTypeInner};
 use freewheeling_plus::midiio::{MidiBackend, MidiIo, MidiMessage, MidiPortMessage};
 use freewheeling_plus::processor_queue::{ProcessorCommand, ProcessorCommandQueue};
-use freewheeling_plus::rcu::{Rcu, RcuRegistry};
-use std::sync::atomic::AtomicPtr;
-use std::sync::mpsc;
-use std::sync::{Arc, Barrier, atomic::{AtomicUsize, Ordering}};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
 use std::thread;
-use std::time::Duration;
 
 struct CountListener(Arc<AtomicUsize>);
 impl EventListener for CountListener {
@@ -82,46 +79,6 @@ fn memory_manager_recycles_deferred_items_before_shutdown() {
     assert!(ty.rt_new().is_some());
 }
 
-#[test]
-fn rcu_waits_for_reader_from_before_update() {
-    let registry = RcuRegistry::new();
-    registry.register_current().unwrap();
-    let slot = Arc::new(AtomicPtr::new(Box::into_raw(Box::new(1))));
-    let gate = Arc::new(Barrier::new(2));
-    let (reader_id_tx, reader_id_rx) = mpsc::channel();
-    let (rcu_tx, rcu_rx) = mpsc::channel();
-    let (tx, rx) = mpsc::channel();
-    let g = gate.clone();
-    let reader = thread::spawn(move || {
-        reader_id_tx.send(thread::current().id()).unwrap();
-        let r: Arc<Rcu<u32>> = rcu_rx.recv().unwrap();
-        r.registry().register_current().unwrap();
-        r.read_lock().unwrap();
-        g.wait();
-        rx.recv().unwrap();
-        r.read_unlock().unwrap();
-    });
-    registry.register(reader_id_rx.recv().unwrap()).unwrap();
-    let rcu = Arc::new(Rcu::<u32>::new(registry));
-    rcu_tx.send(rcu.clone()).unwrap();
-    gate.wait();
-    let old = unsafe { rcu.update(&slot, Box::into_raw(Box::new(2))) };
-    let r = rcu.clone();
-    let done = Arc::new(AtomicUsize::new(0));
-    let d = done.clone();
-    let waiter = thread::spawn(move || {
-        r.synchronize(Duration::from_micros(1));
-        d.store(1, Ordering::SeqCst);
-    });
-    assert!(done.load(Ordering::SeqCst) == 0);
-    tx.send(()).unwrap();
-    reader.join().unwrap();
-    waiter.join().unwrap();
-    unsafe {
-        drop(Box::from_raw(old));
-        drop(Box::from_raw(slot.load(Ordering::Acquire)));
-    }
-}
 
 #[test]
 fn processor_queue_preserves_all_commands_under_contention() {

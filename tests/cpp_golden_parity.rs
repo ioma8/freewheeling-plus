@@ -138,7 +138,7 @@ fn cpp_persistence_naming_golden_vectors() {
         "library/loop-0011AABB.dat"
     );
     assert_eq!(
-        alloc_saveable_stub(Some("loop"), Some("0011AABB"), Some("lead"), Some(".ogg")),
+        alloc_saveable_stub("loop", "0011AABB", "lead", ".ogg"),
         "loop-0011AABB-lead.ogg"
     );
     assert_eq!(

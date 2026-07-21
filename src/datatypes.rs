@@ -33,17 +33,16 @@ pub const CFG_VAR_SIZE: usize = 16;
 /// Callback interface used by realtime data structures when the registered
 /// reader/writer-thread count changes.  This mirrors the C++ abstract class;
 /// implementations decide how to resize or otherwise update themselves.
-#[allow(non_camel_case_types)]
-pub trait RTDataStruct_Updater {
+pub trait RtDataStructUpdater {
     fn update_num_rw_threads(&mut self, new_num_writers: i32);
 }
 
 #[cfg(test)]
 mod rt_data_struct_updater_tests {
-    use super::RTDataStruct_Updater;
+    use super::RtDataStructUpdater;
 
     struct Probe(i32);
-    impl RTDataStruct_Updater for Probe {
+    impl RtDataStructUpdater for Probe {
         fn update_num_rw_threads(&mut self, n: i32) {
             self.0 = n;
         }
@@ -87,11 +86,6 @@ impl CoreDataType {
     }
 }
 
-/// Rust spelling of the C++ free function.  The C++ API accepts a mutable
-/// buffer only because it predates `const char *`; parsing never mutates it.
-pub fn get_core_data_type(name: &str) -> CoreDataType {
-    CoreDataType::from_name(name)
-}
 
 // ============================================================
 // Range

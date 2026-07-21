@@ -8,11 +8,18 @@
 pub type Sample = f32;
 pub type Frames = usize;
 
-pub const DEFAULT: i32 = 0;
-pub const GLOBAL: i32 = 1;
-pub const GLOBAL_SECOND_CHAIN: i32 = 2;
-pub const HIPRIORITY: i32 = 3;
-pub const FINAL: i32 = 4;
+/// Priority levels for child processors in the DSP graph.
+/// The numeric value is used as an index into the per-priority child list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum ProcessorPriority {
+    Default = 0,
+    Global = 1,
+    GlobalSecondChain = 2,
+    HiPriority = 3,
+    Final = 4,
+}
+
 
 pub struct AudioBuffers<'a> {
     pub inputs: [&'a [Sample]; 2],
@@ -36,7 +43,7 @@ pub trait RootApp {
 pub enum Command {
     Add {
         processor: Box<dyn Processor>,
-        kind: i32,
+        kind: ProcessorPriority,
         silent: bool,
     },
     Delete {
@@ -51,7 +58,7 @@ pub trait CommandQueue {
 
 struct Item {
     processor: Box<dyn Processor>,
-    kind: i32,
+    kind: ProcessorPriority,
     silent: bool,
     status: Status,
 }
@@ -143,7 +150,7 @@ impl<A: RootApp, Q: CommandQueue> RootProcessor<A, Q> {
         self.input_volume = value;
         self.input_delta = 1.0;
     }
-    pub fn add_child(&mut self, processor: Box<dyn Processor>, kind: i32, silent: bool) -> bool {
+    pub fn add_child(&mut self, processor: Box<dyn Processor>, kind: ProcessorPriority, silent: bool) -> bool {
         self.do_preprocess();
         self.queue.as_mut().is_some_and(|q| {
             q.push(Command::Add {
@@ -273,27 +280,43 @@ impl<A: RootApp, Q: CommandQueue> RootProcessor<A, Q> {
         len: Frames,
         mut main: Option<&mut AudioBuffers<'_>>,
         child: &mut AudioBuffers<'_>,
-        kind: i32,
+        kind: ProcessorPriority,
         mix: bool,
     ) {
-        for item in children {
+        // Invariant (debug builds): all live items of `kind` are processed.
+        #[cfg(debug_assertions)]
+        let expected = children
+            .iter()
+            .filter(|i| i.status != Status::PendingDelete && i.kind == kind)
+            .count();
+        #[cfg(debug_assertions)]
+        let mut processed = 0usize;
+
+        for item in children.iter_mut() {
             if item.status != Status::PendingDelete && item.kind == kind {
                 item.processor.process(pre, len, child);
                 if !pre && item.status == Status::LivePendingDelete {
                     item.status = Status::PendingDelete;
                 }
                 if mix && !item.silent {
-                    let main = main
-                        .as_deref_mut()
-                        .expect("mixing chain must have main output buffers");
+                    let main = main.as_deref_mut().expect("mixing needs main output");
                     for c in 0..if stereo { 2 } else { 1 } {
                         for n in 0..len {
                             main.outputs[c][n] += child.outputs[c][n];
                         }
                     }
                 }
+                #[cfg(debug_assertions)]
+                {
+                    processed += 1;
+                }
             }
         }
+
+        debug_assert_eq!(
+            processed, expected,
+            "chain({kind:?}): {processed}/{expected} items processed"
+        );
     }
     pub fn process(&mut self, pre: bool, requested: Frames, buffers: &mut AudioBuffers<'_>) {
         let len = requested.min(self.app.fragment_size());
@@ -335,7 +358,7 @@ impl<A: RootApp, Q: CommandQueue> RootProcessor<A, Q> {
                 len,
                 Some(buffers),
                 &mut child,
-                HIPRIORITY,
+                ProcessorPriority::HiPriority,
                 true,
             );
             Self::chain(
@@ -345,7 +368,7 @@ impl<A: RootApp, Q: CommandQueue> RootProcessor<A, Q> {
                 len,
                 Some(buffers),
                 &mut child,
-                DEFAULT,
+                ProcessorPriority::Default,
                 true,
             );
         }
@@ -399,7 +422,7 @@ impl<A: RootApp, Q: CommandQueue> RootProcessor<A, Q> {
                     len,
                     None,
                     &mut child,
-                    GLOBAL_SECOND_CHAIN,
+                    ProcessorPriority::GlobalSecondChain,
                     false,
                 );
             }
@@ -425,7 +448,7 @@ impl<A: RootApp, Q: CommandQueue> RootProcessor<A, Q> {
                     len,
                     Some(buffers),
                     &mut child,
-                    GLOBAL,
+                    ProcessorPriority::Global,
                     true,
                 );
             }
@@ -450,7 +473,7 @@ impl<A: RootApp, Q: CommandQueue> RootProcessor<A, Q> {
                 len,
                 None,
                 &mut child,
-                FINAL,
+                    ProcessorPriority::Final,
                 false,
             );
         }
@@ -517,7 +540,7 @@ mod tests {
     fn mono_root_processes_full_fragment_and_counts_samples() {
         let mut root = RootProcessor::new(App, vec![], 1);
         root.final_prep(Queue::default());
-        assert!(root.add_child(Box::new(Constant), DEFAULT, false));
+        assert!(root.add_child(Box::new(Constant), ProcessorPriority::Default, false));
 
         let mut output = [0.0; 4];
         let mut empty_input_left = [];
@@ -540,8 +563,8 @@ mod tests {
         let mut root = RootProcessor::new(App, vec![], 1);
         root.final_prep(Queue::default());
         root.set_output_volume(2.0);
-        assert!(root.add_child(Box::new(Value(1.0)), DEFAULT, false));
-        assert!(root.add_child(Box::new(Value(3.0)), GLOBAL, false));
+        assert!(root.add_child(Box::new(Value(1.0)), ProcessorPriority::Default, false));
+        assert!(root.add_child(Box::new(Value(3.0)), ProcessorPriority::Global, false));
 
         let mut output = [0.0; 4];
         let mut empty_input_left = [];
@@ -563,7 +586,7 @@ mod tests {
     fn graph_change_fades_the_cpp_preprocessed_root_output() {
         let mut root = RootProcessor::new(App, vec![], 1);
         root.final_prep(Queue::default());
-        assert!(root.add_child(Box::new(Value(1.0)), DEFAULT, false));
+        assert!(root.add_child(Box::new(Value(1.0)), ProcessorPriority::Default, false));
 
         let mut output = [0.0; 4];
         let empty_input_left = [];
@@ -580,7 +603,7 @@ mod tests {
         // `AddChild` runs RootProcessor::dopreprocess before queueing the
         // change. The next normal fragment fades old 1.0 into new 4.0 using
         // C++'s fixed 64-sample ramp.
-        assert!(root.add_child(Box::new(Value(3.0)), DEFAULT, false));
+        assert!(root.add_child(Box::new(Value(3.0)), ProcessorPriority::Default, false));
         root.process(false, 4, &mut buffers);
         assert_eq!(buffers.outputs[0][0], 1.0);
         assert!((buffers.outputs[0][1] - (1.0 + 3.0 / 64.0)).abs() < 1e-6);
@@ -592,10 +615,10 @@ mod tests {
         root.final_prep(Queue::default());
         root.set_output_volume(2.0);
         let captured = Arc::new(Mutex::new(Vec::new()));
-        assert!(root.add_child(Box::new(Value(1.0)), DEFAULT, false));
+        assert!(root.add_child(Box::new(Value(1.0)), ProcessorPriority::Default, false));
         assert!(root.add_child(
             Box::new(CaptureInput(Arc::clone(&captured))),
-            GLOBAL_SECOND_CHAIN,
+            ProcessorPriority::GlobalSecondChain,
             true,
         ));
 
