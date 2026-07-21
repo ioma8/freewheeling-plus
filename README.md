@@ -21,8 +21,7 @@ Requires the Android SDK, NDK, and `cargo-apk`:
 #    NDK: SDK Tools tab → check "NDK (Side by side)" → Apply
 
 # 2. Set environment variables:
-export ANDROID_HOME=$HOME/Library/Android/sdk
-export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973
+export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.15729638
 
 # 3. Install cargo subcommands and Rust target
 cargo install cargo-apk
