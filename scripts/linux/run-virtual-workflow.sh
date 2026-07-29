@@ -11,8 +11,8 @@ REVISION=$(git -C "$ROOT" rev-parse --verify HEAD)
 [ -n "$REVISION" ] || { echo "error: cannot determine checked-out revision" >&2; exit 1; }
 rm -f "$ATTESTATION" "$RESULT"
 mkdir -p "$EVIDENCE_DIR"
-cargo build --manifest-path "$CRATE/Cargo.toml" --locked --bin realtime_acceptance
-cargo test --manifest-path "$CRATE/Cargo.toml" --locked --test linux_virtual_acceptance
+cargo build --manifest-path "$CRATE/Cargo.toml" --locked --features jack --bin realtime_acceptance
+cargo test --manifest-path "$CRATE/Cargo.toml" --locked --features jack --test linux_virtual_acceptance
 FWP_ACCEPTANCE_REVISION="$REVISION" FWP_ACCEPTANCE_EVIDENCE_MODE=virtual-jack \
 FWP_PERFORMANCE_RESULT="$RESULT" FWP_REALTIME_ACCEPTANCE_SECONDS=${FWP_REALTIME_ACCEPTANCE_SECONDS:-3} \
   "$CRATE/scripts/linux/run-virtual-acceptance.sh"
@@ -23,7 +23,7 @@ result = json.loads(result_path.read_text(encoding="utf-8"))
 if result.get("git_revision") != revision: raise SystemExit("error: result revision mismatch")
 if result.get("evidence_mode") != "virtual-jack": raise SystemExit("error: result evidence mode mismatch")
 attestation = {"schema_version": 1, "status": "passed", "git_revision": revision,
- "evidence_mode": "virtual-jack", "actions": ["cargo build --bin realtime_acceptance", "cargo test --test linux_virtual_acceptance", "JACK dummy runtime/ports/transport acceptance"],
+ "evidence_mode": "virtual-jack", "actions": ["cargo build --features jack --bin realtime_acceptance", "cargo test --features jack --test linux_virtual_acceptance", "JACK dummy runtime/ports/transport acceptance"],
  "performance_result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest()}
 temporary = attestation_path.with_name(attestation_path.name + ".tmp")
 temporary.write_text(json.dumps(attestation, sort_keys=True, indent=2) + "\n", encoding="utf-8")

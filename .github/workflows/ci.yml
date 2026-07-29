@@ -18,6 +18,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libjack-jackd2-dev
       - name: cargo check
         run: cargo check --all-targets
+      - name: cargo check with JACK
+        run: cargo check --all-targets --features jack
 
   clippy:
     runs-on: ubuntu-latest

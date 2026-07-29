@@ -45,6 +45,25 @@ cargo build --release
 cargo test
 ```
 
+JACK support is optional. The default build uses the platform-native backend
+and does not require or link against JACK. Enable it at build time with:
+
+```sh
+cargo build --release --features jack
+```
+
+To build and run with JACK:
+
+```sh
+# macOS only
+brew install jack
+
+FWEELIN_AUDIO_BACKEND=jack cargo run --release --features jack
+```
+
+On Linux, install your distribution's JACK development package before building.
+Selecting `FWEELIN_AUDIO_BACKEND=jack` in a build without the feature exits with
+an error explaining that the application must be rebuilt with `--features jack`.
 
 ## Audio Backend
 
@@ -56,7 +75,7 @@ The audio backend is selected at startup via the `FWEELIN_AUDIO_BACKEND` environ
 | `jack` | JACK (`brew install jack`) | JACK | JACK ([jackaudio.org](https://jackaudio.org)) | — |
 | `cpal` | CPAL (explicit override) | CPAL | CPAL | CPAL |
 
-**JACK** provides external transport sync (bar/beat/bpm from a DAW) and integrated MIDI ports. On macOS, install JACK via Homebrew: `brew install jack`.
+**JACK** provides external transport sync (bar/beat/bpm from a DAW) and integrated MIDI ports.
 
 **CPAL** requires no audio server — it uses the platform's default audio API (CoreAudio on macOS, ALSA on Linux). Transport state is synthesized from the internal pulse clock.
 

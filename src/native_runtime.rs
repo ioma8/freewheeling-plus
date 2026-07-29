@@ -10,7 +10,10 @@ use crate::audio_native_cpal::{CpalAudioOptions, DeviceSelection};
 use crate::audio_native_cpal::CpalAudioBackend;
 use crate::audioio::{AnyAudioBackend, AudioBackend, AudioIO};
 use crate::block::{AudioBlock, AudioBlockIterator, Codec, ExtraChannel};
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(all(
+    feature = "jack",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
 use crate::jack::JackAudioMidiBackend;
 #[cfg(target_os = "macos")]
 use crate::macos_audio_unit::MacosAudioUnitBackend;
@@ -2951,14 +2954,31 @@ impl NativeStartupAdapter for NativeRuntime {
                     .unwrap_or_default();
                 let backend: AnyAudioBackend = match kind {
                     AudioBackendKind::Jack => {
-                        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+                        #[cfg(all(
+                            feature = "jack",
+                            any(
+                                target_os = "linux",
+                                target_os = "macos",
+                                target_os = "windows"
+                            )
+                        ))]
                         {
                             AnyAudioBackend::Jack(JackAudioMidiBackend::new(1, 1))
                         }
-                        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+                        #[cfg(not(all(
+                            feature = "jack",
+                            any(
+                                target_os = "linux",
+                                target_os = "macos",
+                                target_os = "windows"
+                            )
+                        )))]
                         {
                             let _ = kind;
-                            return Err("JACK backend is not available on this platform".into());
+                            return Err(
+                                "JACK backend is not available; rebuild with --features jack"
+                                    .into(),
+                            );
                         }
                     }
                     AudioBackendKind::Cpal => {
@@ -2997,7 +3017,10 @@ impl NativeStartupAdapter for NativeRuntime {
                 };
                 let backend_name = match &backend {
                     AnyAudioBackend::Cpal(_) => "CPAL",
-                    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+                    #[cfg(all(
+                        feature = "jack",
+                        any(target_os = "linux", target_os = "macos", target_os = "windows")
+                    ))]
                     AnyAudioBackend::Jack(_) => "JACK",
                     #[cfg(target_os = "macos")]
                     AnyAudioBackend::AudioUnit(_) => "AudioUnit",

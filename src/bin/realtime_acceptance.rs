@@ -239,12 +239,12 @@ fn parse_positive_u32(name: &str, value: &str) -> Result<u32, String> {
     Ok(parsed)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "jack"))]
 type NativeBackend = freewheeling_plus::jack::JackAudioMidiBackend;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "jack"))]
 fn native_backend(requested: RequestedFormat) -> Result<NativeBackend, String> {
-    let (client, _) = freewheeling_plus::jack::Client::new(
+    let (client, _) = jack::Client::new(
         "freewheeling-realtime-acceptance-config",
         jack::ClientOptions::NO_START_SERVER,
     )
@@ -271,12 +271,12 @@ fn native_backend(requested: RequestedFormat) -> Result<NativeBackend, String> {
     Ok(NativeBackend::new(1, 1))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "jack"))]
 fn jack_buffer_frames(requested: RequestedFormat) -> u32 {
     requested.buffer_frames
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "jack"))]
 fn print_device_diagnostics(requested: RequestedFormat) -> Result<(), String> {
     eprintln!(
         "realtime acceptance request: JACK, sample_rate={} Hz, buffer_frames={}",
@@ -285,10 +285,10 @@ fn print_device_diagnostics(requested: RequestedFormat) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", feature = "jack")))]
 type NativeBackend = freewheeling_plus::audio_native_cpal::CpalAudioBackend;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", feature = "jack")))]
 fn native_backend(requested: RequestedFormat) -> Result<NativeBackend, String> {
     Ok(NativeBackend::new(
         Default::default(),
@@ -296,7 +296,7 @@ fn native_backend(requested: RequestedFormat) -> Result<NativeBackend, String> {
     ))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", feature = "jack")))]
 fn print_device_diagnostics(requested: RequestedFormat) -> Result<(), String> {
     use freewheeling_plus::audio_native_cpal::CpalAudioBackend;
 
@@ -319,7 +319,7 @@ fn print_device_diagnostics(requested: RequestedFormat) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", feature = "jack")))]
 fn cpal_options(
     requested: RequestedFormat,
 ) -> freewheeling_plus::audio_native_cpal::CpalAudioOptions {
@@ -352,7 +352,7 @@ mod tests {
         assert!(requested_format_from(Some("48000"), Some("512")).is_err());
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(all(target_os = "linux", feature = "jack")))]
     #[test]
     fn requests_128_frames_from_cpal() {
         let options = cpal_options(RequestedFormat {
@@ -375,7 +375,7 @@ mod tests {
         assert_eq!(expected_callback_count(1.0, 48_000, 256), 178);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "jack"))]
     #[test]
     fn requests_128_frames_from_jack() {
         assert_eq!(

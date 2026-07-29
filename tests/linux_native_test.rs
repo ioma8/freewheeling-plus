@@ -1,3 +1,5 @@
+#![cfg(feature = "jack")]
+
 // The production module is deliberately not wired through src/lib.rs in this
 // lane, so this harness exposes its portable dependencies directly.
 pub mod audioio {

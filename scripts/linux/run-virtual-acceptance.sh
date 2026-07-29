@@ -35,7 +35,8 @@ until jack_lsp >/dev/null 2>&1; do
 done
 
 FWP_PERFORMANCE_RESULT="$RESULT" FWP_REALTIME_ACCEPTANCE_SECONDS=${FWP_REALTIME_ACCEPTANCE_SECONDS:-3} \
-  cargo run --quiet --manifest-path "$CRATE/Cargo.toml" --locked --bin realtime_acceptance &
+  cargo run --quiet --manifest-path "$CRATE/Cargo.toml" --locked --features jack \
+    --bin realtime_acceptance &
 APP_PID=$!
 i=0
 until jack_lsp | grep -q '^freewheeling-realtime-acceptance:'; do
