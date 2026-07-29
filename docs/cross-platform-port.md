@@ -147,7 +147,7 @@ The existing macOS bundling test (`bundle_verifier_requires_executable...`) need
 - `libc` signals — Android is Linux kernel
 ### Already Works — Plus Implemented
 
-- ✅ `src/main.rs` — `SDL_main` entry point for Android JNI glue
+- ✅ `src/lib.rs` — `SDL_main` entry point for Android JNI glue
 - ✅ `src/main.rs` — Signal handlers (fatal + shutdown only, avoids SIGUSR*)
 - ✅ `src/native_startup.rs` — `application_support_path` returns Android internal storage
 - ✅ `src/audio_native_cpal.rs` — `DEFAULT_BUFFER_FRAMES = 256` for Android OpenSL ES
@@ -173,13 +173,14 @@ cargo apk run --release
 
 The `sdl2` crate's `bundled` feature compiles SDL2 from source for Android targets. Requires NDK tools on PATH.
 
-#### 2.2 Entry Point — `android_main`
+#### 2.2 Entry Point — `SDL_main`
 
-SDL2 on Android expects a JNI entry point named `Java_org_libsdl_app_SDLActivity_nativeInit`. Add to `src/main.rs`:
+`cargo-apk` packages the Rust `cdylib` and Android's `NativeActivity` loads its
+`SDL_main` export through SDL2's Java glue. Keep the export in `src/lib.rs`:
 
 ```rust
 #[cfg(target_os = "android")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn SDL_main(_argc: i32, _argv: *const *const i8) -> i32 {
     Application::run()
 }

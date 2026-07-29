@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 default-run = "freewheeling-plus"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 libc = "0.2"
 roxmltree = "0.20"

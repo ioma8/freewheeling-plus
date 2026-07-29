@@ -21,19 +21,22 @@ Requires the Android SDK, NDK, and `cargo-apk`:
 #    NDK: SDK Tools tab → check "NDK (Side by side)" → Apply
 
 export ANDROID_HOME=/Users/jakubkolcar/Library/Android/sdk
-export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.15729638
+export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358
 # 3. Install cargo subcommands and Rust target
 cargo install cargo-apk
 rustup target add aarch64-linux-android
 
-# 4. Build APK (install + run on connected device/emulator)
-cargo apk build --release
-# or
-cargo apk run --release
+# 4. Build the ARM64 APK
+./android-build.sh
+
+# Select another installed NDK if needed:
+ANDROID_NDK_VERSION=30.0.15729638 ./android-build.sh
 ```
 
 On first build, `cargo-apk` downloads remaining SDK components automatically.
 The `sdl2` crate's `bundled` feature compiles SDL from source for Android.
+For local builds, the script signs release APKs with `$HOME/.android/debug.keystore`
+unless a release keystore is configured explicitly.
 
 ## Build
 
