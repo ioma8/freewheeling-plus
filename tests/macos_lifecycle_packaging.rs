@@ -54,6 +54,9 @@ fn packaging_documents_fail_closed_soundfont_policy() {
     let documentation = fs::read_to_string(root.join("PACKAGING.md")).unwrap();
     assert!(script.contains("BASIC_SF2_LICENSE_FILE"));
     assert!(script.contains("basic.sf2 has no proven distribution license"));
+    let universal = fs::read_to_string(root.join("scripts/package-macos-universal.sh")).unwrap();
+    assert!(universal.contains("lipo -create"));
+    assert!(universal.contains("hdiutil create"));
     assert!(documentation.contains("fails closed"));
     assert!(documentation.contains("5bf4c275a3dec39410ee130a0d90384be3ef6388"));
 }

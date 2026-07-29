@@ -1,20 +1,21 @@
-# macOS arm64 packaging
+# macOS universal packaging
 
 Packaging fails closed when required resource-license evidence, architecture,
 signing, or relocatable dependency checks are missing.
 
-Run on Apple Silicon with Rust’s `aarch64-apple-darwin` target and pinned
-`cargo-bundle` 0.11.0. Packaging deliberately stops before compiling unless a
-reviewed distribution license for `data/basic.sf2` is supplied:
+Run on macOS with Rust’s `aarch64-apple-darwin` and `x86_64-apple-darwin`
+targets and pinned `cargo-bundle` 0.11.0. Packaging deliberately stops before
+compiling unless a reviewed distribution license for `data/basic.sf2` is supplied:
 
 ```sh
 cargo install cargo-bundle --version 0.11.0 --locked
 BASIC_SF2_LICENSE_FILE=/reviewed/basic.sf2-LICENSE.txt \
-  ./scripts/package-macos-arm64.sh
+  ./scripts/package-macos-universal.sh
 ```
 
 The output is
-`target/aarch64-apple-darwin/release/bundle/osx/FreeWheeling.app`. The script
+`target/aarch64-apple-darwin/release/bundle/osx/FreeWheeling-<version>-universal.dmg`.
+The bundled app contains both arm64 and x86_64 slices. The script
 adds microphone purpose text and Finder document declarations, recursively
 copies non-system dylibs into `Contents/Frameworks`, rewrites their install
 names to `@rpath`, ad-hoc signs the finished bundle, and verifies it. Ad-hoc
@@ -25,16 +26,16 @@ fabricates Developer ID signing, notarization, or stapling.
 
 | Bundle path | Source | Purpose/license evidence |
 |---|---|---|
-| `Contents/MacOS/freewheeling-plus` | release target | arm64 executable |
+| `Contents/MacOS/freewheeling-plus` | release targets | universal arm64 + x86_64 executable |
 | `Contents/Info.plist` / `NSMicrophoneUsageDescription` | packaging metadata | required microphone purpose string for macOS consent |
-| `Contents/Resources/data/*.xml` | `../data` | authoritative configuration, mappings, patches, layouts |
-| `Contents/Resources/data/Vera.ttf` | `../data/Vera.ttf` | Bitstream Vera Sans 1.10; full embedded notice extracted during packaging |
-| `Contents/Resources/data/VeraBd.ttf` | `../data/VeraBd.ttf` | Bitstream Vera Sans Bold 1.10; embedded notice must exactly match Vera.ttf |
+| `Contents/Resources/data/*.xml` | `data` | authoritative configuration, mappings, patches, layouts |
+| `Contents/Resources/data/Vera.ttf` | `data/Vera.ttf` | Bitstream Vera Sans 1.10; full embedded notice extracted during packaging |
+| `Contents/Resources/data/VeraBd.ttf` | `data/VeraBd.ttf` | Bitstream Vera Sans Bold 1.10; embedded notice must exactly match Vera.ttf |
 | `Contents/Resources/licenses/Bitstream-Vera-NOTICE.txt` | both font name tables | distributable font license and required copyright/trademark notice |
-| `Contents/Resources/data/basic.sf2` | `../data/basic.sf2` | soundfont; distribution remains blocked without separately reviewed evidence |
+| `Contents/Resources/data/basic.sf2` | `data/basic.sf2` | soundfont; distribution remains blocked without separately reviewed evidence |
 | `Contents/Resources/licenses/basic.sf2-LICENSE.txt` | `BASIC_SF2_LICENSE_FILE` | mandatory reviewed distribution evidence |
-| `Contents/Resources/licenses/COPYING` | `../COPYING` | project GPL-2.0 text; does not establish asset licenses |
-| `Contents/Resources/licenses/AUTHORS` | `../AUTHORS` | project attribution |
+| `Contents/Resources/licenses/COPYING` | `COPYING` | project GPL-2.0 text; does not establish asset licenses |
+| `Contents/Resources/licenses/AUTHORS` | `AUTHORS` | project attribution |
 
 ## `basic.sf2` provenance finding
 
@@ -54,10 +55,18 @@ GM is documented as redistributable, but does not preserve this bank's
 
 `verify_macos_bundle.py` checks all non-license gates first: required
 resources/notices, `NSMicrophoneUsageDescription` and Finder plist entries,
-arm64-only Mach-O files, recursively bundled relocatable dependencies, and the
+expected Mach-O architectures, recursively bundled relocatable dependencies, and the
 final sealed-resource code-signature structure. Only after those pass does it
 check the separately reviewed `basic.sf2` license evidence. Consequently, the
 currently built arm64 app passes every technical bundle gate and reports the
 missing SoundFont license as its sole distribution blocker. Real Finder launch,
 microphone consent, MIDI, playback, persistence, and shutdown still require a
 macOS acceptance run.
+
+## GitHub release builds
+
+`.github/workflows/release.yml` runs for version tags (`v*`) and manual dispatch.
+It uploads an x86_64 Linux tarball and a universal macOS DMG. Configure the
+reviewed SoundFont license text as the repository Actions secret
+`BASIC_SF2_LICENSE`; the workflow writes it only to the runner and embeds it in
+each release artifact as required distribution evidence.

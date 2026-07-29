@@ -25,10 +25,13 @@ def linked_libraries(binary: pathlib.Path) -> list[str]:
     return [line.strip().split(" (compatibility", 1)[0] for line in lines if line.strip()]
 
 
-def verify_macho(binary: pathlib.Path, frameworks: pathlib.Path) -> None:
+def verify_macho(binary: pathlib.Path, frameworks: pathlib.Path, expected_architectures: set[str]) -> None:
     architectures = run("lipo", "-archs", str(binary)).split()
-    if architectures != ["arm64"]:
-        raise ValueError(f"Mach-O must be arm64-only: {binary} ({' '.join(architectures)})")
+    if set(architectures) != expected_architectures:
+        raise ValueError(
+            f"Mach-O architectures must be {' '.join(sorted(expected_architectures))}: "
+            f"{binary} ({' '.join(architectures)})"
+        )
     for dependency in linked_libraries(binary):
         if dependency.startswith(SYSTEM_PREFIXES):
             continue
@@ -65,6 +68,7 @@ def verify_signature(bundle: pathlib.Path, contents: pathlib.Path, executable: p
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("bundle", type=pathlib.Path)
+    parser.add_argument("--architectures", nargs="+", default=["arm64"])
     args = parser.parse_args()
     try:
         bundle = args.bundle.resolve()
@@ -100,9 +104,10 @@ def main() -> int:
             raise ValueError("Bitstream Vera notice is incomplete")
         if sys.platform == "darwin":
             frameworks = contents / "Frameworks"
-            verify_macho(executable, frameworks)
+            expected_architectures = set(args.architectures)
+            verify_macho(executable, frameworks, expected_architectures)
             for dylib in frameworks.glob("*.dylib"):
-                verify_macho(dylib, frameworks)
+                verify_macho(dylib, frameworks, expected_architectures)
             verify_signature(bundle, contents, executable, plist)
 
         # Keep redistribution authorization separate and last: an unlicensed

@@ -2,8 +2,8 @@
 set -eu
 umask 022
 
-ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
-CRATE="$ROOT/freewheeling-plus"
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+CRATE="$ROOT"
 VERSION=${FWP_VERSION:-1.1.0}
 TARGET=${FWP_TARGET:-x86_64-unknown-linux-gnu}
 SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$ROOT" log -1 --format=%ct 2>/dev/null || printf 0)}

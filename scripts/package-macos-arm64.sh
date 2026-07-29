@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
-  echo "error: packaging requires an Apple Silicon macOS host" >&2
+if [ "$(uname -s)" != Darwin ]; then
+  echo "error: packaging requires a macOS host" >&2
   exit 1
 fi
 
@@ -31,13 +31,13 @@ RESOURCES="$APP/Contents/Resources"
 FRAMEWORKS="$APP/Contents/Frameworks"
 mkdir -p "$RESOURCES/licenses" "$FRAMEWORKS"
 rm -rf "$RESOURCES/data"
-cp -R ../data "$RESOURCES/data"
-cp ../COPYING "$RESOURCES/licenses/COPYING"
-cp ../AUTHORS "$RESOURCES/licenses/AUTHORS"
+cp -R data "$RESOURCES/data"
+cp COPYING "$RESOURCES/licenses/COPYING"
+cp AUTHORS "$RESOURCES/licenses/AUTHORS"
 cp "$SF2_LICENSE" "$RESOURCES/licenses/basic.sf2-LICENSE.txt"
 
 # This verbatim notice is present in the name table of both bundled 1.10 TTFs.
-python3 - ../data/Vera.ttf ../data/VeraBd.ttf "$RESOURCES/licenses/Bitstream-Vera-NOTICE.txt" <<'PY'
+python3 - data/Vera.ttf data/VeraBd.ttf "$RESOURCES/licenses/Bitstream-Vera-NOTICE.txt" <<'PY'
 import pathlib, re, sys
 notices = []
 for name in sys.argv[1:3]:
