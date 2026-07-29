@@ -13,7 +13,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install deps
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libjack-jackd2-dev
       - name: cargo check
@@ -24,7 +24,7 @@ jobs:
   clippy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install deps
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libjack-jackd2-dev
       - name: cargo clippy
@@ -33,7 +33,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install deps
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libjack-jackd2-dev
       - name: cargo test
@@ -42,6 +42,6 @@ jobs:
   macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: cargo test
         run: cargo test
