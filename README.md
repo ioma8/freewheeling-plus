@@ -83,6 +83,11 @@ The audio backend is selected at startup via the `FWEELIN_AUDIO_BACKEND` environ
 cargo run --release -- --smoke-test
 ```
 
+## Stream recordings
+
+Disk-stream recordings are saved as `stream-<number>.<format>` in
+`Documents/freewheeling-recordings`. The directory is created on startup.
+
 ## License
 
 GPL-2.0 — same as the original FreeWheeling.

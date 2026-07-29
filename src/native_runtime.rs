@@ -486,6 +486,7 @@ struct RuntimeResources {
     sample_rate: u32,
     max_callback_frames: usize,
     library_dir: std::path::PathBuf,
+    stream_recordings_dir: std::path::PathBuf,
     streamer: Option<AudioStreamer>,
     memory_manager: Option<MemoryManager>,
     rcu_registry: Option<RcuRegistry>,
@@ -849,7 +850,11 @@ impl NativeRuntime {
         }
     }
 
-    fn new(library_dir: std::path::PathBuf, config: Rc<RefCell<FloConfig>>) -> Self {
+    fn new(
+        library_dir: std::path::PathBuf,
+        stream_recordings_dir: std::path::PathBuf,
+        config: Rc<RefCell<FloConfig>>,
+    ) -> Self {
         Self {
             resources: Rc::new(RefCell::new(RuntimeResources {
                 config,
@@ -910,6 +915,7 @@ impl NativeRuntime {
                 sample_rate: 0,
                 max_callback_frames: 0,
                 library_dir,
+                stream_recordings_dir,
                 streamer: None,
                 memory_manager: None,
                 rcu_registry: None,
@@ -3537,7 +3543,9 @@ impl NativeComponentAdapter for NativeRuntime {
             let path = {
                 let mut candidate = sequence;
                 loop {
-                    let path = r.library_dir.join(format!("stream-{candidate}{extension}"));
+                    let path = r
+                        .stream_recordings_dir
+                        .join(format!("stream-{candidate}{extension}"));
                     match std::fs::metadata(&path) {
                         Err(_) => break path,
                         Ok(_) => {
@@ -3661,7 +3669,11 @@ pub fn production_application() -> Result<NativeProductionApp, String> {
     config.data_dir = paths.resources.to_string_lossy().into_owned();
     config.library_dir = library_dir.to_string_lossy().into_owned();
     let config = Rc::new(RefCell::new(config));
-    let runtime = NativeRuntime::new(library_dir, Rc::clone(&config));
+    let runtime = NativeRuntime::new(
+        library_dir,
+        paths.stream_recordings.clone(),
+        Rc::clone(&config),
+    );
     Ok(ProductionApp::new(
         SharedFloConfig(config),
         NativeStartupServices::new(paths, runtime.clone()),
@@ -3746,7 +3758,11 @@ mod tests {
 
     #[test]
     fn ui_state_keeps_the_live_recording_loop_count() {
-        let runtime = NativeRuntime::new("library".into(), Rc::new(RefCell::new(FloConfig::new())));
+        let runtime = NativeRuntime::new(
+            "library".into(),
+            "recordings".into(),
+            Rc::new(RefCell::new(FloConfig::new())),
+        );
         let mut resources = runtime.resources.borrow_mut();
         resources
             .config
@@ -3766,7 +3782,11 @@ mod tests {
 
     #[test]
     fn show_debug_info_updates_runtime_diagnostics_state() {
-        let runtime = NativeRuntime::new("library".into(), Rc::new(RefCell::new(FloConfig::new())));
+        let runtime = NativeRuntime::new(
+            "library".into(),
+            "recordings".into(),
+            Rc::new(RefCell::new(FloConfig::new())),
+        );
         let mut resources = runtime.resources.borrow_mut();
 
         NativeRuntime::apply_application_action(
@@ -3997,7 +4017,11 @@ mod tests {
 
     #[test]
     fn rollback_of_unacquired_resources_is_idempotent() {
-        let runtime = NativeRuntime::new("library".into(), Rc::new(RefCell::new(FloConfig::new())));
+        let runtime = NativeRuntime::new(
+            "library".into(),
+            "recordings".into(),
+            Rc::new(RefCell::new(FloConfig::new())),
+        );
         let mut owner = runtime.clone();
         owner.rollback(StartupPhase::Audio);
         owner.rollback(StartupPhase::Audio);

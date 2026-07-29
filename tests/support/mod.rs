@@ -256,6 +256,7 @@ pub fn paths(root: PathBuf) -> NativePaths {
     NativePaths {
         resources: root.join("resources"),
         application_support: root.join("support"),
+        stream_recordings: root.join("recordings"),
         config: root.join("resources/fweelin.xml"),
     }
 }

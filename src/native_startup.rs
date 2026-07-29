@@ -12,11 +12,13 @@ use std::path::{Path, PathBuf};
 
 pub const DEFAULT_CONFIG_FILE: &str = "fweelin.xml";
 pub const DATA_DIR_ENV: &str = "FWEELIN_DATADIR";
+pub const STREAM_RECORDINGS_DIR: &str = "freewheeling-recordings";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativePaths {
     pub resources: PathBuf,
     pub application_support: PathBuf,
+    pub stream_recordings: PathBuf,
     pub config: PathBuf,
 }
 
@@ -43,9 +45,17 @@ impl NativePaths {
                 config.display()
             ));
         }
+        let stream_recordings = stream_recordings_path(home);
+        fs::create_dir_all(&stream_recordings).map_err(|error| {
+            format!(
+                "create stream recordings directory {}: {error}",
+                stream_recordings.display()
+            )
+        })?;
         Ok(Self {
             resources,
             application_support,
+            stream_recordings,
             config,
         })
     }
@@ -67,6 +77,10 @@ impl NativePaths {
             .then_some(path.clone())
             .ok_or_else(|| format!("resource not found: {}", path.display()))
     }
+}
+
+pub fn stream_recordings_path(home: &Path) -> PathBuf {
+    home.join("Documents").join(STREAM_RECORDINGS_DIR)
 }
 
 pub fn application_support_path(home: &Path) -> PathBuf {
@@ -260,6 +274,7 @@ mod tests {
         NativePaths {
             resources: PathBuf::from("resources"),
             application_support: PathBuf::from("support"),
+            stream_recordings: PathBuf::from("recordings"),
             config: PathBuf::from("resources/fweelin.xml"),
         }
     }
@@ -276,10 +291,13 @@ mod tests {
         fs::create_dir_all(&resources).unwrap();
         fs::write(resources.join(DEFAULT_CONFIG_FILE), b"<freewheeling/>").unwrap();
 
+        let paths = NativePaths::discover(&executable, &root.join("home")).unwrap();
+        assert_eq!(paths.resources, resources.canonicalize().unwrap());
         assert_eq!(
-            discover_resources(&executable).unwrap(),
-            resources.canonicalize().unwrap()
+            paths.stream_recordings,
+            root.join("home/Documents").join(STREAM_RECORDINGS_DIR)
         );
+        assert!(paths.stream_recordings.is_dir());
         fs::remove_dir_all(root).unwrap();
     }
 
