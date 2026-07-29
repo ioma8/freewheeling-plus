@@ -81,11 +81,26 @@ const UI_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(33);
 const RECOVERY_MAX_ATTEMPTS: u32 = 5;
 const RECOVERY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const RECOVERY_MAX_BACKOFF: Duration = Duration::from_secs(2);
+const BROWSER_EXPAND_DURATION: Duration = Duration::from_secs(5);
 const BROWSER_LOOP_TRAY: i32 = 1;
 const BROWSER_SCENE_TRAY: i32 = 2;
 const BROWSER_LOOP: i32 = 3;
 const BROWSER_SCENE: i32 = 4;
 const BROWSER_PATCH: i32 = 5;
+
+fn is_browser_entry(path: &std::path::Path, browser: i32) -> bool {
+    match browser {
+        BROWSER_LOOP => matches!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("wav" | "ogg" | "flac" | "au")
+        ),
+        BROWSER_SCENE => path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("scene-") && name.ends_with(".xml")),
+        _ => false,
+    }
+}
 
 /// Convert SDL window coordinates to the logical coordinates used by the
 /// XML layout and the legacy input bindings.  SDL reports window pixels (not
@@ -154,6 +169,13 @@ fn codec_extension(codec: Codec) -> Result<&'static str, String> {
     }
 }
 
+fn normalized_load_loop_id(loop_id: i32) -> i32 {
+    usize::try_from(loop_id)
+        .ok()
+        .filter(|slot| *slot < crate::native_dsp_graph::MAX_RUNTIME_LOOPS)
+        .map_or(0, |slot| slot as i32)
+}
+
 fn write_loop_metadata_or_remove_audio(
     audio: &std::path::Path,
     xml: &std::path::Path,
@@ -175,6 +197,35 @@ fn write_loop_metadata_or_remove_audio(
         };
     }
     Ok(())
+}
+
+fn save_exported_loop(
+    audio: &std::path::Path,
+    xml: &std::path::Path,
+    sample_rate: u32,
+    codec: Codec,
+    left: &[f32],
+    right: &[f32],
+    metadata: LoopTransferMetadata,
+) -> Result<(), String> {
+    if audio.exists() {
+        if !xml.exists() {
+            fs::write(
+                xml,
+                crate::core_persistence::loop_metadata_xml(metadata.beats, metadata.pulse_frames),
+            )
+            .map_err(|error| format!("save loop metadata: {error}"))?;
+        }
+        return Ok(());
+    }
+    encode_audio_file(audio, sample_rate, codec, left, Some(right))
+        .map_err(|error| format!("save loop audio '{}': {error}", audio.display()))?;
+    write_loop_metadata_or_remove_audio(
+        audio,
+        xml,
+        crate::core_persistence::loop_metadata_xml(metadata.beats, metadata.pulse_frames)
+            .as_bytes(),
+    )
 }
 
 
@@ -450,6 +501,7 @@ struct RuntimeResources {
     mixer: Option<HardwareMixerInterface<AlsaMixerBackend>>,
     browser_entries: Vec<std::path::PathBuf>,
     browser_cursors: HashMap<i32, usize>,
+    browser_expanded: HashMap<i32, Instant>,
     pending_core_events: VecDeque<CoreEvent>,
     stream_state: StreamState,
     stream_codec: Codec,
@@ -699,21 +751,29 @@ impl NativeRuntime {
         state.snapshots = (0..r.snapshots.len().max(r.snapshot_names.len()))
             .map(|id| r.snapshot_names.get(&(id as i32)).cloned())
             .collect();
-        let items: Vec<String> = r
-            .browser_entries
-            .iter()
-            .map(|p| Self::persisted_display_name(p).unwrap_or_else(|| p.display().to_string()))
-            .collect();
         for (name, browser) in [
             ("BROWSE_loop", BROWSER_LOOP),
             ("BROWSE_scene", BROWSER_SCENE),
         ] {
+            let items = r
+                .browser_entries
+                .iter()
+                .filter(|path| is_browser_entry(path, browser))
+                .map(|path| {
+                    Self::persisted_display_name(path).unwrap_or_else(|| path.display().to_string())
+                })
+                .collect();
             state.browsers.insert(
                 name.into(),
                 BrowserSceneState {
-                    items: items.clone(),
+                    items,
                     selected: r.browser_cursors.get(&browser).copied().unwrap_or(0),
-                    expanded: false,
+                    expanded: r
+                        .browser_expanded
+                        .get(&browser)
+                        .is_some_and(|last_activity| {
+                            last_activity.elapsed() < BROWSER_EXPAND_DURATION
+                        }),
                     ..Default::default()
                 },
             );
@@ -752,7 +812,12 @@ impl NativeRuntime {
                 BrowserSceneState {
                     items: bank.items.iter().map(|i| i.name.clone()).collect(),
                     selected: bank.cursor,
-                    expanded: false,
+                    expanded: r
+                        .browser_expanded
+                        .get(&BROWSER_PATCH)
+                        .is_some_and(|last_activity| {
+                            last_activity.elapsed() < BROWSER_EXPAND_DURATION
+                        }),
                     ..Default::default()
                 },
             );
@@ -870,6 +935,7 @@ impl NativeRuntime {
                 mixer: None,
                 browser_entries: Vec::new(),
                 browser_cursors: HashMap::new(),
+                browser_expanded: HashMap::new(),
                 pending_core_events: VecDeque::new(),
                 stream_state: StreamState::Stopped,
                 stream_codec: Codec::Vorbis,
@@ -1207,6 +1273,17 @@ impl NativeRuntime {
                 show,
             } => {
                 let video = r.video.as_mut().ok_or("video is closed")?;
+                // `DisplayScene` uses the display's base visibility as a
+                // first-pass render gate.  Keep it in sync with the dynamic
+                // state used by XML displays; otherwise a display authored
+                // with `show="0"` can never be made visible by
+                // `video-show-display`.
+                for display in &mut video.renderer.scene.displays {
+                    let base = display.base_mut();
+                    if (base.iid, base.id) == (interface_id, display_id) {
+                        base.set_show(show);
+                    }
+                }
                 let mut state = video.scene_state.write().expect("UI state poisoned");
                 state.displays.insert((interface_id, display_id), show);
             }
@@ -1273,10 +1350,14 @@ impl NativeRuntime {
                 Self::request_loop_export(r, slot, codec)?;
             }
             ApplicationAction::ImportSelectedLoop { browser, .. } => {
+                let browser = Self::canonical_browser_id(r, browser);
                 Self::import_selected_loop(r, browser)?;
+                r.browser_expanded.remove(&browser);
             }
             ApplicationAction::LoadSelectedScene { browser } => {
+                let browser = Self::canonical_browser_id(r, browser);
                 Self::load_selected_scene(r, browser)?;
+                r.browser_expanded.remove(&browser);
             }
             ApplicationAction::SaveScene { force_new } => {
                 r.pending_scene_save = Some(PendingSceneSave {
@@ -1289,7 +1370,9 @@ impl NativeRuntime {
                     .try_command(RuntimeCommand::RequestSnapshot)
                     .map_err(|_| "DSP command queue is full")?;
             }
-            ApplicationAction::SetLoadLoopId(loop_id) => r.load_loop_id = loop_id,
+            ApplicationAction::SetLoadLoopId(loop_id) => {
+                r.load_loop_id = normalized_load_loop_id(loop_id)
+            }
             ApplicationAction::SelectPulse(pulse) => {
                 if pulse < 0 {
                     r.controls
@@ -1427,13 +1510,20 @@ impl NativeRuntime {
                 adjust,
                 jump_adjust,
             } => {
+                let browser = Self::canonical_browser_id(r, browser);
                 if browser == BROWSER_PATCH {
                     if let Some(patches) = r.patch_browser.as_mut() {
                         patches.move_item(adjust.saturating_add(jump_adjust) as isize);
                     }
+                    r.browser_expanded.insert(browser, Instant::now());
                     return Ok(());
                 }
-                let len = r.browser_entries.len();
+                let len = r
+                    .browser_entries
+                    .iter()
+                    .filter(|path| is_browser_entry(path, browser))
+                    .count();
+                r.browser_expanded.insert(browser, Instant::now());
                 if len != 0 {
                     let cursor = r.browser_cursors.entry(browser).or_default();
                     let delta = adjust.saturating_add(jump_adjust);
@@ -1443,22 +1533,32 @@ impl NativeRuntime {
                 }
             }
             ApplicationAction::MoveBrowserItemAbsolute { browser, index } => {
+                let browser = Self::canonical_browser_id(r, browser);
                 if browser == BROWSER_PATCH {
                     if let Some(patches) = r.patch_browser.as_mut() {
                         patches.select_item(index.max(0) as usize);
                     }
+                    r.browser_expanded.insert(browser, Instant::now());
                     return Ok(());
                 }
-                let max = r.browser_entries.len().saturating_sub(1);
+                r.browser_expanded.insert(browser, Instant::now());
+                let max = r
+                    .browser_entries
+                    .iter()
+                    .filter(|path| is_browser_entry(path, browser))
+                    .count()
+                    .saturating_sub(1);
                 r.browser_cursors.insert(
                     browser,
                     usize::try_from(index.max(0)).unwrap_or(max).min(max),
                 );
             }
             ApplicationAction::BrowserItemBrowsed { browser } => {
+                let browser = Self::canonical_browser_id(r, browser);
                 r.browser_cursors.entry(browser).or_default();
             }
             ApplicationAction::SelectBrowserItem { browser } => {
+                let browser = Self::canonical_browser_id(r, browser);
                 if browser == BROWSER_PATCH {
                     if let Some(plan) = r
                         .patch_browser
@@ -1470,8 +1570,10 @@ impl NativeRuntime {
                 } else {
                     r.browser_cursors.entry(browser).or_default();
                 }
+                r.browser_expanded.remove(&browser);
             }
             ApplicationAction::RenameBrowserItem { browser } => {
+                let browser = Self::canonical_browser_id(r, browser);
                 let item = Self::selected_browser_entry(r, browser)
                     .ok_or("browser has no selected renameable item")?;
                 let old_name = Self::persisted_display_name(&r.browser_entries[item]);
@@ -1880,6 +1982,21 @@ impl NativeRuntime {
         matches!(codec, Codec::Wav | Codec::Vorbis | Codec::Flac | Codec::Au)
             .then_some(codec)
             .ok_or("unsupported configured codec".into())
+    }
+
+    /// XML bindings identify a browser by its display id; runtime browser
+    /// storage is keyed by the corresponding browser kind.
+    fn canonical_browser_id(r: &RuntimeResources, browser: i32) -> i32 {
+        let config = r.config.borrow();
+        if config.get_int("DISPLAY_browser_patch") == Some(browser) {
+            BROWSER_PATCH
+        } else if config.get_int("DISPLAY_browser_loop") == Some(browser) {
+            BROWSER_LOOP
+        } else if config.get_int("DISPLAY_browser_scene") == Some(browser) {
+            BROWSER_SCENE
+        } else {
+            browser
+        }
     }
 
     fn runtime_slot(loop_id: i32) -> Result<u8, String> {
@@ -2321,12 +2438,20 @@ impl NativeRuntime {
         if !r.pending_exports.is_empty() || !r.queued_exports.is_empty() {
             return Ok(());
         }
+        // RequestSnapshot is asynchronous.  Keep the save request alive
+        // until the DSP status queue publishes its corresponding snapshot;
+        // the next event-loop pass will continue the save.
+        if r
+            .pending_scene_save
+            .as_ref()
+            .is_some_and(|pending| pending.snapshot.is_none())
+        {
+            return Ok(());
+        }
         let Some(pending) = r.pending_scene_save.take() else {
             return Ok(());
         };
-        let snapshot = pending
-            .snapshot
-            .ok_or("scene save snapshot has not completed")?;
+        let snapshot = pending.snapshot.expect("checked above");
         let mut loop_ids: Vec<_> = snapshot
             .loops
             .iter()
@@ -2479,22 +2604,14 @@ impl NativeRuntime {
                     None,
                     Some(".xml"),
                 ));
-                if audio.exists() {
-                    return Err(format!(
-                        "MD5 collision while saving loop- file exists: {}",
-                        audio.display()
-                    ));
-                }
-                encode_audio_file(&audio, r.sample_rate, pending.codec, left, Some(right))
-                    .map_err(|error| format!("save loop {}: {error}", pending.loop_id))?;
-                let metadata_xml = crate::core_persistence::loop_metadata_xml(
-                    metadata.beats,
-                    metadata.pulse_frames,
-                );
-                write_loop_metadata_or_remove_audio(
+                save_exported_loop(
                     &audio,
                     &xml,
-                    metadata_xml.as_bytes(),
+                    r.sample_rate,
+                    pending.codec,
+                    left,
+                    right,
+                    metadata,
                 )?;
                 Ok((audio, xml, hash))
             })
@@ -3738,6 +3855,113 @@ mod tests {
         assert!(error.contains("save loop metadata"));
         assert!(!audio.exists());
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn existing_content_addressed_loop_is_reused_when_saving_a_scene() {
+        let directory = std::env::temp_dir().join(format!(
+            "freewheeling-loop-reuse-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let audio = directory.join("loop-existing.ogg");
+        let xml = directory.join("loop-existing.xml");
+        fs::write(&audio, b"existing audio").unwrap();
+        fs::write(&xml, b"<loop existing=\"yes\"/>").unwrap();
+
+        save_exported_loop(
+            &audio,
+            &xml,
+            48_000,
+            Codec::Unknown,
+            &[],
+            &[],
+            LoopTransferMetadata {
+                frames: 0,
+                position: 0,
+                mode: LoopMode::Empty,
+                gain: 1.0,
+                pulse_frames: 24_000,
+                beats: 4,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&audio).unwrap(), b"existing audio");
+        assert_eq!(fs::read(&xml).unwrap(), b"<loop existing=\"yes\"/>");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_footswitch_load_slot_falls_back_to_zero() {
+        assert_eq!(normalized_load_loop_id(340), 0);
+        assert_eq!(normalized_load_loop_id(322), 322);
+    }
+
+    #[test]
+    fn scene_save_waits_for_the_async_snapshot() {
+        let runtime = NativeRuntime::new(
+            "library".into(),
+            "recordings".into(),
+            Rc::new(RefCell::new(FloConfig::new())),
+        );
+        let resources = runtime.resources;
+        resources.borrow_mut().pending_scene_save = Some(PendingSceneSave {
+            force_new: false,
+            snapshot: None,
+        });
+
+        NativeRuntime::maybe_save_scene(&mut resources.borrow_mut()).unwrap();
+        assert!(resources.borrow().pending_scene_save.is_some());
+    }
+
+    #[test]
+    fn browser_expansion_survives_the_next_ui_refresh() {
+        let runtime = NativeRuntime::new(
+            "library".into(),
+            "recordings".into(),
+            Rc::new(RefCell::new(FloConfig::new())),
+        );
+        runtime
+            .resources
+            .borrow_mut()
+            .browser_expanded
+            .insert(BROWSER_SCENE, Instant::now());
+
+        assert!(NativeRuntime::ui_scene_state(&runtime.resources.borrow()).browsers
+            ["BROWSE_scene"]
+            .expanded);
+    }
+
+    #[test]
+    fn browser_expansion_closes_after_its_configured_delay() {
+        let runtime = NativeRuntime::new(
+            "library".into(),
+            "recordings".into(),
+            Rc::new(RefCell::new(FloConfig::new())),
+        );
+        runtime.resources.borrow_mut().browser_expanded.insert(
+            BROWSER_SCENE,
+            Instant::now() - BROWSER_EXPAND_DURATION,
+        );
+
+        assert!(
+            !NativeRuntime::ui_scene_state(&runtime.resources.borrow()).browsers
+                ["BROWSE_scene"]
+                .expanded
+        );
+    }
+
+    #[test]
+    fn loop_and_scene_browsers_show_only_their_own_files() {
+        assert!(is_browser_entry("loop-a.ogg".as_ref(), BROWSER_LOOP));
+        assert!(!is_browser_entry("loop-a.xml".as_ref(), BROWSER_LOOP));
+        assert!(is_browser_entry("scene-a.xml".as_ref(), BROWSER_SCENE));
+        assert!(!is_browser_entry("loop-a.ogg".as_ref(), BROWSER_SCENE));
     }
 
     #[test]

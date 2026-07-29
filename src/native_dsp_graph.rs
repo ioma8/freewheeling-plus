@@ -16,7 +16,8 @@ use crate::file_streamer::PcmOutput;
 
 /// Legacy pckeyboard addresses are zero-based and extend through 322.
 pub const MAX_RUNTIME_LOOPS: usize = 323;
-pub const DEFAULT_COMMAND_CAPACITY: usize = 256;
+/// A scene reset can enqueue one erase per supported loop slot.
+pub const DEFAULT_COMMAND_CAPACITY: usize = 512;
 pub const DEFAULT_STATUS_CAPACITY: usize = 64;
 pub const DEFAULT_TRANSFER_SLOTS: usize = 8;
 /// Number of simultaneously recordable loops.  Loop IDs are metadata slots;
@@ -3350,6 +3351,11 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_queue_can_clear_every_supported_loop() {
+        assert!(DEFAULT_COMMAND_CAPACITY >= MAX_RUNTIME_LOOPS);
+    }
     use crate::audioio::JackPosition;
     use crate::block::Codec;
     use crate::file_streamer::AudioStreamer;

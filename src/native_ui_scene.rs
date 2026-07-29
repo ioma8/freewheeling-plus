@@ -1604,6 +1604,10 @@ fn parse_display(
     kinds: &mut BTreeMap<String, usize>,
     display_ids: &HashMap<String, i32>,
 ) -> Result<XmlDisplay, String> {
+    let iid = node
+        .attribute("interfaceid")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(iid);
     let name = node.attribute("type").unwrap_or("text");
     *kinds.entry(name.to_string()).or_default() += 1;
     let display_id = node
@@ -2013,6 +2017,11 @@ mod tests {
                 .items
                 .is_empty()
         );
+        assert!(ui
+            .scene
+            .displays
+            .iter()
+            .any(|display| display.base().iid == 0 && display.base().id == 2));
     }
     #[test]
     fn actual_data_renders_a_nonblank_deterministic_frame() {

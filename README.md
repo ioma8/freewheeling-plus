@@ -83,6 +83,28 @@ The audio backend is selected at startup via the `FWEELIN_AUDIO_BACKEND` environ
 cargo run --release -- --smoke-test
 ```
 
+## Essential live-session controls
+
+These are the default keyboard and mouse controls for a basic session.
+
+| Control | Action |
+|---|---|
+| Click a loop, or press its `a`–`z` PC-keyboard key | On an empty slot: record; on a recording loop: stop and play; on a playing loop: toggle it off/on. |
+| `1`–`4` | Enable or disable the corresponding audio input for recording. |
+| `Shift` + `` ` `` then click a loop | Toggle overdub mode, then overdub the clicked loop. Press `Shift` + `` ` `` again to leave overdub mode. |
+| `t` | Trigger or stop all selected loops. |
+| `Shift` + click, or right-click a loop | Select or deselect that loop. |
+| Hold `Space` + click a loop | Erase that loop. |
+| `u` | Erase the last recorded loop (undo). |
+| `F8` / `F9` | Save the last recorded loop / toggle automatic loop saving. |
+| `F7` / `Shift` + `F7` | Save the current session / always save as a new session. |
+| `b` | Cycle the patch, loop, and session browsers. |
+| `-` / `=` | Previous / next browser item; the browser overlay closes after five seconds of inactivity. |
+| `Enter` | Load the selected session (or import the selected loop); also closes the browser overlay. |
+| `F4` or `Print Screen` | Start or stop recording the complete output stream to disk. |
+
+`F4` is the default laptop-keyboard shortcut; `Print Screen` is its full-keyboard equivalent.
+
 ## Stream recordings
 
 Disk-stream recordings are saved as `stream-<number>.<format>` in

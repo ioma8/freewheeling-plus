@@ -74,7 +74,7 @@ impl MidirMidiBackend {
             return Ok(Vec::new());
         }
         if available.is_empty() {
-            return Err("MIDI: no input sources discovered".into());
+            return Ok(Vec::new());
         }
         if count > available.len() {
             return Err(format!(
@@ -155,6 +155,7 @@ impl MidiBackend for MidirMidiBackend {
             self.inputs.push(connection);
         }
         drop(sender);
+        #[cfg(unix)]
         for index in 0..output_count {
             let output = midir::MidiOutput::new(CLIENT_NAME)
                 .map_err(|e| format!("MIDI: cannot create output: {e}"))?;
@@ -162,6 +163,10 @@ impl MidiBackend for MidirMidiBackend {
                 output,
                 &format!("{CLIENT_NAME} OUT {}", index + 1),
             )?);
+        }
+        #[cfg(not(unix))]
+        if output_count != 0 {
+            eprintln!("FreeWheeling: MIDI output is unavailable on this platform");
         }
         self.receiver = Some(receiver);
         self.open = true;
@@ -189,6 +194,9 @@ impl MidiBackend for MidirMidiBackend {
         if !self.open {
             return Err("MIDI backend is not open".into());
         }
+        if self.outputs.is_empty() {
+            return Ok(());
+        }
         let output = self
             .outputs
             .get_mut(message.port)
@@ -215,16 +223,6 @@ fn create_virtual_output(
         .create_virtual(name)
         .map_err(|e| format!("MIDI: cannot create virtual output {name:?}: {e}"))
 }
-#[cfg(not(unix))]
-fn create_virtual_output(
-    _output: midir::MidiOutput,
-    name: &str,
-) -> Result<midir::MidiOutputConnection, String> {
-    Err(format!(
-        "MIDI: virtual output {name:?} is not supported on this platform"
-    ))
-}
-
 #[derive(Default)]
 struct PortState {
     ports: Vec<MidiPort>,
@@ -354,6 +352,7 @@ mod tests {
             ["B"]
         );
         assert!(b.selected_names(&["A".into()], 1).is_err());
+        assert!(b.selected_names(&[], 1).unwrap().is_empty());
     }
     #[test]
     fn registry_routes_and_rejects_bad_ports() {
