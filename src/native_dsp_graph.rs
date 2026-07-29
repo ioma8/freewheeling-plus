@@ -2624,9 +2624,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
         }
         // Check for a new PcmOutput from the runtime (start streaming).
         if self.stream_output.is_none() {
-            if let Some(pcm_output) = self.stream_queue.pop() {
-                self.stream_output = Some(pcm_output);
-            }
+            self.stream_output = self.stream_queue.pop();
         }
     }
 
@@ -2740,18 +2738,19 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
     /// Reposition a new recording so its position matches the current pulse phase.
     pub fn resync_recording(&mut self, slot: u8) {
         let idx = slot as usize;
-        if let Some(s) = self.loops.get_mut(idx) {
-            if matches!(s.mode, LoopMode::Recording) && s.pulse_synced && s.len != 0 {
-                let expected = pulse_synced_loop_position(
-                    self.pulse_frames,
-                    self.pulse_position,
-                    self.pulse_long_count,
-                    s.pulse_beats,
-                    s.len,
-                    s.capture_alignment_frames,
-                );
-                s.position = expected;
-            }
+        let Some(s) = self.loops.get_mut(idx) else {
+            return;
+        };
+        if matches!(s.mode, LoopMode::Recording) && s.pulse_synced && s.len != 0 {
+            let expected = pulse_synced_loop_position(
+                self.pulse_frames,
+                self.pulse_position,
+                self.pulse_long_count,
+                s.pulse_beats,
+                s.len,
+                s.capture_alignment_frames,
+            );
+            s.position = expected;
         }
     }
 
@@ -2759,20 +2758,25 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
     /// pulse-length change.
     pub fn resync_playback(&mut self, slot: u8) {
         let idx = slot as usize;
-        if let Some(s) = self.loops.get_mut(idx) {
-            if matches!(s.mode, LoopMode::Playing) && s.pulse_synced && s.pulse_beats != 0 && s.len != 0 {
-                let expected = pulse_synced_loop_position(
-                    self.pulse_frames,
-                    self.pulse_position,
-                    self.pulse_long_count,
-                    s.pulse_beats,
-                    s.len,
-                    s.capture_alignment_frames,
-                );
-                if s.position != expected {
-                    s.boundary_fade_position = Some(0);
-                    s.position = expected;
-                }
+        let Some(s) = self.loops.get_mut(idx) else {
+            return;
+        };
+        if matches!(s.mode, LoopMode::Playing)
+            && s.pulse_synced
+            && s.pulse_beats != 0
+            && s.len != 0
+        {
+            let expected = pulse_synced_loop_position(
+                self.pulse_frames,
+                self.pulse_position,
+                self.pulse_long_count,
+                s.pulse_beats,
+                s.len,
+                s.capture_alignment_frames,
+            );
+            if s.position != expected {
+                s.boundary_fade_position = Some(0);
+                s.position = expected;
             }
         }
     }

@@ -2963,7 +2963,7 @@ impl NativeStartupAdapter for NativeRuntime {
                             )
                         ))]
                         {
-                            AnyAudioBackend::Jack(JackAudioMidiBackend::new(1, 1))
+                            AnyAudioBackend::Jack(Box::new(JackAudioMidiBackend::new(1, 1)))
                         }
                         #[cfg(not(all(
                             feature = "jack",
@@ -2987,10 +2987,10 @@ impl NativeStartupAdapter for NativeRuntime {
                             options.preferred_buffer_frames =
                                 r.config.borrow().preferred_audio_buffer_frames.max(1);
                         }
-                        AnyAudioBackend::Cpal(CpalAudioBackend::new(
+                        AnyAudioBackend::Cpal(Box::new(CpalAudioBackend::new(
                             DeviceSelection::default(),
                             options,
-                        ))
+                        )))
                     }
                     AudioBackendKind::Auto => {
                         #[cfg(target_os = "macos")]
@@ -2999,7 +2999,7 @@ impl NativeStartupAdapter for NativeRuntime {
                                 DeviceSelection::default(),
                                 CpalAudioOptions::default(),
                             );
-                            AnyAudioBackend::AudioUnit(back)
+                            AnyAudioBackend::AudioUnit(Box::new(back))
                         }
                         #[cfg(not(target_os = "macos"))]
                         {
@@ -3008,10 +3008,10 @@ impl NativeStartupAdapter for NativeRuntime {
                                 options.preferred_buffer_frames =
                                     r.config.borrow().preferred_audio_buffer_frames.max(1);
                             }
-                            AnyAudioBackend::Cpal(CpalAudioBackend::new(
+                            AnyAudioBackend::Cpal(Box::new(CpalAudioBackend::new(
                                 DeviceSelection::default(),
                                 options,
-                            ))
+                            )))
                         }
                     }
                 };
@@ -3123,7 +3123,7 @@ impl NativeStartupAdapter for NativeRuntime {
                 // When using the JACK audio backend, MIDI arrives through
                 // the audio callback (JACK MIDI ports → ring buffer), so we
                 // skip the standalone Midir backend to avoid duplicate paths.
-                let use_jack_midi = r.audio.as_ref().map_or(false, |a| a.backend().is_jack());
+                let use_jack_midi = r.audio.as_ref().is_some_and(|a| a.backend().is_jack());
                 if !use_jack_midi {
                     eprintln!("FreeWheeling: MIDI backend: Midir");
                     let mut midi = MidiIo::new(MidirMidiBackend::new(None));
@@ -3245,11 +3245,11 @@ impl NativeComponentAdapter for NativeRuntime {
             } else {
                 None
             };
-            if let Some(bridge) = jack_bridge {
-                if let Some(audio) = self.resources.borrow_mut().audio.as_mut() {
-                    while let Some(msg) = audio.backend_mut().receive_midi() {
-                        bridge.midi_event(msg);
-                    }
+            if let Some(bridge) = jack_bridge
+                && let Some(audio) = self.resources.borrow_mut().audio.as_mut()
+            {
+                while let Some(msg) = audio.backend_mut().receive_midi() {
+                    bridge.midi_event(msg);
                 }
             }
             if crate::signal::shutdown_requested() != 0 {

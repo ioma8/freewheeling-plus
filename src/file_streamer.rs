@@ -91,6 +91,12 @@ pub struct AudioStreamer {
     output_path: Option<PathBuf>,
 }
 
+impl Default for AudioStreamer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AudioStreamer {
     pub fn new() -> Self {
         Self {
@@ -152,10 +158,12 @@ impl AudioStreamer {
                 run_encode_thread(
                     consumer,
                     recycle_producer,
-                    out_path,
-                    format,
-                    samplerate,
-                    stereo,
+                    EncodeSettings {
+                        path: out_path,
+                        format,
+                        samplerate,
+                        stereo,
+                    },
                     status,
                     bw,
                 )
@@ -238,13 +246,17 @@ impl Drop for AudioStreamer {
 
 /// Background encode thread.  Creates the output file and encoder, then loops
 /// popping blocks from the consumer and writing them until stop is signaled.
-fn run_encode_thread(
-    mut consumer: Consumer<PcmBlock>,
-    mut recycled: Producer<PcmBlock>,
+struct EncodeSettings {
     path: PathBuf,
     format: Codec,
     samplerate: u32,
     stereo: bool,
+}
+
+fn run_encode_thread(
+    mut consumer: Consumer<PcmBlock>,
+    mut recycled: Producer<PcmBlock>,
+    settings: EncodeSettings,
     status: Arc<AtomicU8>,
     bytes_written: Arc<AtomicU64>,
 ) -> Result<(), String> {
@@ -253,19 +265,20 @@ fn run_encode_thread(
     let file = match OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&path)
+        .open(&settings.path)
     {
         Ok(file) => file,
         Err(error) => {
             status.store(STATUS_ERROR, Ordering::Release);
             return Err(format!(
                 "create stream file '{}': {error}",
-                path.display()
+                settings.path.display()
             ));
         }
     };
     let result = (|| {
-        let mut encoder = SndFileEncoder::new(samplerate, stereo, format)
+        let mut encoder =
+            SndFileEncoder::new(settings.samplerate, settings.stereo, settings.format)
             .map_err(|error| format!("create stream encoder: {error}"))?;
         encoder
             .setup_file_for_writing(file)
@@ -295,7 +308,7 @@ fn run_encode_thread(
         }
     })();
     if result.is_err() {
-        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&settings.path);
     }
     status.store(
         if result.is_ok() {

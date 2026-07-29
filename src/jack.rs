@@ -113,18 +113,17 @@ impl Timebase {
         let ticks_per_frame = self.ticks_per_beat as f64 / frames_per_beat as f64;
         let total_ticks = (frame as f64 * ticks_per_frame) as i32;
         let frames_per_bar = (frames_per_beat as f64 * self.beats_per_bar as f64) as u64;
-        let bar = if frames_per_bar > 0 {
-            (frame as u64 / frames_per_bar) as i32 + 1
-        } else {
-            1
-        };
+        let bar = (frame as u64)
+            .checked_div(frames_per_bar)
+            .map_or(1, |bar| bar as i32 + 1);
         let bar_start_tick =
             ((bar - 1) as f64 * self.beats_per_bar as f64 * self.ticks_per_beat as f64) as i32;
-        let beat_in_bar = if frames_per_bar > 0 {
-            ((frame as u64 % frames_per_bar) * self.beats_per_bar as u64 / frames_per_bar) as i32 + 1
-        } else {
-            1
-        };
+        let beat_in_bar = (frame as u64)
+            .checked_rem(frames_per_bar)
+            .and_then(|offset| {
+                (offset * self.beats_per_bar as u64).checked_div(frames_per_bar)
+            })
+            .map_or(1, |beat| beat as i32 + 1);
         Ok(JackPosition {
             frame,
             frame_rate: sample_rate,

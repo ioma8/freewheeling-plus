@@ -143,16 +143,16 @@ pub struct BackendInfo {
 /// at startup.
 pub enum AnyAudioBackend {
     /// Cross-platform CPAL backend (default on Linux, fallback on macOS).
-    Cpal(crate::audio_native_cpal::CpalAudioBackend),
+    Cpal(Box<crate::audio_native_cpal::CpalAudioBackend>),
     /// JACK backend (Linux and macOS).
     #[cfg(all(
         feature = "jack",
         any(target_os = "linux", target_os = "macos", target_os = "windows")
     ))]
-    Jack(crate::jack::JackAudioMidiBackend),
+    Jack(Box<crate::jack::JackAudioMidiBackend>),
     /// Native CoreAudio/AudioUnit backend (macOS only).
     #[cfg(target_os = "macos")]
-    AudioUnit(crate::macos_audio_unit::MacosAudioUnitBackend),
+    AudioUnit(Box<crate::macos_audio_unit::MacosAudioUnitBackend>),
 }
 
 impl AnyAudioBackend {
