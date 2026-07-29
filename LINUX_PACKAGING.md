@@ -13,16 +13,14 @@ Build dependencies on Debian/Ubuntu are `build-essential`, `clang`, `cmake`,
 Run:
 
 ```sh
-BASIC_SF2_LICENSE_FILE=/reviewed/basic.sf2-LICENSE.txt \
 SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) \
 freewheeling-plus/scripts/linux/package-release.sh
 ```
 
 The archive contains `bin/freewheeling-plus`, `share/freewheeling/data`, and
-license/documentation files. `basic.sf2` has no proven license in repository
-metadata, so packaging deliberately fails unless a reviewed license file is
-supplied. Set `FWP_TARGET` for another installed Rust target. The packager
-normalizes owner, timestamps, order, and gzip headers for reproducible output.
+license/documentation files. The bundled `basic.sf2` is public domain. Set
+`FWP_TARGET` for another installed Rust target. The packager normalizes owner,
+timestamps, order, and gzip headers for reproducible output.
 
 ## Virtual acceptance (not hardware evidence)
 

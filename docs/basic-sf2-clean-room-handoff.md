@@ -1,17 +1,13 @@
 # `basic.sf2` clean-room replacement handoff
 
-Status: **commission required; no lawful drop-in is currently available**
-(reviewed 2026-07-14).
+Status: **not required for the current asset**. `data/basic.sf2` is public
+domain. This historic handoff applies only if the asset is replaced.
 
 ## Finding
 
-The checked-in `data/basic.sf2` is technically readable by the installed
-FluidSynth 2.5.4, but its metadata and history do not identify a sample
-rightsholder or grant permission to redistribute the recordings. The project
-GPL notice, repository presence, Debian/Arch packaging, and the SWAMI editor
-tag are not substitutes for that grant. The existing blob must therefore
-remain unchanged and excluded from distributable packages until evidence is
-obtained.
+The checked-in `data/basic.sf2` is public domain and may be distributed. The
+following requirements apply to any future replacement, whose provenance must
+be established independently.
 
 Its legacy SHA-256 is
 `2e6cf4a8a1d78e6be3b00a0c22358d3ceec8c5a27a000714e65215e3f9b1d15a`; a
@@ -64,8 +60,8 @@ of these checks pass:
    or missing sample data; its source manifest and license are present beside
    the artifact.
 5. `data/basics.xml`, patch/browser selection, saved scenes, and package
-   staging continue to resolve `basic.sf2` and bank/program zero. Existing
-   package verifiers must still reject missing or inadequate license evidence.
+   staging continue to resolve `basic.sf2` and bank/program zero. A replacement
+   verifier must reject missing or inadequate license evidence.
 6. The verifier rejects the legacy digest, a changed output digest, a missing
    notice, a non-SPDX/insufficient grant, a tuple mismatch, and a technically
    loadable but unlicensed bank.

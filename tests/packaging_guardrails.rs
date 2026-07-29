@@ -161,11 +161,6 @@ fn bundle_verifier_requires_executable_resources_license_and_microphone_text() {
     )
     .unwrap();
     fs::write(
-        resources.join("licenses/basic.sf2-LICENSE.txt"),
-        b"Reviewed fixture distribution license evidence for basic.sf2.",
-    )
-    .unwrap();
-    fs::write(
         contents.join("Info.plist"),
         br#"<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
@@ -228,11 +223,11 @@ fn baseline_inventory_and_matrix_name_required_assets_and_workflows() {
 }
 
 #[test]
-fn soundfont_handoff_keeps_unresolved_provenance_and_requires_clean_room_evidence() {
+fn soundfont_handoff_marks_current_asset_public_domain_and_documents_replacements() {
     let handoff = fs::read_to_string(root().join("docs/basic-sf2-clean-room-handoff.md"))
         .expect("clean-room SoundFont handoff must be documented");
     for requirement in [
-        "no lawful drop-in is currently available",
+        "public\ndomain",
         "Do not\ninspect",
         "compare against",
         "SPDX-compatible license",

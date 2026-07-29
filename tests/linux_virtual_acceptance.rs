@@ -12,7 +12,7 @@ fn linux_release_lane_is_reproducible_and_hardware_independent() {
     assert!(package.contains("SOURCE_DATE_EPOCH"));
     assert!(package.contains("--sort=name"));
     assert!(package.contains("gzip -n"));
-    assert!(package.contains("BASIC_SF2_LICENSE_FILE"));
+    assert!(!package.contains("BASIC_SF2_LICENSE_FILE"));
 
     let acceptance =
         fs::read_to_string(root().join("scripts/linux/run-virtual-acceptance.sh")).unwrap();

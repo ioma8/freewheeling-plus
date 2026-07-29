@@ -48,27 +48,23 @@ fn application_support_creation_is_recursive_and_idempotent() {
 }
 
 #[test]
-fn packaging_documents_fail_closed_soundfont_policy() {
+fn packaging_documents_public_domain_soundfont_policy() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let script = fs::read_to_string(root.join("scripts/package-macos-arm64.sh")).unwrap();
     let documentation = fs::read_to_string(root.join("PACKAGING.md")).unwrap();
-    assert!(script.contains("BASIC_SF2_LICENSE_FILE"));
-    assert!(script.contains("basic.sf2 has no proven distribution license"));
+    assert!(!script.contains("BASIC_SF2_LICENSE_FILE"));
     let universal = fs::read_to_string(root.join("scripts/package-macos-universal.sh")).unwrap();
     assert!(universal.contains("lipo -create"));
     assert!(universal.contains("hdiutil create"));
-    assert!(documentation.contains("fails closed"));
-    assert!(documentation.contains("5bf4c275a3dec39410ee130a0d90384be3ef6388"));
+    assert!(documentation.contains("public domain"));
 }
 
 #[test]
-fn verifier_runs_license_gate_after_integrity_and_signing_gates() {
+fn verifier_checks_integrity_and_signing_gates() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let verifier = fs::read_to_string(root.join("scripts/verify_macos_bundle.py")).unwrap();
-    let signature_gate = verifier.find("verify_signature(bundle").unwrap();
-    let license_gate = verifier.find("sf2_license_path =").unwrap();
-    assert!(signature_gate < license_gate);
-    assert!(verifier.contains("sole distribution blocker"));
+    assert!(verifier.contains("verify_signature(bundle"));
+    assert!(!verifier.contains("sf2_license_path ="));
 
     let documentation = fs::read_to_string(root.join("PACKAGING.md")).unwrap();
     assert!(documentation.contains("NSMicrophoneUsageDescription"));

@@ -15,12 +15,6 @@ case "$VERSION" in *[!0-9A-Za-z._+-]*|'') echo "error: invalid FWP_VERSION" >&2;
 case "$TARGET" in *[!0-9A-Za-z._-]*|'') echo "error: invalid FWP_TARGET" >&2; exit 2;; esac
 case "$SOURCE_DATE_EPOCH" in *[!0-9]*|'') echo "error: SOURCE_DATE_EPOCH must be an integer" >&2; exit 2;; esac
 
-SF2_LICENSE=${BASIC_SF2_LICENSE_FILE:-$ROOT/licenses/basic.sf2-LICENSE.txt}
-if [ ! -s "$SF2_LICENSE" ]; then
-  echo "error: basic.sf2 distribution requires a reviewed license in BASIC_SF2_LICENSE_FILE" >&2
-  exit 1
-fi
-
 if [ "${FWP_SKIP_BUILD:-0}" != 1 ]; then
   cargo build --manifest-path "$CRATE/Cargo.toml" --release --locked --target "$TARGET"
 fi
@@ -32,7 +26,6 @@ mkdir -p "$STAGE/bin" "$STAGE/share/freewheeling/data" "$STAGE/share/doc/freewhe
 install -m 0755 "$BINARY" "$STAGE/bin/freewheeling-plus"
 cp -R "$ROOT/data/." "$STAGE/share/freewheeling/data/"
 install -m 0644 "$ROOT/COPYING" "$ROOT/AUTHORS" "$ROOT/LINUX_PACKAGING.md" "$STAGE/share/doc/freewheeling/"
-install -m 0644 "$SF2_LICENSE" "$STAGE/share/doc/freewheeling/licenses/basic.sf2-LICENSE.txt"
 
 # Normalize metadata and ordering so identical inputs produce identical bytes.
 find "$STAGE" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +

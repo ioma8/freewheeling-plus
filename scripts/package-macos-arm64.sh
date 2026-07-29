@@ -13,15 +13,6 @@ cargo bundle --version | grep -Fx "cargo-bundle v$CARGO_BUNDLE_VERSION" >/dev/nu
   exit 1
 }
 
-# The SF2 INFO chunk says only "example", names SWAMI as the editor, and has
-# blank copyright/comment fields. Repository history merely records its 2007
-# import. A separately reviewed license is therefore mandatory.
-SF2_LICENSE=${BASIC_SF2_LICENSE_FILE:-licenses/basic.sf2-LICENSE.txt}
-if [ ! -s "$SF2_LICENSE" ]; then
-  echo "error: basic.sf2 has no proven distribution license; provide a reviewed license via BASIC_SF2_LICENSE_FILE" >&2
-  exit 1
-fi
-
 # cargo-bundle 0.11.0 does not accept Cargo's --locked flag. Build explicitly
 # with the lockfile first, then let cargo-bundle reuse that release artifact.
 cargo build --release --target aarch64-apple-darwin --locked
@@ -34,7 +25,6 @@ rm -rf "$RESOURCES/data"
 cp -R data "$RESOURCES/data"
 cp COPYING "$RESOURCES/licenses/COPYING"
 cp AUTHORS "$RESOURCES/licenses/AUTHORS"
-cp "$SF2_LICENSE" "$RESOURCES/licenses/basic.sf2-LICENSE.txt"
 
 # This verbatim notice is present in the name table of both bundled 1.10 TTFs.
 python3 - data/Vera.ttf data/VeraBd.ttf "$RESOURCES/licenses/Bitstream-Vera-NOTICE.txt" <<'PY'

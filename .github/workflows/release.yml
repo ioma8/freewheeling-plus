@@ -24,14 +24,6 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-      - name: Prepare reviewed SoundFont license
-        env:
-          REVIEWED_SF2_LICENSE: ${{ secrets.BASIC_SF2_LICENSE }}
-        run: |
-          test -n "$REVIEWED_SF2_LICENSE" || { echo "BASIC_SF2_LICENSE secret is required" >&2; exit 1; }
-          license_path="$RUNNER_TEMP/basic.sf2-LICENSE.txt"
-          printf '%s\n' "$REVIEWED_SF2_LICENSE" > "$license_path"
-          echo "BASIC_SF2_LICENSE_FILE=$license_path" >> "$GITHUB_ENV"
       - name: Package Linux release
         run: FWP_VERSION="${RELEASE_VERSION#v}" scripts/linux/package-release.sh
       - uses: actions/upload-artifact@v7
@@ -48,14 +40,6 @@ jobs:
         run: |
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
           cargo install cargo-bundle --version 0.11.0 --locked
-      - name: Prepare reviewed SoundFont license
-        env:
-          REVIEWED_SF2_LICENSE: ${{ secrets.BASIC_SF2_LICENSE }}
-        run: |
-          test -n "$REVIEWED_SF2_LICENSE" || { echo "BASIC_SF2_LICENSE secret is required" >&2; exit 1; }
-          license_path="$RUNNER_TEMP/basic.sf2-LICENSE.txt"
-          printf '%s\n' "$REVIEWED_SF2_LICENSE" > "$license_path"
-          echo "BASIC_SF2_LICENSE_FILE=$license_path" >> "$GITHUB_ENV"
       - name: Package universal macOS DMG
         run: FWP_VERSION="${RELEASE_VERSION#v}" scripts/package-macos-universal.sh
       - uses: actions/upload-artifact@v7
