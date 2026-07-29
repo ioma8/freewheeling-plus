@@ -3650,9 +3650,11 @@ impl NativeComponentAdapter for NativeRuntime {
 /// Assemble the complete XML-driven production graph.
 pub fn production_application() -> Result<NativeProductionApp, String> {
     let executable = std::env::current_exe().map_err(|e| format!("locate executable: {e}"))?;
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .ok_or("HOME is not set")?;
+    let home = home_directory(
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+    )
+    .ok_or("HOME or USERPROFILE is not set")?;
     let paths = NativePaths::discover(&executable, &home)?;
     let library_dir = paths.application_support.join("fw-lib");
     let mut config = FloConfig::new();
@@ -3669,10 +3671,38 @@ pub fn production_application() -> Result<NativeProductionApp, String> {
     ))
 }
 
+fn home_directory(
+    home: Option<std::ffi::OsString>,
+    user_profile: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    let path = user_profile.or(home);
+    #[cfg(not(target_os = "windows"))]
+    let _ = user_profile;
+    #[cfg(not(target_os = "windows"))]
+    let path = home;
+    path.map(std::path::PathBuf::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn home_directory_uses_the_platform_profile_variable() {
+        #[cfg(target_os = "windows")]
+        {
+            let home = std::ffi::OsString::from("home");
+            let user_profile = std::ffi::OsString::from("profile");
+            assert_eq!(home_directory(Some(home), Some(user_profile)), Some("profile".into()));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+        let home = std::ffi::OsString::from("home");
+            assert_eq!(home_directory(Some(home), None), Some("home".into()));
+        }
+    }
 
     #[test]
     fn metadata_failure_removes_the_committed_audio_file() {
