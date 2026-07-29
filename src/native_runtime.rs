@@ -151,6 +151,29 @@ fn codec_extension(codec: Codec) -> Result<&'static str, String> {
     }
 }
 
+fn write_loop_metadata_or_remove_audio(
+    audio: &std::path::Path,
+    xml: &std::path::Path,
+    contents: &[u8],
+) -> Result<(), String> {
+    if let Err(error) = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(xml)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, contents))
+    {
+        return match fs::remove_file(audio) {
+            Ok(()) => Err(format!("save loop metadata: {error}")),
+            Err(cleanup) => Err(format!(
+                "save loop metadata: {error}; remove incomplete audio '{}': {cleanup}",
+                audio.display()
+            )),
+        };
+    }
+    Ok(())
+}
+
 
 trait RecoverableAudio {
     fn recovery_requested(&self) -> bool;
@@ -2459,17 +2482,11 @@ impl NativeRuntime {
                     metadata.beats,
                     metadata.pulse_frames,
                 );
-                if let Err(error) = fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(&xml)
-                    .and_then(|mut file| {
-                        std::io::Write::write_all(&mut file, metadata_xml.as_bytes())
-                    })
-                {
-                    return Err(format!("save loop metadata: {error}"));
-                }
+                write_loop_metadata_or_remove_audio(
+                    &audio,
+                    &xml,
+                    metadata_xml.as_bytes(),
+                )?;
                 Ok((audio, xml, hash))
             })
             .map_err(|error| format!("read exported loop PCM: {error:?}"))?;
@@ -3257,6 +3274,17 @@ impl NativeComponentAdapter for NativeRuntime {
             if let Some(ref streamer) = r.streamer {
                 r.stream_bytes = streamer.bytes_written();
             }
+            if r.stream_state == StreamState::Writing
+                && r.streamer
+                    .as_ref()
+                    .is_some_and(|streamer| !streamer.is_writing())
+            {
+                let result = r.streamer.as_mut().unwrap().finalize();
+                r.streamer = None;
+                r.stream_output_name.clear();
+                r.stream_state = StreamState::Stopped;
+                result?;
+            }
             let mut latest = None;
             let mut latest_modes = None;
             let mut completed_snapshot = None;
@@ -3508,21 +3536,28 @@ impl NativeComponentAdapter for NativeRuntime {
                 r.stream_codec,
                 r.sample_rate,
                 true, // stereo
+                r.max_callback_frames,
             )?;
+            // Send the PcmOutput to the processor via the lock-free stream_queue.
+            let controls = r.controls.as_ref().ok_or("DSP controls are closed")?;
+            if let Err(pcm_output) = controls.stream_queue.push(pcm_output) {
+                drop(pcm_output);
+                let _ = streamer.finalize();
+                return Err("disk stream handoff queue is full".into());
+            }
             r.stream_bytes = 0;
             r.streamer = Some(streamer);
             r.stream_output_name = output_name;
             r.stream_state = StreamState::Writing;
-            // Send the PcmOutput to the processor via the lock-free stream_queue.
-            if let Some(controls) = r.controls.as_ref() {
-                let _ = controls.stream_queue.push(pcm_output);
-            }
         } else if !enabled && r.stream_state == StreamState::Writing {
-            if let Some(mut streamer) = r.streamer.take() {
-                streamer.finalize()?;
-            }
+            let result = r
+                .streamer
+                .take()
+                .map(|mut streamer| streamer.finalize())
+                .unwrap_or(Ok(()));
             r.stream_output_name.clear();
             r.stream_state = StreamState::Stopped;
+            result?;
         }
         Ok(())
     }
@@ -3614,6 +3649,31 @@ pub fn production_application() -> Result<NativeProductionApp, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn metadata_failure_removes_the_committed_audio_file() {
+        let directory = std::env::temp_dir().join(format!(
+            "freewheeling-metadata-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let audio = directory.join("loop.wav");
+        let xml = directory.join("loop.xml");
+        fs::write(&audio, b"audio").unwrap();
+        fs::create_dir(&xml).unwrap();
+
+        let error =
+            write_loop_metadata_or_remove_audio(&audio, &xml, b"<loop/>").unwrap_err();
+
+        assert!(error.contains("save loop metadata"));
+        assert!(!audio.exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn fullscreen_mouse_coordinates_map_back_to_xml_space() {

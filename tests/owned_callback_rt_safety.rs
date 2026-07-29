@@ -99,3 +99,37 @@ fn boxed_processor_runs_without_callback_allocation() {
     io.activate_boxed(Box::new(BoxedGain(Arc::new(2.0))))
         .unwrap();
 }
+
+#[test]
+fn disk_stream_push_uses_only_preallocated_blocks() {
+    use freewheeling_plus::block::Codec;
+    use freewheeling_plus::file_streamer::AudioStreamer;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let path = std::env::temp_dir().join(format!(
+        "freewheeling-rt-stream-{}-{}.wav",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut streamer = AudioStreamer::new();
+    let mut output = streamer
+        .start_writing(path.clone(), Codec::Wav, 48_000, true, 128)
+        .unwrap();
+    let left = [0.25; 128];
+    let right = [-0.25; 128];
+    let realtime = RealtimeMetrics::new(48_000, 128).unwrap();
+
+    reset_violation_counters();
+    {
+        let _guard = realtime.enter_callback();
+        assert!(output.push_audio(&left, &right, 128));
+    }
+
+    assert_eq!(callback_allocations(), 0);
+    assert_eq!(blocking_lock_attempts(), 0);
+    streamer.finalize().unwrap();
+    std::fs::remove_file(path).unwrap();
+}

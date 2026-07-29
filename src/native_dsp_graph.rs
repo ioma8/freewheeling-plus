@@ -2615,6 +2615,13 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
         while let Some(command) = self.commands.try_recv() {
             self.apply_command(command);
         }
+        if self
+            .stream_output
+            .as_ref()
+            .is_some_and(PcmOutput::is_finished)
+        {
+            self.stream_output = None;
+        }
         // Check for a new PcmOutput from the runtime (start streaming).
         if self.stream_output.is_none() {
             if let Some(pcm_output) = self.stream_queue.pop() {
@@ -3323,13 +3330,11 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
         }
         // Push final output to the disk streamer if active.
         if let Some(pcm) = &mut self.stream_output {
-            if !pcm.is_stopping() {
-                pcm.push_audio(
-                    &callback.outputs[0][..frames],
-                    &callback.outputs[1][..frames],
-                    callback.nframes,
-                );
-            }
+            pcm.push_audio(
+                &callback.outputs[0][..frames],
+                &callback.outputs[1][..frames],
+                callback.nframes,
+            );
         }
         self.sample_clock = self.sample_clock.wrapping_add(frames as u64);
         self.input_peak = input_peak;
@@ -3342,6 +3347,9 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
 mod tests {
     use super::*;
     use crate::audioio::JackPosition;
+    use crate::block::Codec;
+    use crate::file_streamer::AudioStreamer;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[derive(Default)]
     struct FakeSynth {
@@ -3426,6 +3434,64 @@ mod tests {
         };
         processor.process(&mut callback);
         [out_l, out_r]
+    }
+
+    #[test]
+    fn finished_disk_stream_is_replaced_before_the_next_callback() {
+        let directory = std::env::temp_dir().join(format!(
+            "freewheeling-dsp-stream-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let (mut processor, controls) = processor(0.0);
+        let mut first = AudioStreamer::new();
+        controls
+            .stream_queue
+            .push(
+                first
+                    .start_writing(
+                        directory.join("first.wav"),
+                        Codec::Wav,
+                        48_000,
+                        true,
+                        32,
+                    )
+                    .unwrap(),
+            )
+            .ok()
+            .unwrap();
+        run(&mut processor, &[0.0; 16], &[0.0; 16]);
+        assert!(processor.stream_output.is_some());
+        first.finalize().unwrap();
+        run(&mut processor, &[0.0; 16], &[0.0; 16]);
+        assert!(processor.stream_output.is_none());
+
+        let mut second = AudioStreamer::new();
+        controls
+            .stream_queue
+            .push(
+                second
+                    .start_writing(
+                        directory.join("second.wav"),
+                        Codec::Wav,
+                        48_000,
+                        true,
+                        32,
+                    )
+                    .unwrap(),
+            )
+            .ok()
+            .unwrap();
+        run(&mut processor, &[0.0; 16], &[0.0; 16]);
+        assert!(processor.stream_output.is_some());
+        second.finalize().unwrap();
+        run(&mut processor, &[0.0; 16], &[0.0; 16]);
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -5,15 +5,15 @@
 use crate::audioio::{NFrames, Sample};
 use crate::block::Codec;
 use crate::file_codecs::{IFileEncoder, SndFileEncoder};
-use rtrb::{Consumer, Producer, RingBuffer};
+use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
-/// Number of PCM blocks in the ring buffer between audio callback and encode
-/// thread.  128 blocks of ~4096 frames each = ~131k frames of headroom.
+/// Number of negotiated-size PCM callback blocks buffered for the encoder.
 const DEFAULT_BUFFER_BLOCKS: usize = 128;
 
 const STATUS_IDLE: u8 = 0;
@@ -32,6 +32,8 @@ pub struct PcmBlock {
 /// realtime callback can push PCM blocks into the ring buffer.
 pub struct PcmOutput {
     producer: Producer<PcmBlock>,
+    recycled: Consumer<PcmBlock>,
+    free: Vec<PcmBlock>,
     status: Arc<AtomicU8>,
 }
 
@@ -40,22 +42,41 @@ impl PcmOutput {
     /// Returns `false` if the buffer is full or stop/error has been signaled.
     pub fn push_audio(&mut self, left: &[Sample], right: &[Sample], frames: NFrames) -> bool {
         let s = self.status.load(Ordering::Relaxed);
-        if s >= STATUS_STOP_PENDING {
+        if s != STATUS_WRITING {
             return false;
         }
         let cap = left.len().min(right.len()).min(frames as usize);
-        let block = PcmBlock {
-            left: left[..cap].to_vec().into_boxed_slice(),
-            right: right[..cap].to_vec().into_boxed_slice(),
-            frames: cap as NFrames,
+        while self.free.len() < self.free.capacity() {
+            let Ok(block) = self.recycled.pop() else {
+                break;
+            };
+            self.free.push(block);
+        }
+        let Some(mut block) = self.free.pop() else {
+            self.status.store(STATUS_ERROR, Ordering::Release);
+            return false;
         };
-        self.producer.push(block).is_ok()
+        if cap > block.left.len() || cap > block.right.len() {
+            self.free.push(block);
+            self.status.store(STATUS_ERROR, Ordering::Release);
+            return false;
+        }
+        block.left[..cap].copy_from_slice(&left[..cap]);
+        block.right[..cap].copy_from_slice(&right[..cap]);
+        block.frames = cap as NFrames;
+        match self.producer.push(block) {
+            Ok(()) => true,
+            Err(PushError::Full(block)) => {
+                self.free.push(block);
+                self.status.store(STATUS_ERROR, Ordering::Release);
+                false
+            }
+        }
     }
 
-    /// Whether the encode thread has been asked to stop (e.g. for the
-    /// processor to skip future pushes without allocating blocks).
-    pub fn is_stopping(&self) -> bool {
-        self.status.load(Ordering::Relaxed) >= STATUS_STOP_PENDING
+    /// Whether this handle should be retired by the audio processor.
+    pub fn is_finished(&self) -> bool {
+        self.status.load(Ordering::Acquire) != STATUS_WRITING
     }
 }
 
@@ -64,11 +85,10 @@ impl PcmOutput {
 /// `start_writing` returns a `PcmOutput` that must be installed into the
 /// realtime audio processor.
 pub struct AudioStreamer {
-    encode_thread: Option<JoinHandle<()>>,
+    encode_thread: Option<JoinHandle<Result<(), String>>>,
     status: Arc<AtomicU8>,
     bytes_written: Arc<AtomicU64>,
     output_path: Option<PathBuf>,
-    result: Option<Result<(), String>>,
 }
 
 impl AudioStreamer {
@@ -78,7 +98,6 @@ impl AudioStreamer {
             status: Arc::new(AtomicU8::new(STATUS_IDLE)),
             bytes_written: Arc::new(AtomicU64::new(0)),
             output_path: None,
-            result: None,
         }
     }
 
@@ -90,10 +109,14 @@ impl AudioStreamer {
         format: Codec,
         samplerate: u32,
         stereo: bool,
+        max_callback_frames: usize,
     ) -> Result<PcmOutput, String> {
         let s = self.status.load(Ordering::Acquire);
         if s != STATUS_IDLE {
             return Err("streamer is already active".into());
+        }
+        if max_callback_frames == 0 {
+            return Err("stream callback size must be non-zero".into());
         }
 
         // Create output directory and validate format before spawning thread.
@@ -106,28 +129,53 @@ impl AudioStreamer {
             .map_err(|e| format!("create stream encoder: {e}"))?;
 
         // Split the ring buffer.
-        let (producer, consumer) =
+        let (producer, consumer) = RingBuffer::<PcmBlock>::new(DEFAULT_BUFFER_BLOCKS);
+        let (recycle_producer, recycled) =
             RingBuffer::<PcmBlock>::new(DEFAULT_BUFFER_BLOCKS);
+        let mut free = Vec::with_capacity(DEFAULT_BUFFER_BLOCKS);
+        for _ in 0..DEFAULT_BUFFER_BLOCKS {
+            free.push(PcmBlock {
+                left: vec![0.0; max_callback_frames].into_boxed_slice(),
+                right: vec![0.0; max_callback_frames].into_boxed_slice(),
+                frames: 0,
+            });
+        }
 
         self.status.store(STATUS_WRITING, Ordering::Release);
         let status = Arc::clone(&self.status);
         let bytes_written = Arc::new(AtomicU64::new(0));
         let bw = Arc::clone(&bytes_written);
         let out_path = path.clone();
-        let handle = thread::Builder::new()
+        let handle = match thread::Builder::new()
             .name("fweelin-stream".into())
             .spawn(move || {
-                run_encode_thread(consumer, out_path, format, samplerate, stereo, status, bw);
+                run_encode_thread(
+                    consumer,
+                    recycle_producer,
+                    out_path,
+                    format,
+                    samplerate,
+                    stereo,
+                    status,
+                    bw,
+                )
             })
-            .map_err(|e| format!("spawn stream thread: {e}"))?;
+        {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.status.store(STATUS_IDLE, Ordering::Release);
+                return Err(format!("spawn stream thread: {error}"));
+            }
+        };
 
         self.encode_thread = Some(handle);
         self.bytes_written = bytes_written;
         self.output_path = Some(path.clone());
-        self.result = None;
 
         Ok(PcmOutput {
             producer,
+            recycled,
+            free,
             status: Arc::clone(&self.status),
         })
     }
@@ -135,7 +183,12 @@ impl AudioStreamer {
     /// Request a graceful stop.  The encode thread will drain remaining blocks
     /// and close the output file.
     pub fn request_stop(&mut self) {
-        self.status.store(STATUS_STOP_PENDING, Ordering::Release);
+        let _ = self.status.compare_exchange(
+            STATUS_WRITING,
+            STATUS_STOP_PENDING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 
     /// Block until the encode thread finishes and the file is closed.
@@ -144,15 +197,15 @@ impl AudioStreamer {
     /// closed with an error; the partial file has already been removed).
     pub fn finalize(&mut self) -> Result<(), String> {
         self.request_stop();
-        if let Some(handle) = self.encode_thread.take() {
-            let _ = handle.join().map_err(|_| "stream thread panicked")?;
-        }
-        let result = self.result.take().unwrap_or(Ok(()));
-        if result.is_err() {
-            if let Some(path) = &self.output_path {
-                let _ = fs::remove_file(path);
-            }
-        }
+        let result = self
+            .encode_thread
+            .take()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| "stream thread panicked".to_owned())?
+            })
+            .unwrap_or(Ok(()));
         self.status.store(STATUS_IDLE, Ordering::Release);
         self.output_path = None;
         result
@@ -178,15 +231,7 @@ impl AudioStreamer {
 impl Drop for AudioStreamer {
     fn drop(&mut self) {
         if self.encode_thread.is_some() {
-            self.request_stop();
-            if let Some(handle) = self.encode_thread.take() {
-                let _ = handle.join();
-            }
-            if self.result.as_ref().map_or(false, |r| r.is_err()) {
-                if let Some(path) = &self.output_path {
-                    let _ = fs::remove_file(path);
-                }
-            }
+            let _ = self.finalize();
         }
     }
 }
@@ -195,13 +240,14 @@ impl Drop for AudioStreamer {
 /// popping blocks from the consumer and writing them until stop is signaled.
 fn run_encode_thread(
     mut consumer: Consumer<PcmBlock>,
+    mut recycled: Producer<PcmBlock>,
     path: PathBuf,
     format: Codec,
     samplerate: u32,
     stereo: bool,
     status: Arc<AtomicU8>,
     bytes_written: Arc<AtomicU64>,
-) {
+) -> Result<(), String> {
     // Create output file and encoder inside the thread so we don't need
     // SndFileEncoder (containing raw vorbis pointers) to be Send.
     let file = match OpenOptions::new()
@@ -209,59 +255,136 @@ fn run_encode_thread(
         .create_new(true)
         .open(&path)
     {
-        Ok(f) => f,
-        Err(_) => {
+        Ok(file) => file,
+        Err(error) => {
             status.store(STATUS_ERROR, Ordering::Release);
-            return;
+            return Err(format!(
+                "create stream file '{}': {error}",
+                path.display()
+            ));
         }
     };
-    let mut encoder = match SndFileEncoder::new(samplerate, stereo, format) {
-        Ok(e) => e,
-        Err(_) => {
-            let _ = fs::remove_file(&path);
-            status.store(STATUS_ERROR, Ordering::Release);
-            return;
+    let result = (|| {
+        let mut encoder = SndFileEncoder::new(samplerate, stereo, format)
+            .map_err(|error| format!("create stream encoder: {error}"))?;
+        encoder
+            .setup_file_for_writing(file)
+            .map_err(|error| format!("open stream encoder: {error}"))?;
+
+        loop {
+            match status.load(Ordering::Acquire) {
+                STATUS_STOP_PENDING => {
+                    while let Ok(block) = consumer.pop() {
+                        write_block(&mut encoder, block, &mut recycled, &bytes_written)?;
+                    }
+                    encoder
+                        .prepare_file_for_closing()
+                        .map_err(|error| format!("close stream file: {error}"))?;
+                    return Ok(());
+                }
+                STATUS_ERROR => return Err("disk stream buffer overflow".into()),
+                _ => {}
+            }
+
+            match consumer.pop() {
+                Ok(block) => {
+                    write_block(&mut encoder, block, &mut recycled, &bytes_written)?;
+                }
+                Err(_) => thread::park_timeout(Duration::from_millis(1)),
+            }
         }
-    };
-    if encoder.setup_file_for_writing(file).is_err() {
+    })();
+    if result.is_err() {
         let _ = fs::remove_file(&path);
-        status.store(STATUS_ERROR, Ordering::Release);
-        return;
+    }
+    status.store(
+        if result.is_ok() {
+            STATUS_IDLE
+        } else {
+            STATUS_ERROR
+        },
+        Ordering::Release,
+    );
+    result
+}
+
+fn write_block(
+    encoder: &mut SndFileEncoder,
+    block: PcmBlock,
+    recycled: &mut Producer<PcmBlock>,
+    bytes_written: &AtomicU64,
+) -> Result<(), String> {
+    let frames = block.frames as usize;
+    let written = encoder
+        .write_samples_to_disk(&block.left[..frames], Some(&block.right[..frames]))
+        .map_err(|error| format!("write stream samples: {error}"));
+    let _ = recycled.push(block);
+    let written = written?;
+    if written != frames {
+        return Err(format!(
+            "short stream write: wrote {written} of {frames} frames"
+        ));
+    }
+    bytes_written.fetch_add((written * 8) as u64, Ordering::Release);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temporary(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "freewheeling-stream-{name}-{}-{nonce}",
+            std::process::id()
+        ))
     }
 
-    loop {
-        let s = status.load(Ordering::Acquire);
-        if s == STATUS_STOP_PENDING {
-            // Drain remaining blocks before closing.
-            while let Ok(block) = consumer.pop() {
-                let n = encoder
-                    .write_samples_to_disk(&block.left, Some(&block.right))
-                    .unwrap_or(0);
-                bytes_written.fetch_add((n * 8) as u64, Ordering::Release);
-            }
-            if encoder.prepare_file_for_closing().is_err() {
-                status.store(STATUS_ERROR, Ordering::Release);
-            } else {
-                status.store(STATUS_IDLE, Ordering::Release);
-            }
-            return;
-        }
-        if s == STATUS_ERROR {
-            return;
-        }
+    #[test]
+    fn finalization_reports_worker_errors_without_deleting_an_existing_file() {
+        let path = temporary("existing.wav");
+        fs::write(&path, b"keep").unwrap();
+        let mut streamer = AudioStreamer::new();
+        let output = streamer
+            .start_writing(path.clone(), Codec::Wav, 48_000, true, 32)
+            .unwrap();
 
-        // Non-blocking pop; yield if empty so the thread stays responsive
-        // without busy-waiting.
-        match consumer.pop() {
-            Ok(block) => {
-                let n = encoder
-                    .write_samples_to_disk(&block.left, Some(&block.right))
-                    .unwrap_or(0);
-                bytes_written.fetch_add((n * 8) as u64, Ordering::Release);
-            }
-            Err(_) => {
-                std::thread::yield_now();
-            }
-        }
+        let error = streamer.finalize().unwrap_err();
+
+        assert!(error.contains("create stream file"));
+        assert_eq!(fs::read(&path).unwrap(), b"keep");
+        assert!(output.is_finished());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn preallocated_blocks_are_recycled_and_streamer_can_restart() {
+        let directory = temporary("restart");
+        fs::create_dir_all(&directory).unwrap();
+        let mut streamer = AudioStreamer::new();
+        let first_path = directory.join("first.wav");
+        let mut first = streamer
+            .start_writing(first_path.clone(), Codec::Wav, 48_000, true, 32)
+            .unwrap();
+        assert!(first.push_audio(&[0.25; 16], &[-0.25; 16], 16));
+        streamer.finalize().unwrap();
+        assert!(first.is_finished());
+        assert!(first_path.is_file());
+
+        let second_path = directory.join("second.wav");
+        let mut second = streamer
+            .start_writing(second_path.clone(), Codec::Wav, 48_000, true, 32)
+            .unwrap();
+        assert!(second.push_audio(&[0.5; 16], &[-0.5; 16], 16));
+        streamer.finalize().unwrap();
+        assert!(second.is_finished());
+        assert!(second_path.is_file());
+
+        fs::remove_dir_all(directory).unwrap();
     }
 }
