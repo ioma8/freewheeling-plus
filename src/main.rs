@@ -335,19 +335,3 @@ mod tests {
         );
     }
 }
-
-/// Android entry point called by SDL2's Java glue (SDLActivity).
-/// `argc`/`argv` may be null when launched without arguments.
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn SDL_main(_argc: i32, _argv: *const *const i8) -> i32 {
-    let args: Vec<_> = std::env::args_os().collect();
-    initialize_process(args.clone());
-    match production_application() {
-        Ok(mut app) => run_initialized(&mut app),
-        Err(error) => {
-            eprintln!("Error starting FreeWheeling: {error}");
-            1
-        }
-    }
-}
