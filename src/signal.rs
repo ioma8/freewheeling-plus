@@ -14,6 +14,7 @@ static TEST_WRITER: AtomicUsize = AtomicUsize::new(0);
 static TEST_EXITER: AtomicUsize = AtomicUsize::new(0);
 static TEST_CTX: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
+#[cfg(unix)]
 fn fatal_name(sig: c_int) -> &'static [u8] {
     match sig {
         libc::SIGSEGV => b"SIGSEGV",
@@ -23,6 +24,12 @@ fn fatal_name(sig: c_int) -> &'static [u8] {
         _ => b"SIGNAL",
     }
 }
+#[cfg(not(unix))]
+fn fatal_name(_: c_int) -> &'static [u8] {
+    b"SIGNAL"
+}
+
+#[cfg(unix)]
 fn fatal_text(sig: c_int) -> &'static [u8] {
     match sig {
         libc::SIGSEGV => b"Segmentation fault",
@@ -32,12 +39,22 @@ fn fatal_text(sig: c_int) -> &'static [u8] {
         _ => b"Fatal signal received",
     }
 }
+#[cfg(not(unix))]
+fn fatal_text(_: c_int) -> &'static [u8] {
+    b"Fatal signal received"
+}
+
+#[cfg(unix)]
 fn info_text(sig: c_int) -> &'static [u8] {
     match sig {
         libc::SIGUSR1 => b">>> User defined signal 1 (SIGUSR1) received <<<\n",
         libc::SIGUSR2 => b">>> User defined signal 2 (SIGUSR2) received <<<\n",
         _ => b">>> Signal received <<<\n",
     }
+}
+#[cfg(not(unix))]
+fn info_text(_: c_int) -> &'static [u8] {
+    b">>> Signal received <<<\n"
 }
 
 /// Writes as much as fits, always NUL-terminating when `buf` is non-empty.
@@ -79,15 +96,22 @@ fn dispatch_write(msg: &[u8]) {
             writer(msg.as_ptr(), msg.len(), ctx);
             return;
         }
-        let mut p = msg.as_ptr();
-        let mut n = msg.len();
-        while n != 0 {
-            let written = libc::write(libc::STDERR_FILENO, p.cast(), n);
-            if written <= 0 {
-                break;
+        #[cfg(unix)]
+        {
+            let mut p = msg.as_ptr();
+            let mut n = msg.len();
+            while n != 0 {
+                let written = libc::write(libc::STDERR_FILENO, p.cast(), n);
+                if written <= 0 {
+                    break;
+                }
+                p = p.add(written as usize);
+                n -= written as usize;
             }
-            p = p.add(written as usize);
-            n -= written as usize;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = msg;
         }
     }
 }
@@ -101,7 +125,10 @@ fn dispatch_exit(code: c_int) {
             let exiter: SignalExitFn = std::mem::transmute(exiter);
             exiter(code, TEST_CTX.load(Ordering::Relaxed));
         } else {
+            #[cfg(unix)]
             libc::_exit(code);
+            #[cfg(not(unix))]
+            std::process::exit(code);
         }
     }
 }
@@ -144,16 +171,20 @@ pub fn clear_signal_test_hooks() {
     TEST_CTX.store(std::ptr::null_mut(), Ordering::Release);
 }
 
+#[cfg(unix)]
 extern "C" fn fatal_trampoline(sig: c_int) {
     fatal_signal_handler(sig);
 }
+#[cfg(unix)]
 extern "C" fn info_trampoline(sig: c_int) {
     log_nonfatal_signal(sig);
 }
+#[cfg(unix)]
 extern "C" fn shutdown_trampoline(sig: c_int) {
     request_shutdown_signal_handler(sig);
 }
 
+#[cfg(unix)]
 fn register(handler: extern "C" fn(c_int), signals: &[c_int]) {
     // This is the same no-flags `sigaction` registration used in fweelin.cc.
     // `signal(3)` may have implementation-dependent reset/restart semantics.
@@ -171,20 +202,32 @@ fn register(handler: extern "C" fn(c_int), signals: &[c_int]) {
         }
     }
 }
+#[cfg(unix)]
 pub fn register_fatal_signal_handlers() {
     register(
         fatal_trampoline,
         &[libc::SIGSEGV, libc::SIGBUS, libc::SIGILL, libc::SIGFPE],
     );
 }
+#[cfg(not(unix))]
+pub fn register_fatal_signal_handlers() {}
+
+#[cfg(unix)]
 pub fn register_info_signal_handlers() {
     register(info_trampoline, &[libc::SIGUSR1, libc::SIGUSR2]);
 }
+#[cfg(not(unix))]
+pub fn register_info_signal_handlers() {}
+
+#[cfg(unix)]
 pub fn register_shutdown_signal_handlers() {
     register(shutdown_trampoline, &[libc::SIGINT, libc::SIGTERM]);
 }
 
-#[cfg(test)]
+#[cfg(not(unix))]
+pub fn register_shutdown_signal_handlers() {}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::sync::Mutex;

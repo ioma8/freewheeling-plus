@@ -261,17 +261,19 @@ fn resident_set_bytes() -> io::Result<u64> {
     Ok(pages.saturating_mul(page_size as u64))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 fn resident_set_bytes() -> io::Result<u64> {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
     if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
     }
     let bytes = unsafe { usage.assume_init() }.ru_maxrss as u64;
-    #[cfg(target_os = "macos")]
-    return Ok(bytes);
-    #[cfg(not(target_os = "macos"))]
-    return Ok(bytes.saturating_mul(1024));
+    Ok(bytes)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn resident_set_bytes() -> io::Result<u64> {
+    Ok(0)
 }
 
 /// Reset process-global violation counters before starting an acceptance run.
