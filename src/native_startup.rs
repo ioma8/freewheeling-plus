@@ -92,6 +92,7 @@ pub fn application_support_path(home: &Path) -> PathBuf {
 pub fn discover_resources(executable: &Path) -> Result<PathBuf, String> {
     let mut candidates = Vec::new();
     if let Some(mac_os) = executable.parent() {
+        candidates.push(mac_os.join("../Resources/data"));
         candidates.push(mac_os.join("../Resources"));
         candidates.push(mac_os.join("data"));
         if let Some(parent) = mac_os.parent() {
@@ -261,6 +262,25 @@ mod tests {
             application_support: PathBuf::from("support"),
             config: PathBuf::from("resources/fweelin.xml"),
         }
+    }
+
+    #[test]
+    fn discovers_data_inside_macos_bundle_resources() {
+        let root = std::env::temp_dir().join(format!(
+            "freewheeling-bundle-resources-{}",
+            std::process::id()
+        ));
+        let executable = root.join("FreeWheeling.app/Contents/MacOS/freewheeling-plus");
+        let resources = root.join("FreeWheeling.app/Contents/Resources/data");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::create_dir_all(&resources).unwrap();
+        fs::write(resources.join(DEFAULT_CONFIG_FILE), b"<freewheeling/>").unwrap();
+
+        assert_eq!(
+            discover_resources(&executable).unwrap(),
+            resources.canonicalize().unwrap()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
