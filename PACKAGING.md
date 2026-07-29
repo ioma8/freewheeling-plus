@@ -49,4 +49,6 @@ acceptance run.
 ## GitHub release builds
 
 `.github/workflows/release.yml` runs for version tags (`v*`) and manual dispatch.
-It uploads an x86_64 Linux tarball and a universal macOS DMG.
+It uploads an x86_64 Linux tarball and a universal macOS DMG. Tag builds also
+create a draft GitHub Release with those files attached; manual runs remain
+artifact-only.
