@@ -102,6 +102,12 @@ pub struct FrameRenderer {
     pub scene: DisplayScene,
     pub platform: Box<dyn PlatformRenderer>,
     pub metrics: DisplayMetrics,
+    pub show_settings: bool,
+    pub stream_output_path: String,
+    pub mouse_logical: (i32, i32),
+    pub mouse_down: bool,
+    pub beep_pending: bool,
+    prev_mouse_down: bool,
 }
 
 impl VideoRenderer for FrameRenderer {
@@ -130,6 +136,19 @@ impl VideoRenderer for FrameRenderer {
             platform: &mut *self.platform,
         };
         self.scene.render(&mut renderer, &self.metrics);
+        if self.show_settings {
+            let clicked = crate::microui::settings_overlay(
+                &mut renderer,
+                &self.metrics,
+                &self.stream_output_path,
+                self.mouse_logical,
+                self.mouse_down,
+                &mut self.prev_mouse_down,
+            );
+            if clicked {
+                self.beep_pending = true;
+            }
+        }
         self.platform.finish_frame(frame);
     }
 }
@@ -590,6 +609,12 @@ mod frame_renderer_tests {
             scene: DisplayScene::new(),
             platform: Box::new(Capture(Vec::new())),
             metrics: DisplayMetrics::new(640, 480, 640, 480),
+            show_settings: false,
+            stream_output_path: String::new(),
+            mouse_logical: (0, 0),
+            mouse_down: false,
+            beep_pending: false,
+            prev_mouse_down: false,
         };
         let mut frame = VideoFrame {
             pixels: Vec::new(),
@@ -741,6 +766,12 @@ pub fn activate_scene<B: VideoBackend>(
         scene,
         platform,
         metrics,
+        show_settings: false,
+        stream_output_path: String::new(),
+        mouse_logical: (0, 0),
+        mouse_down: false,
+        beep_pending: false,
+        prev_mouse_down: false,
     })
 }
 

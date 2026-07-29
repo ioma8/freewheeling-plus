@@ -399,6 +399,8 @@ impl MainThreadVideo {
             state.snapshot_display_counts = std::mem::take(&mut existing.snapshot_display_counts);
             state.help_page = existing.help_page;
             state.debug_info = existing.debug_info;
+            state.show_settings = self.renderer.show_settings;
+            state.stream_output_path.clone_from(&self.renderer.stream_output_path);
             *existing = state;
             // Rendering reads this shared state from every XML display.
             // Do not retain the write lock across `render`, or the main
@@ -552,6 +554,8 @@ struct RuntimeResources {
     synth_enabled: bool,
     help_page_count: usize,
     debug_info: bool,
+    show_settings: bool,
+    ctrl_held: bool,
 }
 
 struct PendingLoopExport {
@@ -995,6 +999,8 @@ impl NativeRuntime {
                 synth_enabled: true,
                 help_page_count: 0,
                 debug_info: false,
+                show_settings: false,
+                ctrl_held: false,
             })),
         }
     }
@@ -3604,6 +3610,57 @@ impl NativeComponentAdapter for NativeRuntime {
                     .try_command(RuntimeCommand::SetPulseSubdivide { beats })
                     .map_err(|_| "DSP command queue is full")?;
             }
+            // Track Ctrl/Cmd modifier state
+            match &input_event {
+                Some(InputEvent::Key { down, keysym: 305..=306, .. }) => r.ctrl_held = *down,
+                Some(InputEvent::Key { down, keysym: 309..=310, .. }) => r.ctrl_held = *down,
+                _ => {}
+            }
+            // Ctrl+P / Cmd+P toggles the settings overlay
+            if r.ctrl_held
+                && matches!(&input_event, Some(InputEvent::Key { down: true, keysym: 112, .. }))
+            {
+                let path = r.stream_recordings_dir.display().to_string();
+                r.show_settings = !r.show_settings;
+                let show = r.show_settings;
+                if let Some(video) = r.video.as_mut() {
+                    video.renderer.show_settings = show;
+                    if show {
+                        video.renderer.stream_output_path = path;
+                    }
+                }
+                continue;
+            }
+            // Feed mouse events to the overlay, handle beeps
+            if r.show_settings {
+                let mut do_beep = false;
+                if let Some(video) = r.video.as_mut() {
+                    match &input_event {
+                        Some(InputEvent::MouseButton { x, y, down, .. }) => {
+                            let (lx, ly) = video.map_mouse_position(*x, *y);
+                            video.renderer.mouse_logical = (lx, ly);
+                            video.renderer.mouse_down = *down;
+                        }
+                        Some(InputEvent::MouseMotion { x, y }) => {
+                            let (lx, ly) = video.map_mouse_position(*x, *y);
+                            video.renderer.mouse_logical = (lx, ly);
+                        }
+                        _ => {}
+                    }
+                    do_beep = video.renderer.beep_pending;
+                    video.renderer.beep_pending = false;
+                    if matches!(&input_event, Some(InputEvent::Key { down: true, keysym: 27, .. })) {
+                        video.renderer.show_settings = false;
+                    }
+                }
+                if do_beep {
+                    let _ = test_beep();
+                }
+                if matches!(&input_event, Some(InputEvent::Key { down: true, keysym: 27, .. })) {
+                    r.show_settings = false;
+                }
+                continue;
+            }
             match input_event {
                 Some(event) if Self::handle_rename_input(&mut r, &event)? => continue,
                 Some(event) => {
@@ -3798,6 +3855,54 @@ pub fn production_application() -> Result<NativeProductionApp, String> {
         INPUTS,
         LAST_RECORDS,
     ))
+}
+
+/// Play a brief test tone through the default audio output.
+fn test_beep() -> Result<(), String> {
+    use hound::{WavSpec, WavWriter};
+    use std::io::Cursor;
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate: 44100,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut buffer = Vec::new();
+    {
+        let mut writer =
+            WavWriter::new(Cursor::new(&mut buffer), spec).map_err(|e| e.to_string())?;
+        let samples = 8820; // 200ms at 44100
+        for i in 0..samples {
+            let t = i as f32 / 44100.0;
+            let sample = (i16::MAX as f32 * (2.0 * std::f32::consts::PI * 440.0 * t).sin()) as i16;
+            writer.write_sample(sample).map_err(|e| e.to_string())?;
+        }
+    }
+    let path = std::env::temp_dir().join("fweelin-test-beep.wav");
+    std::fs::write(&path, &buffer).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("afplay")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("afplay: {e}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("paplay")
+            .arg(&path)
+            .spawn();
+        let _ = std::process::Command::new("aplay")
+            .arg(&path)
+            .spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/c", "start", &path.to_string_lossy()])
+            .spawn();
+    }
+    Ok(())
 }
 
 fn home_directory(

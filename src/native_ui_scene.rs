@@ -55,6 +55,8 @@ pub struct UiSceneState {
     pub paramsets: HashMap<(i32, i32), crate::paramset::FloDisplayParamSet>,
     pub help_page: usize,
     pub debug_info: bool,
+    pub show_settings: bool,
+    pub stream_output_path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1591,6 +1593,12 @@ pub fn production_renderer(
             // dimensions are the drawable target, including HiDPI backing
             // pixels.
             metrics: RenderMetrics::new(w as i32, h as i32, w as i32, h as i32),
+            show_settings: false,
+            stream_output_path: String::new(),
+            mouse_logical: (0, 0),
+            mouse_down: false,
+            beep_pending: false,
+            prev_mouse_down: false,
         },
     }
 }

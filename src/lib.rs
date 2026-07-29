@@ -64,6 +64,7 @@ pub mod startup_guard_platform;
 pub mod string_utils;
 pub mod surface_primitives;
 pub mod video_layout;
+pub mod microui;
 pub mod video_scaling;
 pub mod videoio;
 pub mod videoio_display_widgets;
