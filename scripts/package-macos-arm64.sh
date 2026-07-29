@@ -33,7 +33,7 @@ notices = []
 for name in sys.argv[1:3]:
     data = pathlib.Path(name).read_bytes().replace(b"\0", b"")
     match = re.search(
-        b"Copyright \(c\) 2003 by Bitstream, Inc\.\r?\n"
+        rb"Copyright \(c\) 2003 by Bitstream, Inc\.\r?\n"
         b"All Rights Reserved\..*?fonts at gnome dot org",
         data,
         re.S,

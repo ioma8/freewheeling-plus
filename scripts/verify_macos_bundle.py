@@ -22,7 +22,13 @@ def run(*command: str) -> str:
 
 def linked_libraries(binary: pathlib.Path) -> list[str]:
     lines = run("otool", "-L", str(binary)).splitlines()[1:]
-    return [line.strip().split(" (compatibility", 1)[0] for line in lines if line.strip()]
+    # Universal binaries print an additional "(architecture <name>):" header
+    # before each slice. It is not a linked library.
+    return [
+        line.strip().split(" (compatibility", 1)[0]
+        for line in lines
+        if line.strip() and " (architecture " not in line
+    ]
 
 
 def verify_macho(binary: pathlib.Path, frameworks: pathlib.Path, expected_architectures: set[str]) -> None:
