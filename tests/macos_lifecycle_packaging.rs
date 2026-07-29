@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 use freewheeling_plus::macos::{
     application_support_path, bundle_resources_path, create_application_support_path,
 };
