@@ -48,8 +48,29 @@ jobs:
           path: target/aarch64-apple-darwin/release/bundle/osx/FreeWheeling-*-universal.dmg
           if-no-files-found: error
 
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Package Windows x86_64 release
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_VERSION.TrimStart('v')
+          $stage = "dist/freewheeling-plus-$version-x86_64-pc-windows-msvc"
+          cargo build --release --locked
+          New-Item -ItemType Directory -Path "$stage/data" -Force | Out-Null
+          Copy-Item target/release/freewheeling-plus.exe "$stage/freewheeling-plus.exe"
+          Copy-Item data/* "$stage/data" -Recurse
+          Copy-Item COPYING, AUTHORS "$stage"
+          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: freewheeling-plus-windows-x86_64
+          path: dist/*.zip
+          if-no-files-found: error
+
   release:
-    needs: [linux, macos]
+    needs: [linux, macos, windows]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
