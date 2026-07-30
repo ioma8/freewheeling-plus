@@ -544,7 +544,7 @@ impl AudioBackend for JackAudioMidiBackend {
         event: MidiPortMessage,
         frame_offset: NFrames,
     ) -> Result<(), String> {
-        let bytes = encode(event.message);
+        let bytes = encode(&event.message);
         let event = InlineMidi::new(event.port, frame_offset, &bytes)?;
         self.midi_output
             .as_mut()

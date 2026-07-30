@@ -3226,7 +3226,7 @@ impl NativeStartupAdapter for NativeRuntime {
                     .map_err(|_| "DSP command queue is full during latency setup")?;
                 if std::env::var_os("FWEELIN_DIAGNOSTICS").is_some() {
                     eprintln!(
-                        "FreeWheeling recording alignment: {recording_alignment_frames} input frames"
+                        "FreeWheeling provisional recording alignment: {recording_alignment_frames} frames"
                     );
                 }
                 r.controls = Some(controls);
@@ -3305,6 +3305,14 @@ impl NativeStartupAdapter for NativeRuntime {
                     .map_err(|_| "CoreAudio setup thread panicked".to_string())?;
                 r.audio = Some(audio);
                 result?;
+                // Measure the complete output-to-microphone path once the
+                // realtime callback is actually running. The DSP keeps the
+                // result as the alignment for subsequently recorded loops.
+                r.controls
+                    .as_mut()
+                    .ok_or("DSP controls are closed")?
+                    .try_command(RuntimeCommand::CalibrateLatency)
+                    .map_err(|_| "DSP command queue is full during latency calibration")?;
             }
             StartupPhase::StreamersAndRings => {
                 fs::create_dir_all(&r.library_dir)
@@ -3497,6 +3505,16 @@ impl NativeComponentAdapter for NativeRuntime {
                         }
                         RuntimeStatus::TransferError { handle, error, .. } => {
                             transfer_failure = Some((handle, error));
+                        }
+                        RuntimeStatus::LatencyMeasured { frames } => {
+                            eprintln!(
+                                "FreeWheeling: measured audio round-trip latency: {frames} frames"
+                            );
+                        }
+                        RuntimeStatus::LatencyCalibrationFailed => {
+                            eprintln!(
+                                "FreeWheeling: audio latency calibration failed; keeping the driver estimate"
+                            );
                         }
                         RuntimeStatus::MidiClockTick => {
                             midi_sync_events.push(None);
