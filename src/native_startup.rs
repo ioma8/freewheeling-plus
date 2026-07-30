@@ -203,36 +203,64 @@ impl<A: NativeStartupAdapter> NativeStartupServices<A> {
     }
 }
 
-macro_rules! phase_methods {
-    ($($method:ident => $phase:ident),+ $(,)?) => {
-        $(fn $method(&mut self) -> Result<(), String> {
-            self.start_phase(StartupPhase::$phase)
-        })+
-    };
-}
-
 impl<A: NativeStartupAdapter> StartupServices for NativeStartupServices<A> {
-    phase_methods!(
-        lock_memory => LockMemory,
-        init_rt_threads => RtThreads,
-        register_main_thread => MainThread,
-        init_platform_threads => PlatformThreads,
-        init_sdl => Sdl,
-        init_memory_manager => MemoryManager,
-        init_event_manager => EventManager,
-        activate_video => Video,
-        wait_for_video => VideoReady,
-        init_audio => Audio,
-        init_core_graph => CoreGraph,
-        init_synth_and_buffers => SynthAndBuffers,
-        init_loop_and_scene_browsers => Browsers,
-        init_input_and_midi => InputAndMidi,
-        init_osc_and_mixer => OscAndMixer,
-        link_system_variables => SystemVariables,
-        activate_signal_processing => SignalProcessing,
-        init_streamers_and_finalize_rings => StreamersAndRings,
-        add_processing_elements => ProcessingElements,
-    );
+    fn lock_memory(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::LockMemory)
+    }
+    fn init_rt_threads(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::RtThreads)
+    }
+    fn register_main_thread(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::MainThread)
+    }
+    fn init_platform_threads(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::PlatformThreads)
+    }
+    fn init_sdl(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::Sdl)
+    }
+    fn init_memory_manager(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::MemoryManager)
+    }
+    fn init_event_manager(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::EventManager)
+    }
+    fn activate_video(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::Video)
+    }
+    fn wait_for_video(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::VideoReady)
+    }
+    fn init_audio(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::Audio)
+    }
+    fn init_core_graph(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::CoreGraph)
+    }
+    fn init_synth_and_buffers(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::SynthAndBuffers)
+    }
+    fn init_loop_and_scene_browsers(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::Browsers)
+    }
+    fn init_input_and_midi(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::InputAndMidi)
+    }
+    fn init_osc_and_mixer(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::OscAndMixer)
+    }
+    fn link_system_variables(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::SystemVariables)
+    }
+    fn activate_signal_processing(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::SignalProcessing)
+    }
+    fn init_streamers_and_finalize_rings(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::StreamersAndRings)
+    }
+    fn add_processing_elements(&mut self) -> Result<(), String> {
+        self.start_phase(StartupPhase::ProcessingElements)
+    }
 
     fn rollback_setup(&mut self) {
         while let Some(phase) = self.completed.pop() {

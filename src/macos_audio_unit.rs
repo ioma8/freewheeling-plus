@@ -74,6 +74,7 @@ struct SharedMetrics {
     callback_peak_nanos: AtomicU64,
     callback_total_nanos: AtomicU64,
     recovery_requests: AtomicU64,
+    #[allow(dead_code)]
     callback_panics: AtomicU64,
     active: AtomicBool,
     cpu_load_bits: AtomicU32,
@@ -557,6 +558,9 @@ impl AudioBackend for MacosAudioUnitBackend {
             fallback.close();
         }
         self.dispose_unit();
+        // SAFETY: AudioOutputUnitStop inside dispose_unit is synchronous
+        // (Apple docs: "does not return until the unit has stopped"), so
+        // no render callback accesses state after this point.
         self.state = None;
         self.restore_device_buffers();
     }
@@ -673,7 +677,14 @@ unsafe extern "C" fn render_callback(
         state.input_right[..count].fill(0.0);
         state.metrics.stream_errors.fetch_add(1, Ordering::Relaxed);
     }
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    // Reconstruct `state` inside the closure from the raw pointer ref_con
+    // rather than capturing &mut CallbackState, so catch_unwind compiles
+    // without AssertUnwindSafe.  Panics in an audio callback corrupt the
+    // processor state and cannot be recovered safely.
+    let result = std::panic::catch_unwind(|| {
+        // SAFETY: ref_con is a Box<CallbackState> owned by the backend; the
+        // AudioUnit guarantees this callback is the sole caller.
+        let state = unsafe { &mut *ref_con.cast::<CallbackState>() };
         // SAFETY: HAL is configured for non-interleaved f32 stereo. The
         // callback's `frames` cannot exceed either supplied buffer size.
         let output = unsafe { &mut *io_data };
@@ -682,6 +693,7 @@ unsafe extern "C" fn render_callback(
         if left.is_null() || left_buffer.mDataByteSize < frames * 4 {
             return;
         }
+        // SAFETY: left was validated above (non-null, sufficient size).
         let left = unsafe { std::slice::from_raw_parts_mut(left, count) };
         let right = if output.mNumberBuffers > 1 {
             let right_buffer = unsafe { buffer_at(io_data, 1) };
@@ -689,6 +701,7 @@ unsafe extern "C" fn render_callback(
             if pointer.is_null() || right_buffer.mDataByteSize < frames * 4 {
                 None
             } else {
+                // SAFETY: pointer was validated above.
                 Some(unsafe { std::slice::from_raw_parts_mut(pointer, count) })
             }
         } else {
@@ -713,14 +726,12 @@ unsafe extern "C" fn render_callback(
         if let Some(right) = right {
             right.copy_from_slice(&state.scratch_right[..count]);
         }
-    }));
-    if result.is_err() {
-        state
-            .metrics
-            .callback_panics
-            .fetch_add(1, Ordering::Relaxed);
-        state.metrics.stream_errors.fetch_add(1, Ordering::Relaxed);
+    });
+    if let Err(_panic) = result {
         zero_output(io_data);
+        // State may be corrupted after a panic; abort rather than continue
+        // with undefined behaviour on the next callback invocation.
+        std::process::abort();
     }
     state.frame_position = state.frame_position.wrapping_add(frames as u64);
     let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
@@ -781,7 +792,15 @@ fn zero_output(io_data: *mut AudioBufferList) {
 /// buffers. The caller checks `number_buffers` before requesting an index.
 unsafe fn buffer_at<'a>(list: *mut AudioBufferList, index: usize) -> &'a mut AudioBuffer {
     // SAFETY: caller guarantees `index < list.mNumberBuffers`.
-    unsafe { &mut (*list).mBuffers[index] }
+    // `mBuffers` is declared as `[AudioBuffer; 1]` but CoreAudio allocates
+    // the list with `mNumberBuffers` AudioBuffer entries.  Using array
+    // indexing (`(*list).mBuffers[index]`) for index > 0 would read past
+    // the declared bound — that is UB even when the allocation is larger.
+    // Use pointer arithmetic from the base of `mBuffers` instead.
+    unsafe {
+        let base = std::ptr::addr_of_mut!((*list).mBuffers) as *mut AudioBuffer;
+        &mut *base.add(index)
+    }
 }
 
 fn device_info(id: u32) -> AudioDeviceInfo {

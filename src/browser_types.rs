@@ -241,4 +241,3 @@ impl SnapshotBrowser {
     }
 }
 
-pub type FloDisplaySnapshots = SnapshotBrowser;

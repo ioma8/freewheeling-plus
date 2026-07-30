@@ -6,23 +6,6 @@
 
 pub const NUM_SELECTION_SETS: usize = 10;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SelectionError {
-    InvalidSet,
-    CapacityExceeded,
-}
-
-impl std::fmt::Display for SelectionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SelectionError::InvalidSet => write!(f, "invalid selection set"),
-            SelectionError::CapacityExceeded => write!(f, "selection capacity exceeded"),
-        }
-    }
-}
-
-impl std::error::Error for SelectionError {}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeLoopSelection {
     sets: [Vec<usize>; NUM_SELECTION_SETS],
@@ -41,19 +24,19 @@ impl NativeLoopSelection {
         self.capacity
     }
 
-    pub fn selected(&self, set: usize, loop_id: usize) -> Result<bool, SelectionError> {
+    pub fn selected(&self, set: usize, loop_id: usize) -> Result<bool, String> {
         Ok(self.set(set)?.contains(&loop_id))
     }
 
-    pub fn selected_ids(&self, set: usize) -> Result<&[usize], SelectionError> {
+    pub fn selected_ids(&self, set: usize) -> Result<&[usize], String> {
         Ok(self.set(set)?.as_slice())
     }
 
-    pub fn count(&self, set: usize) -> Result<usize, SelectionError> {
+    pub fn count(&self, set: usize) -> Result<usize, String> {
         Ok(self.set(set)?.len())
     }
 
-    pub fn toggle(&mut self, set: usize, loop_id: usize) -> Result<bool, SelectionError> {
+    pub fn toggle(&mut self, set: usize, loop_id: usize) -> Result<bool, String> {
         let capacity = self.capacity;
         let selected = self.set_mut(set)?;
         if let Some(pos) = selected.iter().position(|&id| id == loop_id) {
@@ -61,19 +44,19 @@ impl NativeLoopSelection {
             Ok(false)
         } else {
             if selected.len() == capacity {
-                return Err(SelectionError::CapacityExceeded);
+                return Err("selection capacity exceeded".to_string());
             }
             selected.push(loop_id);
             Ok(true)
         }
     }
 
-    pub fn clear(&mut self, set: usize) -> Result<(), SelectionError> {
+    pub fn clear(&mut self, set: usize) -> Result<(), String> {
         self.set_mut(set)?.clear();
         Ok(())
     }
 
-    pub fn select_all(&mut self, set: usize, loop_ids: &[usize]) -> Result<(), SelectionError> {
+    pub fn select_all(&mut self, set: usize, loop_ids: &[usize]) -> Result<(), String> {
         let capacity = self.capacity;
         let selected = self.set_mut(set)?;
         selected.clear();
@@ -81,7 +64,7 @@ impl NativeLoopSelection {
             if !selected.contains(&id) {
                 if selected.len() == capacity {
                     selected.clear();
-                    return Err(SelectionError::CapacityExceeded);
+                    return Err("selection capacity exceeded".to_string());
                 }
                 selected.push(id);
             }
@@ -94,12 +77,12 @@ impl NativeLoopSelection {
         set: usize,
         loop_ids: &[usize],
         playing: impl Fn(usize) -> bool,
-    ) -> Result<(), SelectionError> {
+    ) -> Result<(), String> {
         let ids: Vec<_> = loop_ids.iter().copied().filter(|&id| playing(id)).collect();
         self.select_all(set, &ids)
     }
 
-    pub fn invert(&mut self, set: usize, loop_ids: &[usize]) -> Result<(), SelectionError> {
+    pub fn invert(&mut self, set: usize, loop_ids: &[usize]) -> Result<(), String> {
         let old = self.set(set)?.clone();
         let capacity = self.capacity;
         let selected = self.set_mut(set)?;
@@ -108,7 +91,7 @@ impl NativeLoopSelection {
             if !old.contains(&id) {
                 if selected.len() == capacity {
                     selected.clear();
-                    return Err(SelectionError::CapacityExceeded);
+                    return Err("selection capacity exceeded".to_string());
                 }
                 selected.push(id);
             }
@@ -142,7 +125,7 @@ impl NativeLoopSelection {
 
     /// Return ids to erase, then remove them from all sets.  The caller owns
     /// deleting the actual loop objects.
-    pub fn erase_selected(&mut self, set: usize) -> Result<Vec<usize>, SelectionError> {
+    pub fn erase_selected(&mut self, set: usize) -> Result<Vec<usize>, String> {
         let ids = self.set(set)?.clone();
         for id in &ids {
             self.update_after_erase(*id);
@@ -150,10 +133,10 @@ impl NativeLoopSelection {
         Ok(ids)
     }
 
-    fn set(&self, set: usize) -> Result<&Vec<usize>, SelectionError> {
-        self.sets.get(set).ok_or(SelectionError::InvalidSet)
+    fn set(&self, set: usize) -> Result<&Vec<usize>, String> {
+        self.sets.get(set).ok_or_else(|| format!("invalid selection set {set}"))
     }
-    fn set_mut(&mut self, set: usize) -> Result<&mut Vec<usize>, SelectionError> {
-        self.sets.get_mut(set).ok_or(SelectionError::InvalidSet)
+    fn set_mut(&mut self, set: usize) -> Result<&mut Vec<usize>, String> {
+        self.sets.get_mut(set).ok_or_else(|| format!("invalid selection set {set}"))
     }
 }

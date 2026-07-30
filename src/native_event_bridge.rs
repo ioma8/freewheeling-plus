@@ -239,7 +239,7 @@ impl NativeEventBridge {
         self.running.store(false, Ordering::Release);
         self.sender.take();
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            crate::event::join_with_timeout(worker);
         }
     }
 }

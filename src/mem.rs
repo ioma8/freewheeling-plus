@@ -18,20 +18,6 @@ pub trait Preallocated: Send {
 
 pub type Instance = Box<dyn Preallocated>;
 
-/// Observable result of a deferred delete. This intentionally is not
-/// `#[must_use]` for source compatibility; callback code that needs lossless
-/// overload handling can recover the retained instance with `into_rejected`.
-pub struct RtDeleteOutcome(Option<Instance>);
-
-impl RtDeleteOutcome {
-    pub fn accepted(&self) -> bool {
-        self.0.is_none()
-    }
-
-    pub fn into_rejected(self) -> Option<Instance> {
-        self.0
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemoryManagerUpdateType {
@@ -147,6 +133,22 @@ impl Drop for MemoryManager {
         self.stopping.store(true, Ordering::Release);
         if let Some(t) = self.thread.take() {
             t.thread().unpark();
+            // Bound the shutdown wait: the worker thread parks with a 1ms
+            // timeout so it observes `stopping` promptly after unpark.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                if t.is_finished() {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if !t.is_finished() {
+                // Worker failed to stop within 2s — detach rather than hang.
+                return;
+            }
             let _ = t.join();
         }
         // The worker drains every accepted update before observing an empty
@@ -196,7 +198,10 @@ impl PreallocatedTypeInner {
         // initially consumable.  Instance mode preallocates all count items.
         let initially_ready = if block_mode { count - 1 } else { count };
         for _ in 0..initially_ready {
-            pt.ready.push((pt.factory)()).ok().unwrap();
+            pt.ready
+                .push((pt.factory)())
+                .ok()
+                .expect("preallocated instance queue capacity < initially_ready");
         }
         manager.add_type(&pt);
         pt
@@ -229,9 +234,9 @@ impl PreallocatedTypeInner {
 
     /// Defers destruction. Returns the instance unchanged if the bounded
     /// manager queue is full, making overflow observable and RT-safe.
-    pub fn rt_delete(self: &Arc<Self>, instance: Instance) -> RtDeleteOutcome {
+    pub fn rt_delete(self: &Arc<Self>, instance: Instance) -> Option<Instance> {
         let Some(m) = self.manager.upgrade() else {
-            return RtDeleteOutcome(Some(instance));
+            return Some(instance);
         };
         match m.wake_up(MemoryManagerUpdate {
             which_pt: Arc::downgrade(self),
@@ -239,10 +244,10 @@ impl PreallocatedTypeInner {
             update_idx: 0,
             tofree: Some(instance),
         }) {
-            Ok(()) => RtDeleteOutcome(None),
-            Err(mut update) => RtDeleteOutcome(Some(
+            Ok(()) => None,
+            Err(mut update) => Some(
                 update.tofree.take().expect("free update retains instance"),
-            )),
+            ),
         }
     }
 
@@ -312,7 +317,7 @@ mod tests {
         let mm = Arc::new(MemoryManager::new());
         let pt = PreallocatedTypeInner::new(&mm, 1, false, || Box::new(Item(1)));
         let x = pt.rt_new().unwrap();
-        assert!(pt.rt_delete(x).accepted());
+        assert!(pt.rt_delete(x).is_none());
         for _ in 0..100 {
             if pt.rt_new().is_some() {
                 return;
@@ -339,7 +344,7 @@ mod tests {
         RECYCLES.store(0, Ordering::SeqCst);
         let mm = Arc::new(MemoryManager::new());
         let pt = PreallocatedTypeInner::new(&mm, 1, false, || Box::new(Recyclable));
-        assert!(pt.rt_delete(pt.rt_new().unwrap()).accepted());
+        assert!(pt.rt_delete(pt.rt_new().unwrap()).is_none());
         for _ in 0..100 {
             mm.process_queue();
             if pt.rt_new().is_some() {
@@ -368,7 +373,7 @@ mod tests {
         assert_eq!(pt.ready.len(), 2, "C++ block base is not consumable");
         let first = pt.rt_new().unwrap();
         let second = pt.rt_new().unwrap();
-        assert!(pt.rt_delete(first).accepted());
+        assert!(pt.rt_delete(first).is_none());
         for _ in 0..100 {
             mm.process_queue();
             if RECYCLES.load(Ordering::SeqCst) == 1 {

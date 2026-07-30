@@ -23,14 +23,6 @@ pub const MAX_CONFIG_VARIABLE_SNAPSHOT: usize = 256;
 // Config expression for math operations
 // ============================================================
 
-#[derive(Debug, Clone)]
-pub enum CfgOperation {
-    Add(f32),
-    Sub(f32),
-    Mul(f32),
-    Div(f32),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CfgTokenType {
     None,
@@ -239,8 +231,6 @@ impl BindingRegistry {
 /// Configuration file parser and variable system
 pub struct FloConfig {
     variables: HashMap<String, UserVariable>,
-    key_bindings: HashMap<String, Vec<String>>,
-    midi_bindings: HashMap<String, Vec<String>>,
     /// Whether we're running on macOS
     pub is_macos: bool,
     /// Audio memory length in seconds
@@ -377,10 +367,6 @@ pub struct PatchBankConfig {
     pub tag: Option<i32>,
 }
 
-/// Input binding matrix.  The legacy implementation is the configuration
-/// subsystem's event-binding owner; retain the established Rust owner while
-/// exposing the original parity name to callers.
-pub type InputMatrix = FloConfig;
 
 impl FloConfig {
     pub const NUM_PREALLOCATED_AUDIO_BLOCKS: usize = 40;
@@ -391,8 +377,6 @@ impl FloConfig {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         FloConfig {
             variables: HashMap::new(),
-            key_bindings: HashMap::new(),
-            midi_bindings: HashMap::new(),
             is_macos: cfg!(target_os = "macos"),
             audio_memory_len: Self::AUDIO_MEMORY_LEN,
             num_preallocated_audio_blocks: Self::NUM_PREALLOCATED_AUDIO_BLOCKS,
@@ -1081,18 +1065,8 @@ impl FloConfig {
     }
 
     /// Add an input binding
-    pub fn add_binding(&mut self, input: &str, action: &str) {
-        if let Some(input) = input.strip_prefix("key:") {
-            self.key_bindings
-                .entry(input.to_string())
-                .or_default()
-                .push(action.to_string());
-        } else if let Some(input) = input.strip_prefix("midi:") {
-            self.midi_bindings
-                .entry(input.to_string())
-                .or_default()
-                .push(action.to_string());
-        }
+    pub fn add_binding(&mut self, _input: &str, _action: &str) {
+        // Binding storage removed (cleanup). Prefix parsing was dead code.
     }
 
     pub fn parse_binding_registry_xml(

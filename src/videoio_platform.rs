@@ -8,8 +8,8 @@
 use crate::sdlio::Sdl2Context;
 use crate::surface_primitives::{Color as SurfaceColor, SoftwareSurface};
 use crate::video_layout::FloLayout;
-use crate::videoio::{VideoBackend, VideoFrame, VideoIO, VideoMode, VideoRenderer};
-use crate::videoio_displays::{Display, DrawOp, RenderMetrics as DisplayMetrics, Renderer};
+use crate::videoio::{RenderMetrics, VideoBackend, VideoFrame, VideoMode};
+use crate::videoio_displays::{Display, DrawOp, Renderer};
 use fontdue::{Font, FontSettings};
 use sdl2::pixels::PixelFormatEnum;
 use sdl2::render::{BlendMode, Canvas};
@@ -29,10 +29,6 @@ pub mod native_ui_scene;
 /// immediately before a frame is presented.  The default methods are real
 /// hooks (rather than no-op implementations): a backend must opt into the
 /// event loop explicitly.
-pub trait PlatformBackend: VideoBackend {
-    fn pump_events(&mut self) -> Result<(), String>;
-    fn update(&mut self) -> Result<(), String>;
-}
 
 /// The logical scene sent to the display/layout adapters.
 pub struct DisplayScene {
@@ -61,7 +57,7 @@ impl DisplayScene {
         }
     }
 
-    pub fn render(&mut self, renderer: &mut dyn Renderer, metrics: &DisplayMetrics) {
+    pub fn render(&mut self, renderer: &mut dyn Renderer, metrics: &RenderMetrics) {
         for display in &mut self.displays {
             if display.base().show || display.base().forceshow {
                 display.render(renderer, metrics);
@@ -101,7 +97,7 @@ impl Renderer for SceneRenderer<'_> {
 pub struct FrameRenderer {
     pub scene: DisplayScene,
     pub platform: Box<dyn PlatformRenderer>,
-    pub metrics: DisplayMetrics,
+    pub metrics: RenderMetrics,
     pub show_settings: bool,
     pub stream_output_path: String,
     pub mouse_logical: (i32, i32),
@@ -110,8 +106,8 @@ pub struct FrameRenderer {
     prev_mouse_down: bool,
 }
 
-impl VideoRenderer for FrameRenderer {
-    fn render(&mut self, frame: &mut VideoFrame) {
+impl FrameRenderer {
+    pub fn render(&mut self, frame: &mut VideoFrame) {
         if frame.width > 0 && frame.height > 0 {
             // The XML layout is authored in the logical resolution from
             // graphics.xml (normally 640x480).  A fullscreen transition can
@@ -124,7 +120,7 @@ impl VideoRenderer for FrameRenderer {
             // and update only the drawable dimensions.
             let logical_width = self.metrics.logical_width;
             let logical_height = self.metrics.logical_height;
-            self.metrics = DisplayMetrics::new(
+            self.metrics = RenderMetrics::new(
                 logical_width,
                 logical_height,
                 frame.width as i32,
@@ -305,7 +301,7 @@ impl SoftwareRgbaRenderer {
                     // legacy path then color-keys only exact black pixels.
                     // Antialiased edge pixels therefore replace the target
                     // with dark, opaque RGB rather than alpha-blending it.
-                    self.surface.put_opaque_pixel(
+                    self.surface.put_pixel(
                         gx + column as i32,
                         gy + row as i32,
                         SurfaceColor::rgb(
@@ -510,7 +506,7 @@ impl PlatformRenderer for SoftwareRgbaRenderer {
                             {
                                 continue;
                             }
-                            self.surface.put_opaque_pixel(
+                            self.surface.put_pixel(
                                 x + px,
                                 y + py,
                                 flat[source_y as usize * flat_width as usize + source_x as usize],
@@ -550,7 +546,6 @@ impl PlatformRenderer for SoftwareRgbaRenderer {
 pub struct Sdl2VideoBackend {
     title: String,
     canvas: Option<Canvas<Window>>,
-    sdl: Option<Sdl2Context>,
 }
 
 // SAFETY: Sdl2VideoBackend only holds types that are used from one
@@ -562,20 +557,13 @@ impl Sdl2VideoBackend {
         Self {
             title: title.into(),
             canvas: None,
-            // Keep the legacy infallible constructor usable while ensuring
-            // input created later reuses this thread's SDL initialization.
-            sdl: Sdl2Context::shared()
-                .ok()
-                .or_else(|| Sdl2Context::new().ok()),
         }
     }
 
-    /// Constructs a video backend using the same SDL library handle as input.
-    pub fn new_with_context(title: impl Into<String>, context: Sdl2Context) -> Self {
+    pub fn new_with_context(title: impl Into<String>, _context: Sdl2Context) -> Self {
         Self {
             title: title.into(),
             canvas: None,
-            sdl: Some(context),
         }
     }
 
@@ -608,7 +596,7 @@ mod frame_renderer_tests {
         let mut renderer = FrameRenderer {
             scene: DisplayScene::new(),
             platform: Box::new(Capture(Vec::new())),
-            metrics: DisplayMetrics::new(640, 480, 640, 480),
+            metrics: RenderMetrics::new(640, 480, 640, 480),
             show_settings: false,
             stream_output_path: String::new(),
             mouse_logical: (0, 0),
@@ -654,10 +642,9 @@ impl VideoBackend for Sdl2VideoBackend {
         if self.canvas.is_some() {
             return self.set_mode(mode);
         }
-        let context = self
-            .sdl
-            .take()
-            .or_else(|| Sdl2Context::shared().ok())
+        let context = Sdl2Context::shared()
+            .ok()
+            .or_else(|| Sdl2Context::new().ok())
             .ok_or_else(|| "SDL context has not been initialized on this thread".to_string())?;
         let sdl = context.sdl();
         let video = sdl.video()?;
@@ -690,7 +677,6 @@ impl VideoBackend for Sdl2VideoBackend {
                     .map_err(|error| error.to_string())
             })?;
         self.canvas = Some(canvas);
-        self.sdl = Some(context);
         self.set_mode(mode)
     }
 
@@ -744,43 +730,12 @@ impl VideoBackend for Sdl2VideoBackend {
 
     fn close(&mut self) {
         self.canvas = None;
-        self.sdl = None;
     }
 }
 
-/// Convenience constructor retaining `VideoIO`'s open → frame/update → mode
-/// → stop ordering and its channel wakeups.
-pub fn activate_scene<B: VideoBackend>(
-    video: &mut VideoIO<B>,
-    scene: DisplayScene,
-    platform: Box<dyn PlatformRenderer>,
-) -> Result<(), String> {
-    let m = video.render_metrics();
-    let metrics = DisplayMetrics::new(
-        m.logical_width as i32,
-        m.logical_height as i32,
-        m.drawable_width as i32,
-        m.drawable_height as i32,
-    );
-    video.activate(FrameRenderer {
-        scene,
-        platform,
-        metrics,
-        show_settings: false,
-        stream_output_path: String::new(),
-        mouse_logical: (0, 0),
-        mouse_down: false,
-        beep_pending: false,
-        prev_mouse_down: false,
-    })
-}
 
-pub fn mode(fullscreen: bool, windowed_size: (u32, u32)) -> VideoMode {
-    VideoMode {
-        fullscreen,
-        windowed_size,
-    }
-}
+
+
 
 #[cfg(test)]
 mod tests {
@@ -798,7 +753,7 @@ mod tests {
         d.base.title = Some("x".into());
         scene.displays.push(Box::new(d));
         let mut p = P(Vec::new());
-        let m = DisplayMetrics::new(640, 480, 640, 480);
+        let m = RenderMetrics::new(640, 480, 640, 480);
         let mut r = SceneRenderer { platform: &mut p };
         scene.render(&mut r, &m);
         assert_eq!(p.0.len(), 1);

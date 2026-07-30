@@ -265,40 +265,6 @@ struct LoopStorageBlock {
     storage: StereoTransfer,
 }
 
-/// Callback-safe counterpart to C++'s `AudioBlock::first`/`next` chain.
-/// A `VecDeque` replaces the intrusive linked list — no unsafe needed,
-/// O(1) append/pop_front, O(1) index access, and better cache locality.
-#[derive(Default)]
-struct LoopBlockChain {
-    blocks: VecDeque<Box<LoopStorageBlock>>,
-}
-
-impl LoopBlockChain {
-    fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
-    }
-
-    fn len(&self) -> usize {
-        self.blocks.len()
-    }
-
-    fn append(&mut self, block: Box<LoopStorageBlock>) {
-        self.blocks.push_back(block);
-    }
-
-    fn pop_first(&mut self) -> Option<Box<LoopStorageBlock>> {
-        self.blocks.pop_front()
-    }
-
-    fn block_at(&self, index: usize) -> &LoopStorageBlock {
-        &self.blocks[index]
-    }
-
-    fn block_at_mut(&mut self, index: usize) -> &mut LoopStorageBlock {
-        &mut self.blocks[index]
-    }
-}
-
 struct TransferSlot {
     state: AtomicU8,
     generation: AtomicU32,
@@ -306,8 +272,21 @@ struct TransferSlot {
     scope: UnsafeCell<TransferScopeCache>,
 }
 
-// State transitions give one side exclusive access to each UnsafeCell: control
-// owns CONTROL/EXPORTED and the audio thread owns QUEUED/CALLBACK.
+// SAFETY: `TransferSlot` is Sync because exclusive access to each `UnsafeCell`
+// is mediated by the `state` atomic state machine.  The protocol:
+//
+//   Free → Control  (control thread, via compare_exchange AcqRel)
+//   Control → Queued  (control thread, via compare_exchange AcqRel)
+//   Queued → Callback  (audio thread, runtime command dispatch)
+//   Callback → Control | Free  (control thread, after command completion)
+//
+// Every thread that reads or writes `pcm` / `scope` must first load `state`
+// (or `generation`, which is bumped with AcqRel and validated with Acquire)
+// with at least Ordering::Acquire and verify the expected state.  The
+// Release half of the state transition guarantees that all preceding writes
+// to the UnsafeCell are visible to the acquiring thread.  All callers abide
+// by this -- see write_transfer, try_import_loop, with_exported_pcm,
+// release_transfer, and the audio-thread transfer handlers.
 unsafe impl Sync for TransferSlot {}
 
 struct TransferPool {
@@ -319,7 +298,7 @@ impl TransferPool {
     fn new(count: usize, capacity: usize) -> Self {
         let slots = (0..count)
             .map(|_| TransferSlot {
-                state: AtomicU8::new(TransferState::Free.into()),
+                state: AtomicU8::new(u8::from(TransferState::Free)),
                 generation: AtomicU32::new(0),
                 pcm: UnsafeCell::new(StereoTransfer {
                     left: vec![0.0; capacity],
@@ -342,8 +321,8 @@ impl TransferPool {
             if slot
                 .state
                 .compare_exchange(
-                    TransferState::Free.into(),
-                    TransferState::Control.into(),
+                    u8::from(TransferState::Free),
+                    u8::from(TransferState::Control),
                     Ordering::AcqRel,
                     Ordering::Relaxed,
                 )
@@ -697,7 +676,7 @@ impl RuntimeControls {
         let slot = self
             .transfers
             .slot(handle)
-            .filter(|slot| slot.state.load(Ordering::Acquire) == TransferState::Control.into())
+            .filter(|slot| slot.state.load(Ordering::Acquire) == u8::from(TransferState::Control))
             .ok_or(PcmTransferError::InvalidHandle)?;
         // SAFETY: CONTROL is exclusively owned by this endpoint.
         let pcm = unsafe { &mut *slot.pcm.get() };
@@ -723,7 +702,7 @@ impl RuntimeControls {
             .slot(handle)
             .ok_or(PcmTransferError::InvalidHandle)?;
         let state = transfer.state.load(Ordering::Acquire);
-        if state != TransferState::Control.into() && state != TransferState::Exported.into() {
+        if state != u8::from(TransferState::Control) && state != u8::from(TransferState::Exported) {
             return Err(PcmTransferError::InvalidHandle);
         }
         // SAFETY: CONTROL/EXPORTED grants this endpoint exclusive PCM and
@@ -734,7 +713,7 @@ impl RuntimeControls {
         scope.compute(&pcm.left[..pcm.len], &pcm.right[..pcm.len]);
         transfer
             .state
-            .compare_exchange(state, TransferState::Queued.into(), Ordering::AcqRel, Ordering::Relaxed)
+            .compare_exchange(state, u8::from(TransferState::Queued), Ordering::AcqRel, Ordering::Relaxed)
             .map_err(|_| PcmTransferError::InvalidHandle)?;
         let command = RuntimeCommand::ImportLoop {
             slot,
@@ -744,7 +723,7 @@ impl RuntimeControls {
             gain,
         };
         if self.commands.try_send(command).is_err() {
-            transfer.state.store(TransferState::Control.into(), Ordering::Release);
+            transfer.state.store(u8::from(TransferState::Control), Ordering::Release);
             return Err(PcmTransferError::CommandQueueFull);
         }
         Ok(())
@@ -756,13 +735,13 @@ impl RuntimeControls {
     ) -> Result<PcmTransferHandle, PcmTransferError> {
         let replacement = self.transfers.acquire()?;
         let transfer = self.transfers.slot(replacement).unwrap();
-        transfer.state.store(TransferState::Queued.into(), Ordering::Release);
+        transfer.state.store(u8::from(TransferState::Queued), Ordering::Release);
         if self
             .commands
             .try_send(RuntimeCommand::RequestLoopExport { slot, replacement })
             .is_err()
         {
-            transfer.state.store(TransferState::Free.into(), Ordering::Release);
+            transfer.state.store(u8::from(TransferState::Free), Ordering::Release);
             return Err(PcmTransferError::CommandQueueFull);
         }
         Ok(replacement)
@@ -776,7 +755,7 @@ impl RuntimeControls {
         let slot = self
             .transfers
             .slot(handle)
-            .filter(|slot| slot.state.load(Ordering::Acquire) == TransferState::Exported.into())
+            .filter(|slot| slot.state.load(Ordering::Acquire) == u8::from(TransferState::Exported))
             .ok_or(PcmTransferError::InvalidHandle)?;
         // SAFETY: EXPORTED is exclusively read by control until release.
         let pcm = unsafe { &*slot.pcm.get() };
@@ -789,7 +768,7 @@ impl RuntimeControls {
             .slot(handle)
             .ok_or(PcmTransferError::InvalidHandle)?;
         let state = slot.state.load(Ordering::Acquire);
-        if state != TransferState::Control.into() && state != TransferState::Exported.into() {
+        if state != u8::from(TransferState::Control) && state != u8::from(TransferState::Exported) {
             return Err(PcmTransferError::InvalidHandle);
         }
         // Import transfers lend their contiguous vectors to the live loop in
@@ -807,7 +786,7 @@ impl RuntimeControls {
         }
         pcm.len = 0;
         slot.state
-            .compare_exchange(state, TransferState::Free.into(), Ordering::AcqRel, Ordering::Relaxed)
+            .compare_exchange(state, u8::from(TransferState::Free), Ordering::AcqRel, Ordering::Relaxed)
             .map(|_| ())
             .map_err(|_| PcmTransferError::InvalidHandle)
     }
@@ -819,7 +798,7 @@ struct LoopSlot {
     /// C++ records into a chain of globally preallocated `AudioBlock`s. Rust
     /// imports retain their contiguous transfer buffer in `left`/`right`, but
     /// native recordings use this callback-safe shared block chain.
-    blocks: LoopBlockChain,
+    blocks: VecDeque<Box<LoopStorageBlock>>,
     /// Logical beginning of this loop within its retained storage. C++
     /// `AudioBlock::Smooth(1)` advances `first->buf` by 64 samples instead
     /// of copying the whole chain; retain the same O(1) logical trim.
@@ -879,7 +858,7 @@ impl LoopSlot {
         Self {
             left: Vec::new(),
             right: Vec::new(),
-            blocks: LoopBlockChain::default(),
+            blocks: VecDeque::new(),
             data_offset: 0,
             len: 0,
             position: 0,
@@ -917,7 +896,7 @@ impl LoopSlot {
     fn sample_at(&self, frame: usize) -> (f32, f32) {
         let frame = frame + self.data_offset;
         if self.uses_blocks() {
-            let block = self.blocks.block_at(frame / AUDIO_BLOCK_FRAMES);
+            let block = &self.blocks[frame / AUDIO_BLOCK_FRAMES];
             let offset = frame % AUDIO_BLOCK_FRAMES;
             (block.storage.left[offset], block.storage.right[offset])
         } else {
@@ -928,7 +907,7 @@ impl LoopSlot {
     fn set_sample(&mut self, frame: usize, left: f32, right: f32) {
         let frame = frame + self.data_offset;
         if self.uses_blocks() {
-            let block = self.blocks.block_at_mut(frame / AUDIO_BLOCK_FRAMES);
+            let block = &mut self.blocks[frame / AUDIO_BLOCK_FRAMES];
             let offset = frame % AUDIO_BLOCK_FRAMES;
             block.storage.left[offset] = left;
             block.storage.right[offset] = right;
@@ -1166,12 +1145,12 @@ impl LoopStoragePool {
         };
         self.requests.fetch_add(1, Ordering::Release);
         self.worker.unpark();
-        slot.blocks.append(storage);
+        slot.blocks.push_back(storage);
         true
     }
 
     fn release_blocks(&mut self, slot: &mut LoopSlot) {
-        while let Some(storage) = slot.blocks.pop_first() {
+        while let Some(storage) = slot.blocks.pop_front() {
             // The return ring is intentionally much larger than C++'s
             // realtime-ready set, so an erase/re-record command burst stays
             // allocation-free and keeps ownership off the callback thread.
@@ -1180,7 +1159,7 @@ impl LoopStoragePool {
                 // queue: retaining the block locally is safer than freeing or
                 // allocating from audio. The next recording may be refused
                 // until the control loop catches up.
-                slot.blocks.append(full.0);
+                slot.blocks.push_back(full.0);
                 break;
             }
             self.worker.unpark();
@@ -1464,22 +1443,7 @@ pub struct RuntimeAudioProcessor<B: FluidSynthBackend = FluidLiteBackend> {
 }
 
 /// Constructs the concrete processor and its non-realtime control endpoint.
-/// All loop memory and queue storage is allocated here, before activation.
-pub fn production_audio_processor(
-    synth: FluidLiteBackend,
-    sample_rate: u32,
-    max_loop_frames: usize,
-    max_callback_frames: usize,
-) -> (RuntimeAudioProcessor, RuntimeControls) {
-    production_audio_processor_with_settings(
-        synth,
-        sample_rate,
-        max_loop_frames,
-        max_callback_frames,
-        DspSettings::default(),
-    )
-}
-
+/// Uses the production FluidLite synth backend.
 pub fn production_audio_processor_with_settings(
     synth: FluidLiteBackend,
     sample_rate: u32,
@@ -2464,7 +2428,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
             } => {
                 let Some(target) = self.loops.get_mut(slot as usize) else {
                     if let Some(transfer) = self.transfers.slot(handle) {
-                        transfer.state.store(TransferState::Exported.into(), Ordering::Release);
+                        transfer.state.store(u8::from(TransferState::Exported), Ordering::Release);
                     }
                     self.send_status(RuntimeStatus::TransferError {
                         slot,
@@ -2476,7 +2440,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 let Some(transfer) = self
                     .transfers
                     .slot(handle)
-                    .filter(|item| item.state.load(Ordering::Acquire) == TransferState::Queued.into())
+                    .filter(|item| item.state.load(Ordering::Acquire) == u8::from(TransferState::Queued))
                 else {
                     self.send_status(RuntimeStatus::TransferError {
                         slot,
@@ -2485,7 +2449,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                     });
                     return;
                 };
-                transfer.state.store(TransferState::Callback.into(), Ordering::Release);
+                transfer.state.store(u8::from(TransferState::Callback), Ordering::Release);
                 // SAFETY: CALLBACK grants this audio thread exclusive access.
                 let pcm = unsafe { &mut *transfer.pcm.get() };
                 // SAFETY: CALLBACK grants the same exclusive transfer owner
@@ -2530,13 +2494,13 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 // chunks intentionally remain absent rather than being
                 // continued on the DSP callback.
                 target.scope.complete = true;
-                transfer.state.store(TransferState::Exported.into(), Ordering::Release);
+                transfer.state.store(u8::from(TransferState::Exported), Ordering::Release);
                 self.send_status(RuntimeStatus::LoopImported { slot, handle });
             }
             RuntimeCommand::RequestLoopExport { slot, replacement } => {
                 if self.export_job.is_some() {
                     if let Some(transfer) = self.transfers.slot(replacement) {
-                        transfer.state.store(TransferState::Exported.into(), Ordering::Release);
+                        transfer.state.store(u8::from(TransferState::Exported), Ordering::Release);
                     }
                     self.send_status(RuntimeStatus::TransferError {
                         slot,
@@ -2550,7 +2514,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                         && !matches!(item.mode, LoopMode::Recording | LoopMode::Overdubbing)
                 }) else {
                     if let Some(transfer) = self.transfers.slot(replacement) {
-                        transfer.state.store(TransferState::Exported.into(), Ordering::Release);
+                        transfer.state.store(u8::from(TransferState::Exported), Ordering::Release);
                     }
                     self.send_status(RuntimeStatus::TransferError {
                         slot,
@@ -2562,7 +2526,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 let Some(transfer) = self
                     .transfers
                     .slot(replacement)
-                    .filter(|item| item.state.load(Ordering::Acquire) == TransferState::Queued.into())
+                    .filter(|item| item.state.load(Ordering::Acquire) == u8::from(TransferState::Queued))
                 else {
                     self.send_status(RuntimeStatus::TransferError {
                         slot,
@@ -2571,7 +2535,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                     });
                     return;
                 };
-                transfer.state.store(TransferState::Callback.into(), Ordering::Release);
+                transfer.state.store(u8::from(TransferState::Callback), Ordering::Release);
                 // SAFETY: CALLBACK grants this audio thread exclusive access.
                 let pcm = unsafe { &mut *transfer.pcm.get() };
                 pcm.len = target.len;
@@ -2598,7 +2562,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 self.stop_recording(false);
                 if let Some(job) = self.export_job.take() {
                     if let Some(transfer) = self.transfers.slot(job.handle) {
-                        transfer.state.store(TransferState::Exported.into(), Ordering::Release);
+                        transfer.state.store(u8::from(TransferState::Exported), Ordering::Release);
                     }
                     self.send_status(RuntimeStatus::TransferError {
                         slot: job.slot,
@@ -2651,7 +2615,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
         );
         job.cursor = end;
         if end == job.metadata.frames as usize {
-            transfer.state.store(TransferState::Exported.into(), Ordering::Release);
+            transfer.state.store(u8::from(TransferState::Exported), Ordering::Release);
             self.send_status(RuntimeStatus::LoopExported {
                 slot: job.slot,
                 handle: job.handle,
@@ -4746,19 +4710,19 @@ mod tests {
                 },
             })
         };
-        let mut chain = LoopBlockChain::default();
-        chain.append(block(1.0));
-        chain.append(block(2.0));
-        let _ = chain.pop_first();
-        chain.append(block(3.0));
+        let mut chain = VecDeque::new();
+        chain.push_back(block(1.0));
+        chain.push_back(block(2.0));
+        let _ = chain.pop_front();
+        chain.push_back(block(3.0));
         assert_eq!(chain.len(), 2);
-        assert_eq!(chain.block_at(0).storage.left[0], 2.0);
-        assert_eq!(chain.block_at(1).storage.left[0], 3.0);
-        let _ = chain.pop_first();
-        let _ = chain.pop_first();
+        assert_eq!(chain[0].storage.left[0], 2.0);
+        assert_eq!(chain[1].storage.left[0], 3.0);
+        let _ = chain.pop_front();
+        let _ = chain.pop_front();
         assert!(chain.is_empty());
-        chain.append(block(4.0));
-        assert_eq!(chain.block_at(0).storage.left[0], 4.0);
+        chain.push_back(block(4.0));
+        assert_eq!(chain[0].storage.left[0], 4.0);
     }
 
     #[test]

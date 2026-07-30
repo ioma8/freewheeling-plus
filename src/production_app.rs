@@ -1,9 +1,8 @@
 //! Production application graph and lifecycle orchestration.
 
-use crate::application_services::Components;
-use crate::core::{CoreEvent, LoopSnapshot, Snapshot, StreamState};
+use crate::application_services::{ApplicationServices, Components};
+use crate::core::{Core, CoreEvent, LoopSnapshot, Snapshot, StreamState};
 use crate::core_startup::{StartupConfig, StartupServices};
-use crate::fweelin_app::Fweelin;
 
 /// Operations supplied by the fully assembled audio/MIDI/video/DSP graph.
 /// Event polling should block for a short bounded interval and return `None`
@@ -16,10 +15,10 @@ pub trait NativeComponentAdapter {
     fn stream_state(&self) -> StreamState;
     fn stream_bytes(&self) -> u64;
     fn close_video(&mut self);
-    fn close_input(&mut self);
+    fn close_sdl(&mut self);
     fn close_midi(&mut self);
     fn close_audio(&mut self);
-    fn release_graph(&mut self);
+    fn shutdown(&mut self);
     fn snapshot_loops(&self) -> Vec<LoopSnapshot>;
     fn restore_snapshot(&mut self, snapshot: &Snapshot) -> Result<(), String>;
 }
@@ -91,7 +90,7 @@ impl<A: NativeComponentAdapter> Components for NativeComponents<A> {
     }
     fn close_sdl(&mut self) {
         if self.input_open {
-            self.adapter.close_input();
+            self.adapter.close_sdl();
             self.input_open = false;
         }
     }
@@ -113,7 +112,7 @@ impl<A: NativeComponentAdapter> Components for NativeComponents<A> {
         self.close_midi();
         self.close_audio();
         if self.graph_open {
-            self.adapter.release_graph();
+            self.adapter.shutdown();
             self.graph_open = false;
         }
     }
@@ -132,34 +131,34 @@ impl<A: NativeComponentAdapter> Drop for NativeComponents<A> {
 }
 
 pub struct ProductionApp<C: StartupConfig, S: StartupServices, A: NativeComponentAdapter> {
-    app: Fweelin<C, S, NativeComponents<A>>,
+    core: Core<ApplicationServices<C, S, NativeComponents<A>>>,
 }
 
 impl<C: StartupConfig, S: StartupServices, A: NativeComponentAdapter> ProductionApp<C, S, A> {
     pub fn new(config: C, startup: S, components: A, inputs: usize, last_records: usize) -> Self {
         Self {
-            app: Fweelin::new(
+            core: Core::new(ApplicationServices::new(
                 config,
                 startup,
                 NativeComponents::new(components),
                 inputs,
                 last_records,
-            ),
+            )),
         }
     }
-    pub fn app(&self) -> &Fweelin<C, S, NativeComponents<A>> {
-        &self.app
+    pub fn core(&self) -> &Core<ApplicationServices<C, S, NativeComponents<A>>> {
+        &self.core
     }
-    pub fn app_mut(&mut self) -> &mut Fweelin<C, S, NativeComponents<A>> {
-        &mut self.app
+    pub fn core_mut(&mut self) -> &mut Core<ApplicationServices<C, S, NativeComponents<A>>> {
+        &mut self.core
     }
 
     /// Set up, run the main-thread event loop, and always perform clean
     /// shutdown. Startup errors retain their failing phase from `core_startup`.
     pub fn run(&mut self) -> Result<(), String> {
-        self.app.setup()?;
-        let result = self.app.go();
-        self.app.shutdown();
+        self.core.setup()?;
+        let result = self.core.go();
+        self.core.shutdown();
         result
     }
 }
@@ -192,8 +191,8 @@ mod tests {
         fn close_video(&mut self) {
             self.0.lock().unwrap().push("video");
         }
-        fn close_input(&mut self) {
-            self.0.lock().unwrap().push("input");
+        fn close_sdl(&mut self) {
+            self.0.lock().unwrap().push("sdl");
         }
         fn close_midi(&mut self) {
             self.0.lock().unwrap().push("midi");
@@ -201,8 +200,8 @@ mod tests {
         fn close_audio(&mut self) {
             self.0.lock().unwrap().push("audio");
         }
-        fn release_graph(&mut self) {
-            self.0.lock().unwrap().push("graph");
+        fn shutdown(&mut self) {
+            self.0.lock().unwrap().push("shutdown");
         }
         fn snapshot_loops(&self) -> Vec<LoopSnapshot> {
             Vec::new()
@@ -223,7 +222,7 @@ mod tests {
         drop(components);
         assert_eq!(
             *calls.lock().unwrap(),
-            vec!["video", "input", "midi", "audio", "graph"]
+            vec!["video", "sdl", "midi", "audio", "shutdown"]
         );
     }
 }

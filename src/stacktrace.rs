@@ -14,31 +14,18 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
-#[allow(dead_code)]
-fn bounded(dst: &mut [u8], value: &str) -> i32 {
-    if dst.is_empty() || value.len() >= dst.len() {
-        if let Some(last) = dst.last_mut() {
-            *last = 0;
-        }
-        return -1;
-    }
-    dst[..value.len()].copy_from_slice(value.as_bytes());
-    dst[value.len()] = 0;
-    0
+/// Build an nm command.
+pub fn build_nm_command(progname: &str) -> String {
+    format!("nm -B {}", shell_quote(progname))
 }
 
-/// Build an nm command, returning `None` when the input or output is too large.
-pub fn build_nm_command(progname: &str) -> Option<String> {
-    Some(format!("nm -B {}", shell_quote(progname)))
-}
-
-pub fn build_debugger_command(progname: &str, command_file: &str) -> Option<String> {
-    Some(format!(
+pub fn build_debugger_command(progname: &str, command_file: &str) -> String {
+    format!(
         "gdb -q {} {} 2>/dev/null <{} >fweelin-stackdump",
         shell_quote(progname),
         std::process::id(),
         shell_quote(command_file)
-    ))
+    )
 }
 
 pub fn parse_nm_symbol_line(line: &str) -> Option<(u64, char, String)> {
@@ -122,9 +109,7 @@ pub fn stack_trace(command_file: Option<&str>) -> bool {
         write_output(b"No debugger found\n", handle);
         return false;
     };
-    let Some(cmd) = build_debugger_command(&prog, file) else {
-        return false;
-    };
+    let cmd = build_debugger_command(&prog, file);
     // `DumpStack` in stacktrace.c deliberately treats a successfully forked
     // shell as success.  The generated command redirects gdb output to
     // fweelin-stackdump, so inspecting captured stdout here would make every
@@ -166,20 +151,13 @@ mod tests {
         );
     }
     #[test]
-    fn bounded_output() {
-        let mut b = [0; 4];
-        assert_eq!(bounded(&mut b, "abcd"), -1);
-        assert_eq!(b[3], 0);
-    }
-
-    #[test]
     fn command_builder_contract() {
         // build_nm_command shell injection
-        let cmd = build_nm_command("/tmp/fweelin';touch /tmp/pwned #").unwrap();
+        let cmd = build_nm_command("/tmp/fweelin';touch /tmp/pwned #");
         assert_eq!(cmd, "nm -B '/tmp/fweelin'\"'\"';touch /tmp/pwned #'");
 
         // build_debugger_command format
-        let cmd = build_debugger_command("/tmp/fweelin", "/tmp/cmds.gdb").unwrap();
+        let cmd = build_debugger_command("/tmp/fweelin", "/tmp/cmds.gdb");
         assert_eq!(
             cmd,
             format!(

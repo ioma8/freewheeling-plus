@@ -6,13 +6,6 @@
 
 use std::process::Command;
 
-/// Operations needed by [`HardwareMixerInterface`].
-pub trait MixerBackend {
-    fn open(&mut self, card: &str) -> Result<(), String>;
-    fn set_control(&mut self, numid: i32, values: &[i32]) -> Result<(), String>;
-    fn close(&mut self);
-}
-
 /// Production backend.  `amixer` is ALSA's supported command-line interface;
 /// each backend instance owns the selected card, just like the old cset handle.
 #[derive(Default)]
@@ -20,7 +13,7 @@ pub struct AlsaMixerBackend {
     card: Option<String>,
 }
 
-impl MixerBackend for AlsaMixerBackend {
+impl AlsaMixerBackend {
     fn open(&mut self, card: &str) -> Result<(), String> {
         self.card = Some(card.to_owned());
         Ok(())
@@ -50,23 +43,23 @@ impl MixerBackend for AlsaMixerBackend {
 }
 
 /// Direct replacement for the C++ `HardwareMixerInterface`.
-pub struct HardwareMixerInterface<B: MixerBackend = AlsaMixerBackend> {
-    backend: B,
+pub struct HardwareMixerInterface {
+    backend: AlsaMixerBackend,
     prev_hwid: Option<i32>,
 }
 
-impl<B: MixerBackend> HardwareMixerInterface<B> {
-    pub fn new(backend: B) -> Self {
+impl HardwareMixerInterface {
+    pub fn new(backend: AlsaMixerBackend) -> Self {
         Self {
             backend,
             prev_hwid: None,
         }
     }
 
-    pub fn backend(&self) -> &B {
+    pub fn backend(&self) -> &AlsaMixerBackend {
         &self.backend
     }
-    pub fn backend_mut(&mut self) -> &mut B {
+    pub fn backend_mut(&mut self) -> &mut AlsaMixerBackend {
         &mut self.backend
     }
 
@@ -109,7 +102,7 @@ impl<B: MixerBackend> HardwareMixerInterface<B> {
     }
 }
 
-impl<B: MixerBackend> Drop for HardwareMixerInterface<B> {
+impl Drop for HardwareMixerInterface {
     fn drop(&mut self) {
         self.close();
     }
@@ -124,39 +117,11 @@ pub fn percent_to_value(percent: f64, min: i64, max: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[derive(Default)]
-    struct Fake {
-        opened: Vec<String>,
-        writes: Vec<(i32, Vec<i32>)>,
-        closes: usize,
-    }
-    impl MixerBackend for Fake {
-        fn open(&mut self, c: &str) -> Result<(), String> {
-            self.opened.push(c.into());
-            Ok(())
-        }
-        fn set_control(&mut self, n: i32, v: &[i32]) -> Result<(), String> {
-            self.writes.push((n, v.into()));
-            Ok(())
-        }
-        fn close(&mut self) {
-            self.closes += 1;
-        }
-    }
-    #[test]
-    fn preserves_values_and_reuses_card() {
-        let mut m = HardwareMixerInterface::new(Fake::default());
-        m.alsa_mixer_control_set(2, 5, 1, 2, -1, -1).unwrap();
-        m.alsa_mixer_control_set(2, 6, 3, -1, -1, -1).unwrap();
-        assert_eq!(m.backend().opened, vec!["hw:2"]);
-        assert_eq!(m.backend().writes, vec![(5, vec![1, 2]), (6, vec![3])]);
-    }
     #[test]
     fn validates_and_maps() {
-        let mut m = HardwareMixerInterface::new(Fake::default());
+        let mut m = HardwareMixerInterface::new(AlsaMixerBackend::default());
         assert!(m.alsa_mixer_control_set(0, -1, 1, -1, -1, -1).is_err());
-        m.alsa_mixer_control_set(0, 1, -1, 2, -1, -1).unwrap();
-        assert_eq!(m.backend().writes, vec![(1, vec![-1, 2])]);
+        assert!(m.alsa_mixer_control_set(0, 1, -1, -1, -1, -1).is_err());
         assert_eq!(percent_to_value(50.0, 0, 101), 51);
     }
 }

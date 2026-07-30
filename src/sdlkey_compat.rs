@@ -2,7 +2,6 @@
 
 pub type SdlKey = i32;
 
-pub const FWL_SDLK_FIRST: SdlKey = 0;
 pub const FWL_SDLK_UNKNOWN: SdlKey = 0;
 pub const FWL_SDLK_BACKSPACE: SdlKey = 8;
 pub const FWL_SDLK_TAB: SdlKey = 9;
@@ -160,7 +159,6 @@ mod tests {
     use super::*;
     #[test]
     fn range_invariants() {
-        assert_eq!(FWL_SDLK_FIRST, FWL_SDLK_UNKNOWN);
         assert_eq!(FWL_SDLK_LAST, FWL_SDLK_UNDO + 1);
     }
     #[test]

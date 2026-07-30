@@ -34,8 +34,6 @@ pub struct MidiPortMessage {
     pub message: MidiMessage,
 }
 
-pub type PatchRef = String;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PatchMidiRoute {
     pub port: u8,
@@ -119,8 +117,8 @@ pub fn decode(bytes: &[u8]) -> Option<MidiMessage> {
     }
 }
 
-pub fn encode(message: impl std::borrow::Borrow<MidiMessage>) -> Vec<u8> {
-    match message.borrow() {
+pub fn encode(message: &MidiMessage) -> Vec<u8> {
+    match message {
         MidiMessage::NoteOff {
             channel,
             note,
@@ -210,7 +208,7 @@ pub struct MidiIo<B: MidiBackend> {
     pub sync_transmit: bool,
     pub held_notes: Vec<(u8, u8)>,
     pub note_port: [Option<u8>; 128],
-    pub note_patch: [Option<PatchRef>; 128],
+    pub note_patch: [Option<String>; 128],
     pub patch_routes: HashMap<String, PatchMidiRoute>,
 }
 impl<B: MidiBackend> MidiIo<B> {

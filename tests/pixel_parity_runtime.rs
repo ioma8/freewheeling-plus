@@ -1,4 +1,4 @@
-use freewheeling_plus::videoio::{VideoFrame, VideoRenderer};
+use freewheeling_plus::videoio::VideoFrame;
 use freewheeling_plus::videoio_platform::native_ui_scene::{
     load_production_scene_at, production_software_renderer,
 };

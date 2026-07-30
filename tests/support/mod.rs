@@ -169,8 +169,8 @@ impl NativeComponentAdapter for FakeNative {
     fn close_video(&mut self) {
         self.state.borrow_mut().log.push("close:video".into());
     }
-    fn close_input(&mut self) {
-        self.state.borrow_mut().log.push("close:input".into());
+    fn close_sdl(&mut self) {
+        self.state.borrow_mut().log.push("close:sdl".into());
     }
     fn close_midi(&mut self) {
         self.state.borrow_mut().log.push("close:midi".into());
@@ -178,8 +178,8 @@ impl NativeComponentAdapter for FakeNative {
     fn close_audio(&mut self) {
         self.state.borrow_mut().log.push("close:audio".into());
     }
-    fn release_graph(&mut self) {
-        self.state.borrow_mut().log.push("close:graph".into());
+    fn shutdown(&mut self) {
+        self.state.borrow_mut().log.push("close:shutdown".into());
     }
     fn snapshot_loops(&self) -> Vec<LoopSnapshot> {
         self.state.borrow().loops.clone()

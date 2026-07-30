@@ -47,8 +47,9 @@ impl Default for ProcessorCommand {
     }
 }
 
-// Raw pointers are handles only. The queue never dereferences them, and the
-// C++ implementation likewise permits commands to cross thread boundaries.
+// Raw pointers are handles only (ZST [u8; 0] — never dereferenced). The
+// queue merely stores and returns them; every access happens on the owning
+// thread after read_next transfers ownership of the command. C++ compat.
 // SAFETY: ProcessorCommand holds raw pointers that are never dereferenced
 // through the Send boundary — they are only accessed by the owning thread.
 unsafe impl Send for ProcessorCommand {}
@@ -163,16 +164,19 @@ mod tests {
         assert!(!queue.read_next(&mut command));
 
         for _ in 0..ProcessorCommandQueue::MAX_COMMANDS {
-            assert!(queue.enqueue_add(std::ptr::null_mut()));
+            // ZST never dereferenced; null is fine for capacity testing.
+            assert!(queue.enqueue_add(std::ptr::NonNull::<ProcessorItem>::dangling().as_ptr()));
         }
-        assert!(!queue.enqueue_add(std::ptr::null_mut()));
+        assert!(!queue.enqueue_add(std::ptr::NonNull::<ProcessorItem>::dangling().as_ptr()));
         assert_eq!(queue.rejected_count(), 1);
     }
 
     #[test]
     fn read_next_skips_a_callback_when_a_producer_holds_the_cpp_mutex() {
         let queue = ProcessorCommandQueue::new();
-        assert!(queue.enqueue_add(std::ptr::null_mut()));
+        // ZST never dereferenced; NonNull::dangling is fine for this test.
+        let item = std::ptr::NonNull::<ProcessorItem>::dangling().as_ptr();
+        assert!(queue.enqueue_add(item));
         let held_lock = queue.commands.lock().unwrap();
         let mut command = ProcessorCommand::default();
 

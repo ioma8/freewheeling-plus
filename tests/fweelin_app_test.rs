@@ -1,7 +1,6 @@
-use freewheeling_plus::application_services::Components;
-use freewheeling_plus::core::{CoreEvent, LoopSnapshot, Snapshot, StreamState};
+use freewheeling_plus::application_services::{ApplicationServices, Components};
+use freewheeling_plus::core::{Core, CoreEvent, LoopSnapshot, Snapshot, StreamState};
 use freewheeling_plus::core_startup::{StartupConfig, StartupServices};
-use freewheeling_plus::fweelin_app::Fweelin;
 
 #[derive(Default)]
 struct Config;
@@ -90,8 +89,8 @@ impl Components for Services {
     fn next_event(&mut self) -> Result<Option<CoreEvent>, String> {
         Ok(self.events.pop().unwrap_or(None))
     }
-    fn set_streaming(&mut self, e: bool, _: u64) -> Result<(), String> {
-        self.state = if e {
+    fn set_streaming(&mut self, enabled: bool, _: u64) -> Result<(), String> {
+        self.state = if enabled {
             StreamState::Writing
         } else {
             StreamState::Stopped
@@ -110,7 +109,7 @@ impl Components for Services {
     fn close_audio(&mut self) {}
     fn shutdown(&mut self) {}
     fn snapshot_loops(&self) -> Vec<LoopSnapshot> {
-        vec![]
+        Vec::new()
     }
     fn restore_snapshot(&mut self, _: &Snapshot) -> Result<(), String> {
         Ok(())
@@ -118,8 +117,8 @@ impl Components for Services {
 }
 
 #[test]
-fn façade_runs_ordered_lifecycle_and_controls_streaming() {
-    let mut app = Fweelin::new(
+fn core_runs_ordered_lifecycle_and_controls_streaming() {
+    let mut app = Core::new(ApplicationServices::new(
         Config,
         Startup,
         Services {
@@ -128,11 +127,13 @@ fn façade_runs_ordered_lifecycle_and_controls_streaming() {
         },
         0,
         0,
-    );
+    ));
     app.setup().unwrap();
     app.toggle_disk_output().unwrap();
     assert_eq!(app.stream_stats(), (StreamState::Writing, 11));
-    app.flush_stream_out_name().unwrap();
+    if app.stream_stats().0 == StreamState::Writing {
+        app.toggle_disk_output().unwrap();
+    }
     assert_eq!(app.stream_stats().0, StreamState::Stopped);
     app.go().unwrap();
     assert!(!app.is_running());

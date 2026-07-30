@@ -277,28 +277,17 @@ impl<const N: usize> ActionBatch<N> {
     }
 }
 
-/// Read-only audio state needed to preserve trigger-loop's C++ state machine.
-pub trait RuntimeLoopState {
-    fn loop_mode(&self, slot: u8) -> LoopMode;
-}
-
-impl RuntimeLoopState for [LoopMode; MAX_RUNTIME_LOOPS] {
-    fn loop_mode(&self, slot: u8) -> LoopMode {
-        self[slot as usize]
-    }
-}
-
-pub struct RuntimeEventDispatcher<const N: usize = 32>;
+pub struct RuntimeEventDispatcher;
 
 const MAX_GOSUB_DEPTH: usize = 32;
 
-impl<const N: usize> Default for RuntimeEventDispatcher<N> {
+impl Default for RuntimeEventDispatcher {
     fn default() -> Self {
         Self
     }
 }
 
-impl<const N: usize> RuntimeEventDispatcher<N> {
+impl RuntimeEventDispatcher {
     pub fn new() -> Self {
         Self
     }
@@ -311,8 +300,8 @@ impl<const N: usize> RuntimeEventDispatcher<N> {
         config: &mut FloConfig,
         registry: &BindingRegistry,
         input: &Event,
-        loops: &impl RuntimeLoopState,
-    ) -> Result<ActionBatch<N>, DispatchError> {
+        loops: &[LoopMode; MAX_RUNTIME_LOOPS],
+    ) -> Result<ActionBatch<32>, DispatchError> {
         self.dispatch_at_depth(config, registry, input, loops, 0)
     }
 
@@ -321,9 +310,9 @@ impl<const N: usize> RuntimeEventDispatcher<N> {
         config: &mut FloConfig,
         registry: &BindingRegistry,
         input: &Event,
-        loops: &impl RuntimeLoopState,
+        loops: &[LoopMode; MAX_RUNTIME_LOOPS],
         depth: usize,
-    ) -> Result<ActionBatch<N>, DispatchError> {
+    ) -> Result<ActionBatch<32>, DispatchError> {
         if depth > MAX_GOSUB_DEPTH {
             return Err(DispatchError::RecursionLimit { depth });
         }
@@ -348,7 +337,7 @@ impl<const N: usize> RuntimeEventDispatcher<N> {
     fn map_unbound_native_input(
         &self,
         input: &Event,
-        out: &mut ActionBatch<N>,
+        out: &mut ActionBatch<32>,
     ) -> Result<(), DispatchError> {
         let runtime = |command| DispatchOutput::Runtime(command);
         let app = |action| DispatchOutput::Application(action);
@@ -446,8 +435,8 @@ impl<const N: usize> RuntimeEventDispatcher<N> {
         config: &mut FloConfig,
         registry: &BindingRegistry,
         binding: &ResolvedBinding,
-        loops: &impl RuntimeLoopState,
-        out: &mut ActionBatch<N>,
+        loops: &[LoopMode; MAX_RUNTIME_LOOPS],
+        out: &mut ActionBatch<32>,
         depth: usize,
     ) -> Result<(), DispatchError> {
         let Some(typ) = binding.binding.output_event else {
@@ -593,7 +582,7 @@ impl<const N: usize> RuntimeEventDispatcher<N> {
                         gain,
                     }))?;
                 } else {
-                    let command = match loops.loop_mode(slot) {
+                    let command = match loops[slot as usize] {
                         LoopMode::Empty => RuntimeCommand::Record { slot },
                         LoopMode::Recording | LoopMode::Overdubbing => RuntimeCommand::StopRecord,
                         LoopMode::Playing => RuntimeCommand::Mute { slot, muted: true },
@@ -1092,7 +1081,7 @@ mod tests {
         // integration-test path where `sdlkey_compat` is not re-exported.
         let input = Event::KeyInput { down: true, keysym: 284, unicode: 0, presslen: 0 };
         let registry = config.binding_registry.clone();
-        let batch = RuntimeEventDispatcher::<32>::new()
+        let batch = RuntimeEventDispatcher::new()
             .dispatch(
                 &mut config,
                 &registry,
@@ -1114,7 +1103,7 @@ mod tests {
         let mut config = shipped_config();
         let input = Event::LoopClicked { down: true, button: 1, loopid: 3, in_layout: true, presslen: 0 };
         let registry = config.binding_registry.clone();
-        let batch = RuntimeEventDispatcher::<32>::new()
+        let batch = RuntimeEventDispatcher::new()
             .dispatch(
                 &mut config,
                 &registry,
@@ -1135,7 +1124,7 @@ mod tests {
             let mut config = shipped_config();
             let input = Event::LoopClicked { down: true, button, loopid: 3, in_layout: true, presslen: 0 };
             let registry = config.binding_registry.clone();
-            RuntimeEventDispatcher::<32>::new()
+            RuntimeEventDispatcher::new()
                 .dispatch(
                     &mut config,
                     &registry,
@@ -1173,7 +1162,7 @@ mod tests {
         // working keypress appear inert because the visible element is 113.
         let input = Event::KeyInput { down: true, keysym: b'q' as i32, unicode: 0, presslen: 0 };
         let registry = config.binding_registry.clone();
-        let batch = RuntimeEventDispatcher::<32>::new()
+        let batch = RuntimeEventDispatcher::new()
             .dispatch(
                 &mut config,
                 &registry,
@@ -1195,7 +1184,7 @@ mod tests {
         let mut config = shipped_config();
         let input = Event::KeyInput { down: true, keysym: 282, unicode: 0, presslen: 0 };
         let registry = config.binding_registry.clone();
-        let batch = RuntimeEventDispatcher::<32>::new()
+        let batch = RuntimeEventDispatcher::new()
             .dispatch(
                 &mut config,
                 &registry,
@@ -1217,7 +1206,7 @@ mod tests {
         let mut config = FloConfig::new();
         let registry = BindingRegistry::default();
         let modes = [LoopMode::Empty; MAX_RUNTIME_LOOPS];
-        let dispatcher = RuntimeEventDispatcher::<32>::new();
+        let dispatcher = RuntimeEventDispatcher::new();
         let type_batch = dispatcher
             .dispatch(
                 &mut config,
@@ -1252,7 +1241,7 @@ mod tests {
     fn midi_transpose_event_reaches_the_live_midi_action() {
         let mut config = FloConfig::new();
         let registry = BindingRegistry::default();
-        let batch = RuntimeEventDispatcher::<32>::new()
+        let batch = RuntimeEventDispatcher::new()
             .dispatch(
                 &mut config,
                 &registry,
@@ -1280,7 +1269,7 @@ mod tests {
                    </bindings></interface>"#,
             )
             .unwrap();
-        let batch = RuntimeEventDispatcher::<32>::new()
+        let batch = RuntimeEventDispatcher::new()
             .dispatch(
                 &mut config,
                 &registry,
@@ -1314,7 +1303,7 @@ mod tests {
         let mut config = shipped_config();
         let input = Event::MouseButtonInput { down: true, button: 1, x: 100, y: 100, presslen: 0 };
         let registry = config.binding_registry.clone();
-        let batch = RuntimeEventDispatcher::<32>::new()
+        let batch = RuntimeEventDispatcher::new()
             .dispatch(
                 &mut config,
                 &registry,

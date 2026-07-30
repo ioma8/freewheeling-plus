@@ -29,27 +29,7 @@ impl SceneLoad {
 }
 
 fn atoi(s: Option<&str>, default: i32) -> i32 {
-    let s = match s {
-        Some(s) => s.trim(),
-        None => return default,
-    };
-    let (sign, digits) = match s.strip_prefix('-') {
-        Some(v) => (-1, v),
-        None => (1, s),
-    };
-    let digits = digits
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect::<String>();
-    if digits.is_empty() {
-        default
-    } else {
-        sign * digits.parse::<i32>().unwrap_or(i32::MAX)
-    }
-}
-
-fn atof(s: Option<&str>, default: f32) -> f32 {
-    s.and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+    s.and_then(|s| s.trim().parse().ok()).unwrap_or(default)
 }
 
 pub fn parse_loop_metadata_xml(xml: &str) -> Result<LoopMetadata, String> {
@@ -90,7 +70,7 @@ pub fn parse_scene_xml(xml: &str, default_loop_id: i32) -> Result<SceneLoad, Str
                 result.loops.push(LoopMeta {
                     hash: hash.to_owned(),
                     loop_id: atoi(node.attribute("loopid"), default_loop_id),
-                    volume: atof(node.attribute("volume"), 1.0),
+                    volume: node.attribute("volume").and_then(|v| v.trim().parse().ok()).unwrap_or(1.0),
                 });
             }
             "snapshot" => {
@@ -100,8 +80,8 @@ pub fn parse_scene_xml(xml: &str, default_loop_id: i32) -> Result<SceneLoad, Str
                     .map(|n| SnapshotLoop {
                         loop_id: atoi(n.attribute("loopid"), 0),
                         status: atoi(n.attribute("status"), 0),
-                        loop_volume: atof(n.attribute("loopvol"), 0.0),
-                        trigger_volume: atof(n.attribute("triggervol"), 0.0),
+                        loop_volume: n.attribute("loopvol").and_then(|v| v.trim().parse().ok()).unwrap_or(0.0),
+                        trigger_volume: n.attribute("triggervol").and_then(|v| v.trim().parse().ok()).unwrap_or(0.0),
                     })
                     .collect();
                 result.snapshots.push(SnapshotMeta {

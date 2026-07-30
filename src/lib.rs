@@ -11,19 +11,15 @@ pub mod config;
 pub mod core;
 pub mod core_dsp;
 pub mod core_dsp_audio_buffers;
-pub mod core_dsp_root;
 pub mod core_persistence;
 pub mod core_persistence_parse;
 pub mod core_persistence_runtime;
 pub mod core_startup;
 pub mod datatypes;
-pub mod dsp_profile;
 pub mod event;
 pub mod file_codecs;
 pub mod fluidsynth;
-pub mod fweelin_app;
-pub mod library_helper;
-pub mod linux_native;
+
 #[cfg(all(
     feature = "jack",
     any(target_os = "linux", target_os = "macos", target_os = "windows")
@@ -51,7 +47,7 @@ pub mod osc;
 pub mod paramset;
 pub mod processor_queue;
 pub mod production_app;
-pub mod rcu;
+
 pub mod realtime_guard;
 pub mod realtime_queue;
 pub mod runtime_event_actions;
@@ -59,15 +55,11 @@ pub mod sdlio;
 pub mod sdlkey_compat;
 pub mod signal;
 pub mod stacktrace;
-pub mod startup_guard;
-pub mod startup_guard_platform;
 pub mod string_utils;
 pub mod surface_primitives;
 pub mod video_layout;
 pub mod microui;
-pub mod video_scaling;
 pub mod videoio;
-pub mod videoio_display_widgets;
 pub mod videoio_displays;
 pub mod videoio_platform;
 

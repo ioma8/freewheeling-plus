@@ -192,7 +192,7 @@ fn parse_patch_bank(cfg: &PatchBankConfig) -> Result<Vec<PatchBank>, String> {
     let mut channel: Option<u8> = None;
     for node in root.children().filter(|n| n.is_element()) {
         let item = if node.has_tag_name("patch") {
-            let ch = attr_u8(node, "channel", 0)?;
+            let ch = parse_attr::<u8>(node, "channel", 0)?;
             if cfg.separate_channels && channel != Some(ch) && !items.is_empty() {
                 groups.push(make_bank(cfg, std::mem::take(&mut items)));
             }
@@ -202,8 +202,8 @@ fn parse_patch_bank(cfg: &PatchBankConfig) -> Result<Vec<PatchBank>, String> {
                 name: node.attribute("name").unwrap_or("").to_owned(),
                 kind: PatchItemKind::Patch {
                     soundfont_id: None,
-                    bank: attr_u16(node, "bank", 0)?,
-                    program: attr_u8(node, "program", 0)?,
+                    bank: parse_attr::<u16>(node, "bank", 0)?,
+                    program: parse_attr::<u8>(node, "program", 0)?,
                     channel: ch,
                 },
             }
@@ -214,10 +214,10 @@ fn parse_patch_bank(cfg: &PatchBankConfig) -> Result<Vec<PatchBank>, String> {
                 zones.push(PatchZone {
                     key_low: lo,
                     key_high: hi,
-                    midi_port: attr_u32(z, "midiport", cfg.midi_port)?,
-                    channel: attr_u8(z, "channel", 0)?,
-                    bank: attr_opt_u16(z, "bank")?,
-                    program: attr_opt_u8(z, "program")?,
+                    midi_port: parse_attr::<u32>(z, "midiport", cfg.midi_port)?,
+                    channel: parse_attr::<u8>(z, "channel", 0)?,
+                    bank: parse_opt_attr::<u16>(z, "bank")?,
+                    program: parse_opt_attr::<u8>(z, "program")?,
                 });
             }
             PatchItem {
@@ -246,26 +246,13 @@ fn make_bank(cfg: &PatchBankConfig, items: Vec<PatchItem>) -> PatchBank {
         cursor: 0,
     }
 }
-fn attr_u8(n: roxmltree::Node<'_, '_>, k: &str, d: u8) -> Result<u8, String> {
+fn parse_attr<T: std::str::FromStr>(n: roxmltree::Node<'_, '_>, k: &str, d: T) -> Result<T, String> {
     n.attribute(k)
-        .map_or(Ok(d), |v| v.parse().map_err(|_| format!("invalid {k}")))
+        .map_or(Ok(d), |v| v.parse().map_err(|_| format!("invalid attribute '{k}': expected {}", std::any::type_name::<T>())))
 }
-fn attr_u16(n: roxmltree::Node<'_, '_>, k: &str, d: u16) -> Result<u16, String> {
+fn parse_opt_attr<T: std::str::FromStr>(n: roxmltree::Node<'_, '_>, k: &str) -> Result<Option<T>, String> {
     n.attribute(k)
-        .map_or(Ok(d), |v| v.parse().map_err(|_| format!("invalid {k}")))
-}
-fn attr_u32(n: roxmltree::Node<'_, '_>, k: &str, d: u32) -> Result<u32, String> {
-    n.attribute(k)
-        .map_or(Ok(d), |v| v.parse().map_err(|_| format!("invalid {k}")))
-}
-fn attr_opt_u8(n: roxmltree::Node<'_, '_>, k: &str) -> Result<Option<u8>, String> {
-    n.attribute(k)
-        .map(|v| v.parse().map_err(|_| format!("invalid {k}")))
-        .transpose()
-}
-fn attr_opt_u16(n: roxmltree::Node<'_, '_>, k: &str) -> Result<Option<u16>, String> {
-    n.attribute(k)
-        .map(|v| v.parse().map_err(|_| format!("invalid {k}")))
+        .map(|v| v.parse().map_err(|_| format!("invalid attribute '{k}': expected {}", std::any::type_name::<T>())))
         .transpose()
 }
 fn parse_range(s: &str) -> Result<(u8, u8), String> {

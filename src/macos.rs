@@ -1,72 +1,32 @@
 //! macOS application integration.
 //!
-//! The old Cocoa entry point mixed policy with Objective-C globals.  This
-//! module keeps the policy in [`Platform`] so it can be exercised without a
-//! window server, while the real Cocoa implementation is compiled only on
-//! macOS.
+//! The module keeps platform policy separate from the ObjC runtime globals.
+//! Application support path, bundle resources, and directory creation are
+//! exposed as free functions so they can be tested from any host.
 
 use std::path::{Path, PathBuf};
 
 pub const APPLICATION_NAME: &str = "Fweelin";
 pub const BUNDLE_IDENTIFIER: &str = "org.freewheeling.freewheeling-plus";
 
-/// Operations which the application performs at its platform boundary.
-pub trait Platform {
-    type Error;
-
-    fn application_support_dir(&self) -> Result<PathBuf, Self::Error>;
-    fn initialize(&mut self) -> Result<(), Self::Error>;
-    fn set_menu_and_foreground(&mut self) -> Result<(), Self::Error>;
-    fn cleanup(&mut self);
-}
-
-/// RAII owner for Cocoa/SDL application-thread setup. Construction performs
-/// foreground activation only after platform initialization succeeds.
-pub struct PlatformSession<P: Platform> {
-    platform: P,
-}
-
-impl<P: Platform> PlatformSession<P> {
-    pub fn start(mut platform: P) -> Result<Self, P::Error> {
-        platform.initialize()?;
-        if let Err(error) = platform.set_menu_and_foreground() {
-            platform.cleanup();
-            return Err(error);
-        }
-        Ok(Self { platform })
-    }
-
-    pub fn platform(&self) -> &P {
-        &self.platform
-    }
-
-    pub fn platform_mut(&mut self) -> &mut P {
-        &mut self.platform
-    }
-}
-
-impl<P: Platform> Drop for PlatformSession<P> {
-    fn drop(&mut self) {
-        self.platform.cleanup();
-    }
-}
-
 /// Resolve the traditional per-user macOS support directory.
 pub fn application_support_path(home: &Path) -> PathBuf {
-    home.join("Library")
-        .join("Application Support")
-        .join(APPLICATION_NAME)
+    home.join("Library/Application Support").join(APPLICATION_NAME)
 }
 
 /// Return `Contents/Resources` when `executable` is inside an application
 /// bundle.  No current-directory assumptions are involved, which is important
 /// for Finder launches (Finder does not promise a useful working directory).
 pub fn bundle_resources_path(executable: &Path) -> Option<PathBuf> {
-    let macos = executable.parent()?;
-    if macos.file_name()? != "MacOS" {
-        return None;
+    let parent = executable.parent()?;
+    let parent_name = parent.file_name()?;
+    if parent_name == "MacOS" {
+        let bundle = parent.parent()?.parent()?;
+        if bundle.extension().is_some_and(|ext| ext == "app") {
+            return Some(bundle.join("Contents/Resources"));
+        }
     }
-    Some(macos.parent()?.join("Resources"))
+    None
 }
 
 /// Create the writable per-user directory before any persistence subsystem is
@@ -97,24 +57,15 @@ mod cocoa {
                 initialized: false,
             }
         }
-    }
 
-    impl Default for CocoaPlatform {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    impl Platform for CocoaPlatform {
-        type Error = String;
-
-        fn application_support_dir(&self) -> Result<PathBuf, Self::Error> {
-            let home = std::env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?;
+        pub fn application_support_dir(&self) -> Result<PathBuf, String> {
+            let home =
+                std::env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?;
             create_application_support_path(Path::new(&home))
                 .map_err(|error| format!("could not create application support directory: {error}"))
         }
 
-        fn initialize(&mut self) -> Result<(), Self::Error> {
+        pub fn initialize(&mut self) -> Result<(), String> {
             // SAFETY: NSAutoreleasePool::new is unsafe because the pool
             // interacts with the ObjC runtime's autorelease mechanism, but
             // this is the standard, safe-on-main-thread creation pattern.
@@ -123,7 +74,7 @@ mod cocoa {
             Ok(())
         }
 
-        fn set_menu_and_foreground(&mut self) -> Result<(), Self::Error> {
+        pub fn set_menu_and_foreground(&mut self) -> Result<(), String> {
             let marker = MainThreadMarker::new()
                 .ok_or_else(|| "CocoaPlatform must be used on the main thread".to_string())?;
             let app = NSApplication::sharedApplication(marker);
@@ -133,9 +84,15 @@ mod cocoa {
             Ok(())
         }
 
-        fn cleanup(&mut self) {
+        pub fn cleanup(&mut self) {
             drop(self.pool.take());
             self.initialized = false;
+        }
+    }
+
+    impl Default for CocoaPlatform {
+        fn default() -> Self {
+            Self::new()
         }
     }
 }

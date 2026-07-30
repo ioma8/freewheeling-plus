@@ -6,13 +6,16 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::num::{NonZeroU8, NonZeroU32};
 use std::path::Path;
 
-const FLAC_BLOCK_SIZE: usize = 4096;
-pub const MAX_STREAMING_FRAMES: usize = 16_384;
-
+/// Required because Rust doesn't allow `Box<dyn Read + Seek>` — non-auto traits
+/// can't be combined in a single trait object. This wrapper makes it possible.
 trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek> ReadSeek for T {}
+/// Same workaround for `Write + Seek`.
 trait WriteSeek: Write + Seek {}
 impl<T: Write + Seek> WriteSeek for T {}
+
+const FLAC_BLOCK_SIZE: usize = 4096;
+pub const MAX_STREAMING_FRAMES: usize = 16_384;
 
 pub trait IFileEncoder {
     fn setup_file_for_writing<W: Write + Seek + 'static>(&mut self, out: W) -> io::Result<()>;

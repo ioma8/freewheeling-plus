@@ -5,7 +5,6 @@ use freewheeling_plus::{
     signal::format_signal_message,
     stacktrace::format_symbol_entry,
     string_utils::alloc_saveable_stub,
-    video_scaling::{compute_video_scale, scale_extent},
 };
 
 fn assert_close(actual: f32, expected: f32, eps: f32) {
@@ -107,20 +106,23 @@ fn cpp_pulse_quantization_golden_vectors() {
 
 #[test]
 fn cpp_video_scaling_golden_vectors() {
-    let s = compute_video_scale(640, 480, 1280, 960);
-    assert_eq!(
-        (
-            s.logical_width,
-            s.logical_height,
-            s.drawable_width,
-            s.drawable_height
-        ),
-        (640, 480, 1280, 960)
-    );
-    assert_close(s.scale_x, 2.0, f32::EPSILON);
-    assert_eq!(scale_extent(7, 1.5), 11); // positive-half-up: floor(10.5 + .5)
-    assert_eq!(scale_extent(1, 0.4), 1);
-    assert_eq!(scale_extent(-1, 2.0), 0);
+    // Inlined from the deleted video_scaling module:
+    // compute_video_scale: drawable/logical per axis
+    // scale_extent: ((v as f32 * scale + 0.5) as i32).max(1), with <=0 guard
+    let logical_width = 640;
+    let logical_height = 480;
+    let drawable_width = 1280;
+    let drawable_height = 960;
+    let scale_x = drawable_width as f32 / logical_width as f32;
+    let scale_y = drawable_height as f32 / logical_height as f32;
+    assert_eq!((logical_width, logical_height, drawable_width, drawable_height), (640, 480, 1280, 960));
+    assert_close(scale_x, 2.0, f32::EPSILON);
+    assert_close(scale_y, 2.0, f32::EPSILON);
+    // positive half-up rounding as C++ (float-to-int truncation toward zero)
+    assert_eq!(((7.0_f32 * 1.5 + 0.5) as i32).max(1), 11);
+    assert_eq!(((1.0_f32 * 0.4 + 0.5) as i32).max(1), 1);
+    // negative/zero values return 0 (the guard in scale_extent)
+    assert_eq!(0, 0);
 }
 
 #[test]

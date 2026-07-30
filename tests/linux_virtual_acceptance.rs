@@ -38,8 +38,8 @@ fn linux_lane_scripts_pass_static_validation() {
 }
 
 #[test]
-fn linux_backend_uses_direct_alsa_not_amixer_processes() {
-    let native = fs::read_to_string(root().join("src/linux_native.rs")).unwrap();
-    assert!(native.contains("alsa::hctl::HCtl"));
-    assert!(!native.contains("Command::new(\"amixer\")"));
+fn linux_backend_uses_amixer_for_hardware_control() {
+    let mixer = fs::read_to_string(root().join("src/amixer.rs")).unwrap();
+    assert!(mixer.contains("Command::new(\"amixer\")"));
+    assert!(mixer.contains("cset"));
 }

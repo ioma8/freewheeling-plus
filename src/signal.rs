@@ -24,10 +24,6 @@ fn fatal_name(sig: c_int) -> &'static [u8] {
         _ => b"SIGNAL",
     }
 }
-#[cfg(not(unix))]
-fn fatal_name(_: c_int) -> &'static [u8] {
-    b"SIGNAL"
-}
 
 #[cfg(unix)]
 fn fatal_text(sig: c_int) -> &'static [u8] {
@@ -39,10 +35,6 @@ fn fatal_text(sig: c_int) -> &'static [u8] {
         _ => b"Fatal signal received",
     }
 }
-#[cfg(not(unix))]
-fn fatal_text(_: c_int) -> &'static [u8] {
-    b"Fatal signal received"
-}
 
 #[cfg(unix)]
 fn info_text(sig: c_int) -> &'static [u8] {
@@ -51,10 +43,6 @@ fn info_text(sig: c_int) -> &'static [u8] {
         libc::SIGUSR2 => b">>> User defined signal 2 (SIGUSR2) received <<<\n",
         _ => b">>> Signal received <<<\n",
     }
-}
-#[cfg(not(unix))]
-fn info_text(_: c_int) -> &'static [u8] {
-    b">>> Signal received <<<\n"
 }
 
 /// Writes as much as fits, always NUL-terminating when `buf` is non-empty.
@@ -209,23 +197,17 @@ pub fn register_fatal_signal_handlers() {
         &[libc::SIGSEGV, libc::SIGBUS, libc::SIGILL, libc::SIGFPE],
     );
 }
-#[cfg(not(unix))]
-pub fn register_fatal_signal_handlers() {}
 
 #[cfg(unix)]
 pub fn register_info_signal_handlers() {
     register(info_trampoline, &[libc::SIGUSR1, libc::SIGUSR2]);
 }
-#[cfg(not(unix))]
-pub fn register_info_signal_handlers() {}
 
 #[cfg(unix)]
 pub fn register_shutdown_signal_handlers() {
     register(shutdown_trampoline, &[libc::SIGINT, libc::SIGTERM]);
 }
 
-#[cfg(not(unix))]
-pub fn register_shutdown_signal_handlers() {}
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -234,20 +216,39 @@ mod tests {
 
     static HOOK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    #[derive(Default)]
+    /// Fixed-size buffer so capture_write remains async-signal-safe even
+    /// when called from a real signal handler during testing.
+    const TEST_CAPTURE_SIZE: usize = 4096;
+
     struct Hooks {
-        bytes: Vec<u8>,
+        bytes: [u8; TEST_CAPTURE_SIZE],
+        pos: usize,
         exit_code: c_int,
+    }
+
+    impl Hooks {
+        fn new() -> Self {
+            Self {
+                bytes: [0; TEST_CAPTURE_SIZE],
+                pos: 0,
+                exit_code: 0,
+            }
+        }
     }
 
     fn capture_write(message: *const u8, len: usize, ctx: *mut c_void) {
         // SAFETY: test context pointer is set up by the test itself and
         // guaranteed valid for the duration of the handler invocation.
         let hooks = unsafe { &mut *ctx.cast::<Hooks>() };
+        if hooks.pos >= TEST_CAPTURE_SIZE {
+            return;
+        }
         // SAFETY: message pointer and length come from the test and are valid.
-        hooks
-            .bytes
-            .extend_from_slice(unsafe { std::slice::from_raw_parts(message, len) });
+        let n = (TEST_CAPTURE_SIZE - hooks.pos).min(len);
+        hooks.bytes[hooks.pos..hooks.pos + n].copy_from_slice(
+            unsafe { std::slice::from_raw_parts(message, n) },
+        );
+        hooks.pos += n;
     }
     fn capture_exit(code: c_int, ctx: *mut c_void) {
         // SAFETY: context pointer is test-owned.
@@ -277,7 +278,7 @@ mod tests {
     #[test]
     fn c_fatal_handler_hook_contract() {
         let _lock = HOOK_TEST_LOCK.lock().unwrap();
-        let mut hooks = Hooks::default();
+        let mut hooks = Hooks::new();
         set_signal_test_hooks(
             Some(capture_write),
             Some(capture_exit),
@@ -286,8 +287,9 @@ mod tests {
         fatal_signal_handler(libc::SIGSEGV);
         clear_signal_test_hooks();
 
-        assert!(String::from_utf8_lossy(&hooks.bytes).contains("SIGSEGV"));
-        assert!(String::from_utf8_lossy(&hooks.bytes).contains("deferred to a safe context"));
+        let captured = &hooks.bytes[..hooks.pos];
+        assert!(String::from_utf8_lossy(captured).contains("SIGSEGV"));
+        assert!(String::from_utf8_lossy(captured).contains("deferred to a safe context"));
         assert_eq!(hooks.exit_code, 128 + libc::SIGSEGV);
     }
 }

@@ -157,10 +157,10 @@ fn production_app_runs_every_real_phase_handles_quit_and_rolls_back_in_reverse()
             "session:start",
             "interfaces:start",
             "close:video",
-            "close:input",
+            "close:sdl",
             "close:midi",
             "close:audio",
-            "close:graph"
+            "close:shutdown"
         ]
     );
 }
@@ -467,29 +467,30 @@ fn fake_native_stream_round_trip_device_restart_snapshot_and_clean_shutdown() {
     );
     let native = FakeNative::new(state.clone(), [], root.join("stream.bin"));
     let mut app = ProductionApp::new(FakeConfig::default(), startup, native, 0, 0);
-    app.app_mut().setup().unwrap();
-    app.app_mut().components_mut().start_session().unwrap();
-    app.app_mut().components_mut().start_interfaces().unwrap();
-    app.app_mut().toggle_disk_output().unwrap();
-    assert_eq!(app.app().stream_stats().0, StreamState::Writing);
+    app.core_mut().setup().unwrap();
+    app.core_mut().services_mut().components_mut().start_session().unwrap();
+    app.core_mut().services_mut().components_mut().start_interfaces().unwrap();
+    app.core_mut().toggle_disk_output().unwrap();
+    assert_eq!(app.core().stream_stats().0, StreamState::Writing);
     assert_eq!(
-        app.app().components().adapter().reload_stream(),
+        app.core().services().components().adapter().reload_stream(),
         b"FWEELIN-FAKE-STREAM:0\n"
     );
-    app.app_mut().toggle_disk_output().unwrap();
-    app.app_mut().create_snapshot(3, "live scene");
+    app.core_mut().toggle_disk_output().unwrap();
+    app.core_mut().create_snapshot(3, "live scene");
     state.borrow_mut().loops[0].status = LoopStatus::Off;
-    app.app_mut().trigger_snapshot(3).unwrap();
+    app.core_mut().trigger_snapshot(3).unwrap();
     assert_eq!(
         state.borrow().restored.as_ref().unwrap().loops[0].status,
         LoopStatus::Playing
     );
-    app.app_mut()
+    app.core_mut()
+        .services_mut()
         .components_mut()
         .adapter_mut()
         .lose_device_and_restart();
     assert!(!state.borrow().device_lost);
-    app.app_mut().shutdown();
+    app.core_mut().shutdown();
     let log = &state.borrow().log;
     let recovery = [
         "device:lost",
@@ -501,9 +502,9 @@ fn fake_native_stream_round_trip_device_restart_snapshot_and_clean_shutdown() {
     assert!(log.windows(recovery.len()).any(|window| window == recovery));
     assert!(log.ends_with(&[
         "close:video".into(),
-        "close:input".into(),
+        "close:sdl".into(),
         "close:midi".into(),
         "close:audio".into(),
-        "close:graph".into()
+        "close:shutdown".into()
     ]));
 }

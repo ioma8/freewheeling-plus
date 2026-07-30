@@ -5,6 +5,7 @@
 //! rollback and final shutdown are safe to repeat.
 
 use super::{NativeComponentAdapter, ProductionApp};
+#[cfg_attr(target_os = "macos", allow(unused_imports))]
 use crate::amixer::{AlsaMixerBackend, HardwareMixerInterface};
 use crate::audio_native_cpal::{CpalAudioOptions, DeviceSelection};
 use crate::audio_native_cpal::CpalAudioBackend;
@@ -54,12 +55,12 @@ use crate::native_startup::{
     NativePaths, NativeStartupAdapter, NativeStartupServices, StartupPhase,
 };
 use crate::osc::{OscClient, PlayingLoop, PlayingLoops, UdpBackend};
-use crate::rcu::RcuRegistry;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::runtime_event_actions::{
     ApplicationAction, CodecSelection, DispatchOutput, RuntimeEventDispatcher,
 };
 use crate::sdlio::{InputEvent, Sdl2InputBackend, SdlIo};
-use crate::videoio::{VideoBackend, VideoFrame, VideoMode, VideoRenderer};
+use crate::videoio::{VideoBackend, VideoFrame, VideoMode};
 use crate::videoio_platform::native_ui_scene::{
     BrowserSceneState, LoopScopeState, SharedUiSceneState, UiSceneState, load_production_scene,
     production_software_renderer,
@@ -374,14 +375,14 @@ impl MainThreadVideo {
             renderer,
             frame: VideoFrame {
                 pixels: vec![0; size.0 as usize * size.1 as usize * 4],
-                width: drawable_size.0,
-                height: drawable_size.1,
+                width: drawable_size.0 as u32,
+                height: drawable_size.1 as u32,
                 stride: drawable_size.0 as usize * 4,
                 timestamp: 0.0,
             },
             logical_size: size,
             windowed_size: size,
-            input_window_size: (metrics.logical_width.max(1), metrics.logical_height.max(1)),
+            input_window_size: (metrics.logical_width.max(1) as u32, metrics.logical_height.max(1) as u32),
             interval: production.frame_delay,
             next_frame: Instant::now(),
             active: true,
@@ -392,7 +393,7 @@ impl MainThreadVideo {
 
     fn update(&mut self, now: Instant, mut state: UiSceneState) -> Result<(), String> {
         if self.active && now >= self.next_frame {
-            let mut existing = self.scene_state.write().expect("UI state poisoned");
+            let mut existing = self.scene_state.write().unwrap_or_else(std::sync::PoisonError::into_inner);
             state.layouts = std::mem::take(&mut existing.layouts);
             state.displays = std::mem::take(&mut existing.displays);
             state.snapshot_pages = std::mem::take(&mut existing.snapshot_pages);
@@ -439,7 +440,7 @@ impl MainThreadVideo {
     /// Find the visible XML layout element at an already-normalized logical
     /// coordinate.
     fn loop_at(&self, x: i32, y: i32) -> Option<i32> {
-        let state = self.scene_state.read().expect("UI state poisoned");
+        let state = self.scene_state.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         self.renderer
             .scene
             .layouts
@@ -499,8 +500,8 @@ struct RuntimeResources {
     audio: Option<AudioIO<AnyAudioBackend>>,
     midi: Option<MidiIo<MidirMidiBackend>>,
     controls: Option<RuntimeControls>,
-    osc: Option<OscClient<UdpBackend>>,
-    mixer: Option<HardwareMixerInterface<AlsaMixerBackend>>,
+    osc: Option<OscClient>,
+    mixer: Option<HardwareMixerInterface>,
     browser_entries: Vec<std::path::PathBuf>,
     browser_cursors: HashMap<i32, usize>,
     browser_expanded: HashMap<i32, Instant>,
@@ -543,7 +544,7 @@ struct RuntimeResources {
     stream_recordings_dir: std::path::PathBuf,
     streamer: Option<AudioStreamer>,
     memory_manager: Option<MemoryManager>,
-    rcu_registry: Option<RcuRegistry>,
+    rcu_registry: AtomicUsize,
     audio_recovery: AudioRecoveryController,
     pulse_selected: bool,
     sync_type: bool,
@@ -968,7 +969,7 @@ impl NativeRuntime {
                 patch_browser: None,
                 active_midi_routes: Vec::new(),
                 held_midi_routes: HashMap::new(),
-                rename: NativeRename::new(),
+                rename: NativeRename::default(),
                 loop_files: HashMap::new(),
                 loop_names: HashMap::new(),
                 loop_hashes: HashMap::new(),
@@ -988,7 +989,7 @@ impl NativeRuntime {
                 stream_recordings_dir,
                 streamer: None,
                 memory_manager: None,
-                rcu_registry: None,
+                rcu_registry: AtomicUsize::new(0),
                 audio_recovery: AudioRecoveryController::default(),
                 pulse_selected: false,
                 sync_type: false,
@@ -1065,7 +1066,7 @@ impl NativeRuntime {
         Self::sync_live_system_variables(&mut r);
         let registry = r.config.borrow().binding_registry.clone();
         let modes = r.cached_modes;
-        let batch = RuntimeEventDispatcher::<32>::new()
+        let batch = RuntimeEventDispatcher::new()
             .dispatch(&mut r.config.borrow_mut(), &registry, event, &modes)
             .map_err(|error| format!("dispatch {:?}: {error:?}", event.get_type()))?;
         if r.debug_info || std::env::var_os("FWEELIN_DIAGNOSTICS").is_some() {
@@ -1223,7 +1224,7 @@ impl NativeRuntime {
                 loop_ids,
             } => {
                 let video = r.video.as_mut().ok_or("video is closed")?;
-                let mut state = video.scene_state.write().expect("UI state poisoned");
+                let mut state = video.scene_state.write().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let layout = state
                     .layouts
                     .get_mut(&(interface_id, layout_id))
@@ -1239,7 +1240,7 @@ impl NativeRuntime {
                 hide_others,
             } => {
                 let video = r.video.as_mut().ok_or("video is closed")?;
-                let mut state = video.scene_state.write().expect("UI state poisoned");
+                let mut state = video.scene_state.write().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let layout = state
                     .layouts
                     .get_mut(&(interface_id, layout_id))
@@ -1258,7 +1259,7 @@ impl NativeRuntime {
             ApplicationAction::VideoSwitchInterface(interface_id) => {
                 r.current_interface = interface_id;
                 let video = r.video.as_mut().ok_or("video is closed")?;
-                let mut state = video.scene_state.write().expect("UI state poisoned");
+                let mut state = video.scene_state.write().unwrap_or_else(std::sync::PoisonError::into_inner);
                 for ((layout_interface, _), layout) in &mut state.layouts {
                     if *layout_interface != 0 && *layout_interface < 1000 {
                         layout.show = *layout_interface == interface_id;
@@ -1290,7 +1291,7 @@ impl NativeRuntime {
                         base.set_show(show);
                     }
                 }
-                let mut state = video.scene_state.write().expect("UI state poisoned");
+                let mut state = video.scene_state.write().unwrap_or_else(std::sync::PoisonError::into_inner);
                 state.displays.insert((interface_id, display_id), show);
             }
             ApplicationAction::VideoShowSnapshotPage {
@@ -1299,7 +1300,7 @@ impl NativeRuntime {
                 page,
             } => {
                 let video = r.video.as_mut().ok_or("video is closed")?;
-                let mut state = video.scene_state.write().expect("UI state poisoned");
+                let mut state = video.scene_state.write().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let key = (interface_id, display_id);
                 let count = state
                     .snapshot_display_counts
@@ -1313,7 +1314,7 @@ impl NativeRuntime {
             }
             ApplicationAction::VideoShowHelp(page) => {
                 let video = r.video.as_mut().ok_or("video is closed")?;
-                let mut state = video.scene_state.write().expect("UI state poisoned");
+                let mut state = video.scene_state.write().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if page >= 0 && (page as usize) <= video.help_page_count {
                     state.help_page = page as usize;
                 }
@@ -1321,10 +1322,7 @@ impl NativeRuntime {
             ApplicationAction::ShowDebugInfo(show) => {
                 r.debug_info = show;
                 if let Some(video) = r.video.as_mut() {
-                    video
-                        .scene_state
-                        .write()
-                        .expect("UI state poisoned")
+                    video.scene_state.write().unwrap_or_else(std::sync::PoisonError::into_inner)
                         .debug_info = show;
                 }
                 r.config
@@ -1601,9 +1599,9 @@ impl NativeRuntime {
                     windowed_size: video.windowed_size,
                 })?;
                 video.input_window_size =
-                    (metrics.logical_width.max(1), metrics.logical_height.max(1));
-                let drawable_width = metrics.drawable_width.max(1);
-                let drawable_height = metrics.drawable_height.max(1);
+                    (metrics.logical_width.max(1) as u32, metrics.logical_height.max(1) as u32);
+                let drawable_width = metrics.drawable_width.max(1) as u32;
+                let drawable_height = metrics.drawable_height.max(1) as u32;
                 video.renderer.metrics = crate::videoio_displays::RenderMetrics::new(
                     video.logical_size.0 as i32,
                     video.logical_size.1 as i32,
@@ -2974,7 +2972,7 @@ impl NativeRuntime {
             }
             StartupPhase::EventManager => r.events = None,
             StartupPhase::MemoryManager => r.memory_manager = None,
-            StartupPhase::RtThreads => r.rcu_registry = None,
+            StartupPhase::RtThreads => r.rcu_registry = AtomicUsize::new(0),
             StartupPhase::LockMemory => {
                 #[cfg(all(unix, not(target_os = "macos")))]
                 unsafe {
@@ -3003,13 +3001,10 @@ impl NativeStartupAdapter for NativeRuntime {
                     ));
                 }
             }
-            StartupPhase::RtThreads => r.rcu_registry = Some(RcuRegistry::new()),
+            StartupPhase::RtThreads => r.rcu_registry = AtomicUsize::new(0),
             StartupPhase::MainThread => {
                 r.rcu_registry
-                    .as_ref()
-                    .ok_or("RCU registry missing")?
-                    .register_current()
-                    .map_err(str::to_owned)?;
+                    .fetch_add(1, Ordering::Relaxed);
             }
             StartupPhase::PlatformThreads => {
                 std::thread::available_parallelism()
@@ -3775,7 +3770,7 @@ impl NativeComponentAdapter for NativeRuntime {
     fn close_video(&mut self) {
         self.rollback_resource(StartupPhase::Video);
     }
-    fn close_input(&mut self) {
+    fn close_sdl(&mut self) {
         self.rollback_resource(StartupPhase::InputAndMidi);
     }
     fn close_midi(&mut self) {
@@ -3784,7 +3779,7 @@ impl NativeComponentAdapter for NativeRuntime {
     fn close_audio(&mut self) {
         self.rollback_resource(StartupPhase::Audio);
     }
-    fn release_graph(&mut self) {
+    fn shutdown(&mut self) {
         for phase in [
             StartupPhase::OscAndMixer,
             StartupPhase::SynthAndBuffers,
@@ -3896,12 +3891,6 @@ fn test_beep() -> Result<(), String> {
             .arg(&path)
             .spawn();
     }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/c", "start", &path.to_string_lossy()])
-            .spawn();
-    }
     Ok(())
 }
 
@@ -3909,11 +3898,7 @@ fn home_directory(
     home: Option<std::ffi::OsString>,
     user_profile: Option<std::ffi::OsString>,
 ) -> Option<std::path::PathBuf> {
-    #[cfg(target_os = "windows")]
-    let path = user_profile.or(home);
-    #[cfg(not(target_os = "windows"))]
     let _ = user_profile;
-    #[cfg(not(target_os = "windows"))]
     let path = home;
     path.map(std::path::PathBuf::from)
 }
@@ -3925,17 +3910,8 @@ mod tests {
 
     #[test]
     fn home_directory_uses_the_platform_profile_variable() {
-        #[cfg(target_os = "windows")]
-        {
-            let home = std::ffi::OsString::from("home");
-            let user_profile = std::ffi::OsString::from("profile");
-            assert_eq!(home_directory(Some(home), Some(user_profile)), Some("profile".into()));
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
         let home = std::ffi::OsString::from("home");
-            assert_eq!(home_directory(Some(home), None), Some("home".into()));
-        }
+        assert_eq!(home_directory(Some(home), None), Some("home".into()));
     }
 
     #[test]

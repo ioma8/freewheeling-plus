@@ -4,9 +4,9 @@
 
 use crate::datatypes::{CoreDataType, Range, UserVariable};
 use std::collections::{HashMap, VecDeque};
-use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 use std::thread::{self, JoinHandle};
 
 // ============================================================
@@ -14,6 +14,18 @@ use std::thread::{self, JoinHandle};
 // ============================================================
 
 pub const FWEELIN_OUTNAME_LEN: usize = 1024;
+/// Join a thread with a 3-second timeout.  Detaches instead of hanging.
+pub fn join_with_timeout(t: JoinHandle<()>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !t.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if t.is_finished() {
+        let _ = t.join();
+    }
+    // else: thread hung — detach rather than blocking shutdown forever
+}
+
 pub const MAX_MIDI_CHANNELS: usize = 16;
 pub const MAX_MIDI_CONTROLLERS: usize = 127;
 pub const MAX_MIDI_NOTES: usize = 127;
@@ -25,70 +37,6 @@ pub struct EventParameter {
     pub name: &'static str,
     pub dtype: CoreDataType,
     pub max_index: i32,
-}
-
-/// Entry in the event type table.
-///
-/// The C++ implementation stores non-owning pointers to the allocator and
-/// prototype.  The Rust port has no corresponding allocator/prototype
-/// objects, so these are retained as opaque pointers while preserving the
-/// original nullable, non-owning representation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EventTypeTable {
-    pub name: Option<&'static str>,
-    pub pretype: *mut c_void,
-    pub proto: *mut c_void,
-    pub paramidx: i32,
-    pub slowdelivery: i8,
-}
-
-impl EventTypeTable {
-    pub const fn new(
-        name: Option<&'static str>,
-        pretype: *mut c_void,
-        proto: *mut c_void,
-        paramidx: i32,
-        slowdelivery: i8,
-    ) -> Self {
-        Self {
-            name,
-            pretype,
-            proto,
-            paramidx,
-            slowdelivery,
-        }
-    }
-
-    pub const fn with_name(name: &'static str) -> Self {
-        Self::new(
-            Some(name),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            -1,
-            0,
-        )
-    }
-}
-
-impl Default for EventTypeTable {
-    fn default() -> Self {
-        Self::new(None, std::ptr::null_mut(), std::ptr::null_mut(), -1, 0)
-    }
-}
-
-#[cfg(test)]
-mod event_type_table_tests {
-    use super::EventTypeTable;
-
-    #[test]
-    fn defaults_match_cpp_constructor() {
-        let table = EventTypeTable::default();
-        assert_eq!(table.name, None);
-        assert!(table.pretype.is_null());
-        assert!(table.proto.is_null());
-        assert_eq!(table.paramidx, -1);
-        assert_eq!(table.slowdelivery, 0);
-    }
 }
 
 impl EventParameter {
@@ -573,14 +521,8 @@ pub enum EventType {
     Last,
 }
 
-#[derive(Clone)]
-struct EventTypeMeta {
-    name: &'static str,
-    slow_delivery: bool,
-}
-
 impl EventType {
-    fn meta(self) -> EventTypeMeta {
+    fn meta(self) -> (&'static str, bool) {
         use EventType::*;
         let (name, slow) = match self {
             InputKey => ("key", false),
@@ -690,17 +632,14 @@ impl EventType {
             SetDefaultLoopPlacement => ("set-default-loop-placement", false),
             _ => ("", false),
         };
-        EventTypeMeta {
-            name,
-            slow_delivery: slow,
-        }
+        (name, slow)
     }
 
     pub fn name(self) -> &'static str {
-        self.meta().name
+        self.meta().0
     }
     pub fn is_slow(self) -> bool {
-        self.meta().slow_delivery
+        self.meta().1
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
@@ -1449,7 +1388,6 @@ impl Event {
 
 struct ListenerEntry {
     listener: Mutex<Box<dyn EventListener>>,
-    _from: Option<String>,
 }
 
 pub struct EventManager {
@@ -1531,7 +1469,6 @@ impl EventManager {
             .or_default()
             .push(ListenerEntry {
                 listener: Mutex::new(listener),
-                _from: None,
             });
     }
 
@@ -1560,16 +1497,25 @@ impl EventManager {
         self.dropped.load(Ordering::Relaxed)
     }
 
+    /// Drain the queue while holding only the queue lock, then dispatch
+    /// without any locks held.  This avoids a lock-ordering deadlock when a
+    /// listener callback calls try_post_event (which also locks the queue).
     pub fn process_pending(&self) {
-        let lists = self.listeners.lock().unwrap();
-        let mut q = self.queue.lock().unwrap();
-        while let Some(ev) = q.pop_front() {
+        let batch: Vec<Event> = {
+            let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+            q.drain(..).collect()
+        };
+        if batch.is_empty() {
+            return;
+        }
+        let lists = self.listeners.lock().unwrap_or_else(|e| e.into_inner());
+        for ev in &batch {
             let typ = ev.get_type();
             if let Some(entries) = lists.get(&typ) {
                 for entry in entries {
                     if let Ok(mut listener) = entry.listener.lock() {
                         let stub: () = ();
-                        listener.receive_event(&ev, &stub);
+                        listener.receive_event(ev, &stub);
                     }
                 }
             }
@@ -1587,10 +1533,10 @@ impl Drop for EventManager {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Release);
         let (m, cv) = &*self.lock;
-        drop(m.lock().unwrap());
+        drop(m.lock().unwrap_or_else(|e| e.into_inner()));
         cv.notify_one();
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            join_with_timeout(worker);
         }
     }
 }

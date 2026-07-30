@@ -125,33 +125,6 @@ pub struct ProductionUiRenderer {
     pub frame_delay: Duration,
 }
 
-/// Deadline scheduler with no cumulative drift. Slow frames skip missed
-/// deadlines instead of trying to render a burst of stale frames.
-#[derive(Clone, Debug)]
-pub struct FrameScheduler {
-    interval: Duration,
-    next: Instant,
-}
-
-impl FrameScheduler {
-    pub fn new(interval: Duration, now: Instant) -> Self {
-        let interval = interval.max(Duration::from_millis(1));
-        Self {
-            interval,
-            next: now,
-        }
-    }
-    pub fn deadline(&self) -> Instant {
-        self.next
-    }
-    pub fn advance(&mut self, now: Instant) -> Instant {
-        while self.next <= now {
-            self.next += self.interval;
-        }
-        self.next
-    }
-}
-
 #[derive(Clone, Debug)]
 enum WidgetKind {
     Text,
@@ -327,7 +300,7 @@ impl Display for PulseOverlay {
     }
 
     fn render(&mut self, renderer: &mut dyn Renderer, metrics: &RenderMetrics) {
-        let state = self.state.read().expect("UI state poisoned");
+        let state = self.state.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.values.get("pulse-active").copied().unwrap_or(0.0) == 0.0 {
             return;
         }
@@ -405,7 +378,7 @@ impl Display for StaticStatusOverlay {
         &mut self.base
     }
     fn render(&mut self, renderer: &mut dyn Renderer, metrics: &RenderMetrics) {
-        let state = self.state.read().expect("UI state poisoned");
+        let state = self.state.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         let streaming = state.values.get("streaming").copied().unwrap_or(0.0) != 0.0;
         let stream_bytes = state.values.get("stream-bytes").copied().unwrap_or(0.0);
         let status = if streaming {
@@ -500,7 +473,7 @@ impl Display for HelpOverlay {
         &mut self.base
     }
     fn render(&mut self, renderer: &mut dyn Renderer, metrics: &RenderMetrics) {
-        let page = self.state.read().expect("UI state poisoned").help_page;
+        let page = self.state.read().unwrap_or_else(std::sync::PoisonError::into_inner).help_page;
         if page == 0 || self.lines.is_empty() {
             return;
         }
@@ -535,7 +508,7 @@ impl Display for LayoutContent {
         &mut self.base
     }
     fn render(&mut self, renderer: &mut dyn Renderer, metrics: &RenderMetrics) {
-        let state = self.state.read().expect("UI state poisoned");
+        let state = self.state.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         let layout_state = state.layouts.get(&(self.layout.iid, self.layout.id));
         if !layout_state.map_or(self.layout.show, |layout| layout.show) {
             return;
@@ -768,7 +741,7 @@ impl XmlDisplay {
     fn render_at(&mut self, r: &mut dyn Renderer, m: &RenderMetrics, offset: (i32, i32)) {
         let x = m.x(offset.0 + self.base.xpos);
         let y = m.y(offset.1 + self.base.ypos);
-        let guard = self.state.read().expect("UI state poisoned");
+        let guard = self.state.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         let show = guard
             .displays
             .get(&(self.base.iid, self.base.id))
@@ -1437,7 +1410,7 @@ pub fn load_production_scene_at(
             for node in graphics_node.children().filter(|n| n.is_element()) {
                 if node.has_tag_name("layout") {
                     let layout = parse_layout(node, *iid, logical_size)?;
-                    state.write().expect("UI state poisoned").layouts.insert(
+                    state.write().unwrap_or_else(std::sync::PoisonError::into_inner).layouts.insert(
                         (*iid, layout.id),
                         LayoutSceneState {
                             show: layout.show,
@@ -1467,7 +1440,7 @@ pub fn load_production_scene_at(
             }
         }
     }
-    seed_browser_data(data_dir, &mut state.write().expect("UI state poisoned"))?;
+    seed_browser_data(data_dir, &mut state.write().unwrap_or_else(std::sync::PoisonError::into_inner))?;
     layout_displays.append(&mut scene.displays);
     scene.displays = layout_displays;
     scene.displays.push(Box::new(HelpOverlay {
@@ -1632,9 +1605,7 @@ fn parse_display(
     let font_size = fonts.get(&font).map_or(12, |v| v.1) as f32;
     if name == "browser" && node.attribute("xpand") == Some("1") {
         let browse_type = node.attribute("browsetype").unwrap_or("BROWSE_loop");
-        state
-            .write()
-            .expect("UI state poisoned")
+        state.write().unwrap_or_else(std::sync::PoisonError::into_inner)
             .browsers
             .entry(browse_type.to_string())
             .or_default()
@@ -1701,9 +1672,7 @@ fn parse_display(
                 bank.numparams = bank.params.len();
             }
             paramset.link_active_params();
-            state
-                .write()
-                .expect("UI state poisoned")
+            state.write().unwrap_or_else(std::sync::PoisonError::into_inner)
                 .paramsets
                 .insert((iid, display_id), paramset);
             WidgetKind::ParamSet {
@@ -1731,15 +1700,13 @@ fn parse_display(
     base.xpos = pos.0;
     base.ypos = pos.1;
     base.show = node.attribute("show").unwrap_or("1") != "0";
-    state
-        .write()
-        .expect("UI state poisoned")
+    state.write().unwrap_or_else(std::sync::PoisonError::into_inner)
         .displays
         .insert((base.iid, base.id), base.show);
     if matches!(name, "snapshots") {
         let display_size = parse_normalized(node.attribute("size").unwrap_or("0.3,0.22"), size);
         let count = (display_size.1 / (font_size as i32 + 2).max(1)).max(1) as usize;
-        let mut state = state.write().expect("UI state poisoned");
+        let mut state = state.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         state
             .snapshot_display_counts
             .insert((base.iid, base.id), count);
@@ -1982,7 +1949,7 @@ fn normalized_scalar(v: &str, size: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::videoio::{VideoFrame, VideoRenderer};
+    use crate::videoio::VideoFrame;
 
     #[derive(Default)]
     struct RecordingRenderer(Vec<DrawOp>);
@@ -2371,14 +2338,5 @@ mod tests {
         assert_eq!((element.loopx, element.loopy), (160, 240));
         assert_eq!((element.nxpos, element.nypos), (76, 126));
         assert_eq!((layout.nxpos, layout.nypos), (32, 48));
-    }
-    #[test]
-    fn scheduler_skips_missed_ticks_without_drift() {
-        let start = Instant::now();
-        let mut s = FrameScheduler::new(Duration::from_millis(40), start);
-        assert_eq!(
-            s.advance(start + Duration::from_millis(95)),
-            start + Duration::from_millis(120)
-        );
     }
 }

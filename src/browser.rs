@@ -42,20 +42,6 @@ impl BrowserFileSystem for OsBrowserFileSystem {
     }
 }
 
-/// Runtime boundary for time-dependent browser behavior.
-pub trait BrowserRuntime: Send + Sync {
-    fn now(&self) -> SystemTime;
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SystemBrowserRuntime;
-
-impl BrowserRuntime for SystemBrowserRuntime {
-    fn now(&self) -> SystemTime {
-        SystemTime::now()
-    }
-}
-
 /// Thread-safe owner for a browser.  The C++ implementation protects list
 /// mutation with a mutex; this wrapper provides the same boundary for Rust
 /// callers crossing worker/UI threads.
@@ -85,15 +71,6 @@ pub struct BrowserItem {
     pub modified: Option<SystemTime>,
 }
 
-/// Separator inserted between groups of browser entries.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BrowserDivision;
-
-impl BrowserDivision {
-    pub fn item() -> BrowserItem {
-        BrowserItem::new("", true, BrowserItemType::Division)
-    }
-}
 
 /// State shared with the rename widget renderer.
 #[derive(Debug, Clone, Copy, PartialEq)]

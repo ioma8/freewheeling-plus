@@ -7,7 +7,7 @@ use freewheeling_plus::core_persistence_parse::{parse_loop_metadata_xml, parse_s
 use freewheeling_plus::file_codecs::{IFileEncoder, SndFileEncoder};
 use freewheeling_plus::midiio::{MidiBackend, MidiMessage, MidiPortMessage};
 use freewheeling_plus::midiio_platform::{MidiPort, PortRegistry, RegistryMidiBackend};
-use freewheeling_plus::videoio_platform::mode;
+use freewheeling_plus::videoio::VideoMode;
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::{Arc, Mutex};
 
@@ -146,5 +146,5 @@ fn codec_and_platform_state_work_without_hardware() {
     let mut audio = AudioIoPlatform::new(48_000, 4);
     audio.open("virtual").unwrap();
     audio.close();
-    assert_eq!(mode(true, (640, 480)).windowed_size, (640, 480));
+    assert_eq!(VideoMode { fullscreen: true, windowed_size: (640, 480) }.windowed_size, (640, 480));
 }

@@ -7,7 +7,7 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Arguments as seen by the application after SDL's Finder launch argument
 /// has been consumed.
@@ -55,25 +55,6 @@ impl LaunchArguments {
     }
 }
 
-/// The executable directory used by the legacy SDLMain launcher.
-pub fn app_parent_directory(bundle_path: impl AsRef<Path>) -> Option<PathBuf> {
-    let path = bundle_path.as_ref();
-    path.parent().map(Path::to_path_buf)
-}
-
-/// Change to the executable directory. Resource discovery itself is based on
-/// the executable URL, but this preserves compatibility with relative paths
-/// used by old Finder-launched configurations.
-pub fn set_working_directory(bundle_path: impl AsRef<Path>) -> io::Result<()> {
-    let parent = app_parent_directory(bundle_path).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "application bundle has no parent",
-        )
-    })?;
-    std::env::set_current_dir(parent)
-}
-
 /// Run the application handoff after the bundle setup.  Keeping this callback
 /// based makes the ordering and error propagation testable without Cocoa.
 pub fn run_macos<F>(
@@ -85,7 +66,13 @@ where
     F: FnOnce(&[OsString]) -> i32,
 {
     if launch.finder_launch {
-        set_working_directory(bundle_path)?;
+        let parent = bundle_path.as_ref().parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "application bundle has no parent",
+            )
+        })?;
+        std::env::set_current_dir(parent)?;
     }
     Ok(app_main(&launch.args))
 }
@@ -111,6 +98,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use super::*;
 
     fn args(values: &[&str]) -> Vec<OsString> {
@@ -137,11 +125,11 @@ mod tests {
     #[test]
     fn bundle_parent_is_used_for_working_directory() {
         assert_eq!(
-            app_parent_directory("/Applications/Foo.app/Contents/MacOS/Foo"),
+            Path::new("/Applications/Foo.app/Contents/MacOS/Foo").parent().map(Path::to_path_buf),
             Some(PathBuf::from("/Applications/Foo.app/Contents/MacOS"))
         );
         assert_eq!(
-            app_parent_directory("/Applications/Foo.app"),
+            Path::new("/Applications/Foo.app").parent().map(Path::to_path_buf),
             Some(PathBuf::from("/Applications"))
         );
     }

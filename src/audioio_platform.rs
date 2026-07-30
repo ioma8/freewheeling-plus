@@ -101,8 +101,7 @@ impl AudioBackend for AudioIoPlatform {
     }
     fn relocate(&mut self, frame: NFrames) {
         self.transport
-            .lock()
-            .expect("transport poisoned")
+            .lock().unwrap_or_else(|e| e.into_inner())
             .relocate(frame);
     }
     fn metrics(&self) -> AudioMetrics {

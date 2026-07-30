@@ -1,6 +1,6 @@
 //! Native `midir` backend and a deterministic registry backend for tests.
 
-use crate::midiio::{MidiBackend, MidiMessage, MidiPortMessage, decode, encode};
+use crate::midiio::{MidiBackend, MidiPortMessage, decode, encode};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -312,30 +312,12 @@ impl MidiBackend for RegistryMidiBackend {
         self.registry.state.1.notify_all();
     }
 }
-pub fn packet_callback<S: crate::midiio::MidiEventSink>(
-    sink: &S,
-    port: usize,
-    packet: &[u8],
-) -> bool {
-    decode(packet)
-        .map(|message| {
-            sink.midi_event(MidiPortMessage { port, message });
-            true
-        })
-        .unwrap_or(false)
-}
-pub fn output_message<B: MidiBackend>(
-    io: &crate::midiio::MidiIo<B>,
-    port: usize,
-    message: MidiMessage,
-) -> Result<(), String> {
-    io.send(port, message)
-}
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::midiio::{MidiEventSink, MidiIo};
+    use crate::midiio::{MidiEventSink, MidiIo, MidiMessage};
     struct Sink(Mutex<Vec<MidiPortMessage>>);
     impl MidiEventSink for Sink {
         fn midi_event(&self, e: MidiPortMessage) {
@@ -363,16 +345,28 @@ mod tests {
         }]);
         let mut io = MidiIo::new(RegistryMidiBackend::new(r.clone()));
         io.activate(1, 1).unwrap();
-        output_message(&io, 0, MidiMessage::Start).unwrap();
+        io.send(0, MidiMessage::Start).unwrap();
         assert_eq!(r.take_output().unwrap().message, MidiMessage::Start);
-        assert!(output_message(&io, 1, MidiMessage::Stop).is_err());
+        assert!(io.send(1, MidiMessage::Stop).is_err());
         io.shutdown();
     }
     #[test]
     fn callback_delivers_complete_messages_only() {
         let s = Sink(Mutex::new(Vec::new()));
-        assert!(packet_callback(&s, 2, &[0x92, 60, 0]));
-        assert!(!packet_callback(&s, 2, &[0x01]));
+        assert!(decode(&[0x92, 60, 0])
+            .map(|message| {
+                s.0.lock().unwrap()
+                    .push(MidiPortMessage { port: 2, message });
+                true
+            })
+            .unwrap_or(false));
+        assert!(!decode(&[0x01])
+            .map(|message| {
+                s.0.lock().unwrap()
+                    .push(MidiPortMessage { port: 2, message });
+                true
+            })
+            .unwrap_or(false));
         assert_eq!(
             s.0.lock().unwrap()[0].message,
             MidiMessage::NoteOff {

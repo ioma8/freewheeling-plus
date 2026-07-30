@@ -30,31 +30,6 @@ pub const MAX_RT_STRUCTS: usize = 20;
 /// Number of data bytes in one config variable
 pub const CFG_VAR_SIZE: usize = 16;
 
-/// Callback interface used by realtime data structures when the registered
-/// reader/writer-thread count changes.  This mirrors the C++ abstract class;
-/// implementations decide how to resize or otherwise update themselves.
-pub trait RtDataStructUpdater {
-    fn update_num_rw_threads(&mut self, new_num_writers: i32);
-}
-
-#[cfg(test)]
-mod rt_data_struct_updater_tests {
-    use super::RtDataStructUpdater;
-
-    struct Probe(i32);
-    impl RtDataStructUpdater for Probe {
-        fn update_num_rw_threads(&mut self, n: i32) {
-            self.0 = n;
-        }
-    }
-
-    #[test]
-    fn forwards_thread_count_to_implementation() {
-        let mut probe = Probe(0);
-        probe.update_num_rw_threads(7);
-        assert_eq!(probe.0, 7);
-    }
-}
 
 // ============================================================
 // CoreDataType
@@ -303,25 +278,6 @@ impl UserVariable {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn get_delta(&self, arg: &UserVariable) -> UserVariable {
-        let mut ret = UserVariable::new();
-        ret.type_ = CoreDataType::Char;
-        ret.raise_precision(self);
-        ret.raise_precision(arg);
-        match ret.type_ {
-            CoreDataType::Char => {
-                ret.set_char((arg.as_char() as i16 - self.as_char() as i16).unsigned_abs() as i8)
-            }
-            CoreDataType::Int => ret.set_int((arg.as_i32() - self.as_i32()).unsigned_abs() as i32),
-            CoreDataType::Long => {
-                ret.set_long((arg.as_i64() - self.as_i64()).unsigned_abs() as i64)
-            }
-            CoreDataType::Float => ret.set_float((arg.as_f32() - self.as_f32()).abs()),
-            _ => eprintln!("UserVariable: WARNING: GetDelta() doesn't work on this type!"),
-        }
-        ret
-    }
 
     /// Implements the C++ `+=`, `-=`, `*=`, and `/=` semantics without
     /// exposing a byte-backed value to callers.

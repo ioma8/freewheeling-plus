@@ -75,15 +75,13 @@ fn register_signal_handlers() {
     signal::register_shutdown_signal_handlers();
 }
 
-#[cfg(not(any(windows, target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 fn register_signal_handlers() {
     signal::register_fatal_signal_handlers();
     signal::register_info_signal_handlers();
     signal::register_shutdown_signal_handlers();
 }
 
-#[cfg(windows)]
-fn register_signal_handlers() {}
 
 impl<S: CoreServices> Application for Core<S> {
     fn setup(&mut self) -> Result<(), String> {
@@ -101,12 +99,12 @@ where
     A: NativeComponentAdapter,
 {
     fn setup(&mut self) -> Result<(), String> {
-        self.app_mut().setup()
+        self.core_mut().setup()
     }
 
     fn go(&mut self) -> Result<(), String> {
-        let result = self.app_mut().go();
-        self.app_mut().shutdown();
+        let result = self.core_mut().go();
+        self.core_mut().shutdown();
         result
     }
 }
@@ -142,7 +140,7 @@ fn invocation(args: impl IntoIterator<Item = OsString>) -> Result<Invocation, St
     })
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let args: Vec<_> = std::env::args_os().collect();
     let code = match invocation(args.clone()) {
         Ok(Invocation::Smoke(args)) => run(args, &mut smoke_application()),
@@ -162,7 +160,10 @@ fn main() {
             2
         }
     };
-    std::process::exit(code);
+    // Return ExitCode instead of calling process::exit so Drop impls run
+    // (audio streams, MIDI devices, video backends, memory pools).
+    let code: u8 = code.try_into().unwrap_or(1);
+    std::process::ExitCode::from(code)
 }
 
 #[derive(Default)]

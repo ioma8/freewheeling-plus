@@ -160,7 +160,8 @@ fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
 }
 
 fn json_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    let s = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string());
+    s[1..s.len() - 1].to_string()
 }
 
 fn passthrough(callback: &mut AudioCallback<'_>) {

@@ -2,7 +2,7 @@
 //!
 //! The C++ implementation talks to the application, loop storage and event
 //! graph through concrete classes.  Rust keeps those dependencies explicit:
-//! [`DspApp`], [`LoopSource`] and [`Processor`] are the adapters used by the
+//! [`LoopSource`] and [`Processor`] are the adapters used by the
 //! processors below.  No processor hides an unavailable operation.
 
 use crate::core_dsp_audio_buffers::{AudioBufferConfig, AudioBuffers, InputSettings};
@@ -33,12 +33,6 @@ impl From<i32> for SyncState {
     }
 }
 
-pub fn math_gcd(a: i32, b: i32) -> i32 {
-    if b == 0 { a } else { math_gcd(b, a % b) }
-}
-pub fn math_lcm(a: i32, b: i32) -> i32 {
-    a * b / math_gcd(a, b)
-}
 
 const DB_FLOOR: f32 = -1000.0;
 fn iec_db_to_fader(db: f32) -> f32 {
@@ -88,12 +82,6 @@ impl AudioLevel {
             return 0.0;
         }
         (iec_db_to_fader(db) / iec_db_to_fader(max_db)).clamp(0.0, 1.0)
-    }
-}
-
-pub trait DspApp {
-    fn time_scale(&self) -> f32 {
-        1.0
     }
 }
 
@@ -226,10 +214,6 @@ pub struct SyncPosition {
     pub position: NFrames,
     pub callback: Box<dyn FnMut(i32, NFrames) + Send>,
     pub index: i32,
-}
-
-pub trait PulseSyncCallback: Send {
-    fn pulse_sync(&mut self, sync_idx: i32, actual_pos: NFrames);
 }
 
 pub struct Pulse {

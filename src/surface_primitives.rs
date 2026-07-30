@@ -71,7 +71,7 @@ impl SoftwareSurface {
         (x >= 0 && y >= 0 && x < self.width && y < self.height)
             .then(|| self.pixels[y as usize * self.width as usize + x as usize])
     }
-    fn put_pixel(&mut self, x: i32, y: i32, color: u32) {
+    pub(crate) fn put_pixel(&mut self, x: i32, y: i32, color: u32) {
         let inside_clip = self.clip.is_none_or(|(left, top, right, bottom)| {
             x >= left && y >= top && x < right && y < bottom
         });
@@ -83,15 +83,7 @@ impl SoftwareSurface {
         // pixel directly for every primitive; it does not source-over blend.
         *pixel = color;
     }
-    pub(crate) fn put_opaque_pixel(&mut self, x: i32, y: i32, color: u32) {
-        let inside_clip = self.clip.is_none_or(|(left, top, right, bottom)| {
-            x >= left && y >= top && x < right && y < bottom
-        });
-        if x < 0 || y < 0 || x >= self.width || y >= self.height || !inside_clip {
-            return;
-        }
-        self.pixels[y as usize * self.width as usize + x as usize] = color;
-    }
+
     pub fn blit_rgba(
         &mut self,
         source: &[u8],
@@ -234,9 +226,7 @@ impl SoftwareSurface {
             }
         }
     }
-    pub fn filledpie_rgba(&mut self, x: i32, y: i32, rad: i32, start: i32, end: i32, color: u32) {
-        self.filled_pie_rgba(x, y, rad, start, end, color);
-    }
+
 }
 
 fn blend(dst: u32, src: u32) -> u32 {

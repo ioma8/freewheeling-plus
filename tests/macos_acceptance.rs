@@ -1,6 +1,6 @@
 #![cfg(target_os = "macos")]
 
-use freewheeling_plus::macos::{CocoaPlatform, Platform, application_support_path};
+use freewheeling_plus::macos::{CocoaPlatform, application_support_path};
 use freewheeling_plus::macos_sdlmain::{LaunchArguments, run_macos};
 use std::ffi::OsString;
 use std::fs;
@@ -35,7 +35,7 @@ fn sdlmain_filters_finder_launch_and_handles_bundle_parent() {
 
     let bundle_executable = PathBuf::from("/Applications/Fweelin.app/Contents/MacOS/Fweelin");
     assert_eq!(
-        freewheeling_plus::macos_sdlmain::app_parent_directory(&bundle_executable),
+        bundle_executable.parent().map(Path::to_path_buf),
         Some(PathBuf::from("/Applications/Fweelin.app/Contents/MacOS"))
     );
 }

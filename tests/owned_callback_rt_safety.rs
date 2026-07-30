@@ -96,7 +96,7 @@ fn boxed_processor_runs_without_callback_allocation() {
 
     let mut io = AudioIO::new(ImmediateBackend);
     io.open("boxed").unwrap();
-    io.activate_boxed(Box::new(BoxedGain(Arc::new(2.0))))
+    io.activate(BoxedGain(Arc::new(2.0)))
         .unwrap();
 }
 

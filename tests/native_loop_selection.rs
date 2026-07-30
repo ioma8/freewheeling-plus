@@ -1,7 +1,7 @@
 #[path = "../src/native_loop_selection.rs"]
 mod native_loop_selection;
 
-use native_loop_selection::{NUM_SELECTION_SETS, NativeLoopSelection, SelectionError};
+use native_loop_selection::{NUM_SELECTION_SETS, NativeLoopSelection};
 
 #[test]
 fn all_sets_are_independent_and_toggle_is_idempotent() {
@@ -46,6 +46,6 @@ fn move_and_bounds_are_explicit() {
     s.toggle(0, 7).unwrap();
     s.update_after_move(7, 9);
     assert_eq!(s.selected(0, 9), Ok(true));
-    assert_eq!(s.toggle(0, 10), Err(SelectionError::CapacityExceeded));
-    assert_eq!(s.clear(NUM_SELECTION_SETS), Err(SelectionError::InvalidSet));
+    assert_eq!(s.toggle(0, 10), Err("selection capacity exceeded".to_string()));
+    assert_eq!(s.clear(NUM_SELECTION_SETS), Err(format!("invalid selection set {NUM_SELECTION_SETS}")));
 }

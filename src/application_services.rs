@@ -7,7 +7,7 @@
 
 use crate::core::{CoreEvent, CoreServices, LoopSnapshot, Snapshot, StreamState};
 use crate::core_startup::{self, StartupConfig, StartupServices};
-use crate::sdlio::{InputEvent, SdlBackend, SdlIo};
+use crate::sdlio::InputEvent;
 
 /// The application-owned part of the migrated graph.
 ///
@@ -155,18 +155,6 @@ impl<C: StartupConfig, S: StartupServices, P: Components> CoreServices
     }
 }
 
-/// Small helper for the common SDL-backed event source.
-pub struct SdlEvents<B: SdlBackend> {
-    pub io: SdlIo<B>,
-}
-impl<B: SdlBackend> SdlEvents<B> {
-    pub fn new(io: SdlIo<B>) -> Self {
-        Self { io }
-    }
-    pub fn poll(&mut self) -> Option<CoreEvent> {
-        self.io.poll().and_then(core_event)
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -188,29 +176,26 @@ mod tests {
 
     #[derive(Default)]
     struct Startup;
-    macro_rules! startup_methods { ($($name:ident),+ $(,)?) => { $(fn $name(&mut self) -> Result<(), String> { Ok(()) })+ }; }
     impl StartupServices for Startup {
-        startup_methods!(
-            lock_memory,
-            init_rt_threads,
-            register_main_thread,
-            init_platform_threads,
-            init_sdl,
-            init_memory_manager,
-            init_event_manager,
-            activate_video,
-            wait_for_video,
-            init_audio,
-            init_core_graph,
-            init_synth_and_buffers,
-            init_loop_and_scene_browsers,
-            init_input_and_midi,
-            init_osc_and_mixer,
-            link_system_variables,
-            activate_signal_processing,
-            init_streamers_and_finalize_rings,
-            add_processing_elements
-        );
+        fn lock_memory(&mut self) -> Result<(), String> { Ok(()) }
+        fn init_rt_threads(&mut self) -> Result<(), String> { Ok(()) }
+        fn register_main_thread(&mut self) -> Result<(), String> { Ok(()) }
+        fn init_platform_threads(&mut self) -> Result<(), String> { Ok(()) }
+        fn init_sdl(&mut self) -> Result<(), String> { Ok(()) }
+        fn init_memory_manager(&mut self) -> Result<(), String> { Ok(()) }
+        fn init_event_manager(&mut self) -> Result<(), String> { Ok(()) }
+        fn activate_video(&mut self) -> Result<(), String> { Ok(()) }
+        fn wait_for_video(&mut self) -> Result<(), String> { Ok(()) }
+        fn init_audio(&mut self) -> Result<(), String> { Ok(()) }
+        fn init_core_graph(&mut self) -> Result<(), String> { Ok(()) }
+        fn init_synth_and_buffers(&mut self) -> Result<(), String> { Ok(()) }
+        fn init_loop_and_scene_browsers(&mut self) -> Result<(), String> { Ok(()) }
+        fn init_input_and_midi(&mut self) -> Result<(), String> { Ok(()) }
+        fn init_osc_and_mixer(&mut self) -> Result<(), String> { Ok(()) }
+        fn link_system_variables(&mut self) -> Result<(), String> { Ok(()) }
+        fn activate_signal_processing(&mut self) -> Result<(), String> { Ok(()) }
+        fn init_streamers_and_finalize_rings(&mut self) -> Result<(), String> { Ok(()) }
+        fn add_processing_elements(&mut self) -> Result<(), String> { Ok(()) }
         fn rollback_setup(&mut self) {}
     }
 

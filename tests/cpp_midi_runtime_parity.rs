@@ -70,7 +70,7 @@ fn genuine_cpp_input_fixture_matches_codec_and_event_mapping() {
     ];
     for (bytes, expected) in cases {
         assert_eq!(decode(&bytes), Some(expected.clone()));
-        let encoded = encode(expected);
+        let encoded = encode(&expected);
         if bytes == [0x92, 62, 0] {
             // A velocity-zero note-on is normalized to canonical note-off.
             assert_eq!(encoded, [0x82, 62, 0]);
@@ -192,7 +192,7 @@ fn genuine_cpp_output_fixture_matches_clamping_sync_and_runtime_send() {
         assert_eq!(encode(message), *bytes);
     }
     assert_eq!(
-        encode(MidiMessage::NoteOn {
+        encode(&MidiMessage::NoteOn {
             channel: 255,
             note: 255,
             velocity: 255
@@ -235,7 +235,7 @@ fn genuine_cpp_output_fixture_matches_clamping_sync_and_runtime_send() {
     io.activate(0, 1).unwrap();
     for (message, bytes) in cases {
         io.send(0, message).unwrap();
-        assert_eq!(encode(registry.take_output().unwrap().message), bytes);
+        assert_eq!(encode(&registry.take_output().unwrap().message), bytes);
     }
     io.shutdown();
 

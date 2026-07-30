@@ -44,12 +44,6 @@ pub struct NativeRename {
 }
 
 impl NativeRename {
-    pub const MAX_NAME_BYTES: usize = MAX_NAME_BYTES;
-
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn is_active(&self) -> bool {
         self.target.is_some()
     }

@@ -5,58 +5,7 @@
 //! implements [`Renderer`], while these types retain the old logical 640x480
 //! coordinate system and display hierarchy.
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RenderMetrics {
-    pub logical_width: i32,
-    pub logical_height: i32,
-    pub drawable_width: i32,
-    pub drawable_height: i32,
-    pub scale_x: f32,
-    pub scale_y: f32,
-}
-impl RenderMetrics {
-    pub fn new(w: i32, h: i32, dw: i32, dh: i32) -> Self {
-        let logical_width = if w <= 0 {
-            if dw > 0 { dw } else { 1 }
-        } else {
-            w
-        };
-        let logical_height = if h <= 0 {
-            if dh > 0 { dh } else { 1 }
-        } else {
-            h
-        };
-        let drawable_width = if dw <= 0 { logical_width } else { dw };
-        let drawable_height = if dh <= 0 { logical_height } else { dh };
-        Self {
-            logical_width,
-            logical_height,
-            drawable_width,
-            drawable_height,
-            scale_x: drawable_width as f32 / logical_width as f32,
-            scale_y: drawable_height as f32 / logical_height as f32,
-        }
-    }
-
-    fn scale_extent(v: i32, scale: f32) -> i32 {
-        if v <= 0 {
-            0
-        } else if scale <= 0.0 {
-            v
-        } else {
-            ((v as f32 * scale + 0.5) as i32).max(1)
-        }
-    }
-    pub fn x(&self, v: i32) -> i32 {
-        Self::scale_extent(v, self.scale_x)
-    }
-    pub fn y(&self, v: i32) -> i32 {
-        Self::scale_extent(v, self.scale_y)
-    }
-    pub fn extent(&self, v: i32, s: f32) -> i32 {
-        Self::scale_extent(v, s)
-    }
-}
+pub use crate::videoio::RenderMetrics;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Color(pub u8, pub u8, pub u8, pub u8);
@@ -90,14 +39,6 @@ pub enum DrawOp {
 }
 pub trait Renderer {
     fn draw(&mut self, op: DrawOp);
-}
-pub trait Value {
-    fn value(&self) -> f32;
-}
-impl<F: Fn() -> f32> Value for F {
-    fn value(&self) -> f32 {
-        self()
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -172,11 +113,11 @@ impl Display for FloDisplayPanel {
     }
 }
 
-pub struct FloDisplayText<V: Value> {
+pub struct FloDisplayText {
     pub base: FloDisplay,
-    pub exp: V,
+    pub exp: Box<dyn Fn() -> f32>,
 }
-impl<V: Value> Display for FloDisplayText<V> {
+impl Display for FloDisplayText {
     fn base(&self) -> &FloDisplay {
         &self.base
     }
@@ -199,7 +140,7 @@ impl<V: Value> Display for FloDisplayText<V> {
                 1,
             ));
             r.draw(DrawOp::Text(
-                format!("{}", self.exp.value()),
+                format!("{}", (self.exp)()),
                 x,
                 y,
                 Color(0xdf, 0xef, 0x20, 255),
@@ -210,11 +151,11 @@ impl<V: Value> Display for FloDisplayText<V> {
     }
 }
 
-pub struct FloDisplaySwitch<V: Value> {
+pub struct FloDisplaySwitch {
     pub base: FloDisplay,
-    pub exp: V,
+    pub exp: Box<dyn Fn() -> f32>,
 }
-impl<V: Value> Display for FloDisplaySwitch<V> {
+impl Display for FloDisplaySwitch {
     fn base(&self) -> &FloDisplay {
         &self.base
     }
@@ -225,7 +166,7 @@ impl<V: Value> Display for FloDisplaySwitch<V> {
         if self.base.show
             && let Some(t) = &self.base.title
         {
-            let c = if self.exp.value() != 0.0 {
+            let c = if (self.exp)() != 0.0 {
                 Color(0xdf, 0xef, 0x20, 255)
             } else {
                 Color(0x11, 0x22, 0x33, 255)
@@ -247,9 +188,9 @@ pub enum Orientation {
     Horizontal,
     Vertical,
 }
-pub struct FloDisplayBar<V: Value> {
+pub struct FloDisplayBar {
     pub base: FloDisplay,
-    pub exp: V,
+    pub exp: Box<dyn Fn() -> f32>,
     pub orientation: Orientation,
     pub barscale: f32,
     pub thickness: i32,
@@ -257,9 +198,9 @@ pub struct FloDisplayBar<V: Value> {
     pub marks: bool,
     pub maxdb: f32,
 }
-impl<V: Value> FloDisplayBar<V> {
+impl FloDisplayBar {
     pub fn level(&self, m: &RenderMetrics) -> f32 {
-        let v = self.exp.value();
+        let v = (self.exp)();
         let f = if self.dbscale {
             let db = if v > 0.0 { 20.0 * v.log10() } else { -60.0 };
             ((db + 60.0) / (self.maxdb + 60.0)).clamp(0.0, 1.0)
@@ -274,7 +215,7 @@ impl<V: Value> FloDisplayBar<V> {
             }
     }
 }
-impl<V: Value> Display for FloDisplayBar<V> {
+impl Display for FloDisplayBar {
     fn base(&self) -> &FloDisplay {
         &self.base
     }
@@ -337,7 +278,7 @@ mod tests {
                 b.title = Some("x".into());
                 b
             },
-            exp: || 1.0,
+            exp: Box::new(|| 1.0),
         }));
         let mut r = R(Vec::new());
         p.render(&mut r, &RenderMetrics::new(640, 480, 640, 480));

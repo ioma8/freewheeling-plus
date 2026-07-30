@@ -6,6 +6,7 @@
 //! become reachable from that callback. Recording uses atomics and thread-local
 //! state only; it does not allocate or lock on the callback path.
 
+use serde::Serialize;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::fs;
@@ -192,7 +193,7 @@ impl Drop for CallbackGuard<'_> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct PerformanceResult {
     pub schema_version: u32,
     pub sample_rate_hz: u32,
@@ -215,30 +216,7 @@ impl PerformanceResult {
     }
 
     pub fn to_json(&self) -> String {
-        format!(
-            concat!(
-                "{{\n  \"schema_version\": {},\n  \"sample_rate_hz\": {},\n",
-                "  \"buffer_frames\": {},\n  \"duration_seconds\": {:.6},\n",
-                "  \"callback_p99_us\": {:.3},\n  \"callback_deadline_us\": {:.3},\n",
-                "  \"callback_allocations\": {},\n  \"blocking_lock_attempts\": {},\n",
-                "  \"unexplained_xruns\": {},\n  \"rss_start_bytes\": {},\n",
-                "  \"rss_peak_bytes\": {},\n  \"callback_count\": {},\n",
-                "  \"deadline_misses\": {}\n}}\n"
-            ),
-            self.schema_version,
-            self.sample_rate_hz,
-            self.buffer_frames,
-            self.duration_seconds,
-            self.callback_p99_us,
-            self.callback_deadline_us,
-            self.callback_allocations,
-            self.blocking_lock_attempts,
-            self.unexplained_xruns,
-            self.rss_start_bytes,
-            self.rss_peak_bytes,
-            self.callback_count,
-            self.deadline_misses,
-        )
+        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string()) + "\n"
     }
 }
 

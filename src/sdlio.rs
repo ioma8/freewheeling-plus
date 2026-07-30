@@ -386,7 +386,7 @@ impl<B: SdlBackend> SdlIo<B> {
                 if down && repeat && !self.key_repeat_enabled {
                     return None;
                 }
-                let key = translate_keycode(keycode);
+                let key = crate::sdlkey_compat::translate_sdl_keycode(keycode);
                 if !(0..SDLK_LAST as i32).contains(&key) {
                     return None;
                 }
@@ -819,9 +819,6 @@ pub fn get_sdl_key(name: &str) -> i32 {
     key_from_name(name)
 }
 
-pub fn translate_keycode(k: i32) -> i32 {
-    crate::sdlkey_compat::translate_sdl_keycode(k)
-}
 
 #[cfg(test)]
 mod tests {

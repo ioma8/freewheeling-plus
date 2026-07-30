@@ -119,12 +119,6 @@ impl From<io::Error> for OscError {
     }
 }
 
-pub trait OscBackend: Send {
-    fn open(&mut self) -> Result<(), OscError>;
-    fn send(&mut self, message: &OscMessage) -> Result<(), OscError>;
-    fn close(&mut self);
-}
-
 pub struct UdpBackend {
     destination: SocketAddr,
     socket: Option<UdpSocket>,
@@ -140,9 +134,7 @@ impl UdpBackend {
             socket: None,
         })
     }
-}
-impl OscBackend for UdpBackend {
-    fn open(&mut self) -> Result<(), OscError> {
+    pub fn open(&mut self) -> Result<(), OscError> {
         self.socket = Some(UdpSocket::bind("0.0.0.0:0")?);
         Ok(())
     }
@@ -172,11 +164,11 @@ pub struct PlayingLoops {
     pub range_end: i32,
 }
 
-pub struct OscClient<B: OscBackend> {
-    backend: Arc<Mutex<B>>,
+pub struct OscClient {
+    backend: Arc<Mutex<UdpBackend>>,
 }
-impl<B: OscBackend> OscClient<B> {
-    pub fn new(backend: B) -> Self {
+impl OscClient {
+    pub fn new(backend: UdpBackend) -> Self {
         Self {
             backend: Arc::new(Mutex::new(backend)),
         }
@@ -298,7 +290,7 @@ impl OscReceiver {
     pub fn shutdown(&mut self) {
         self.running.store(false, Ordering::Release);
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            crate::event::join_with_timeout(worker);
         }
     }
 }
@@ -346,33 +338,14 @@ fn read_padded_string(packet: &[u8], offset: &mut usize) -> Result<String, OscEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    struct Recorder {
-        opened: bool,
-        messages: Vec<OscMessage>,
-    }
-    impl OscBackend for Recorder {
-        fn open(&mut self) -> Result<(), OscError> {
-            self.opened = true;
-            Ok(())
-        }
-        fn send(&mut self, m: &OscMessage) -> Result<(), OscError> {
-            if !self.opened {
-                return Err(OscError::NotConnected);
-            }
-            self.messages.push(m.clone());
-            Ok(())
-        }
-        fn close(&mut self) {
-            self.opened = false;
-        }
-    }
+    use std::net::UdpSocket;
+
     #[test]
     fn preserves_paths_types_and_order() {
-        let r = Recorder {
-            opened: false,
-            messages: vec![],
-        };
-        let c = OscClient::new(r);
+        let mut receiver = OscReceiver::bind("127.0.0.1:0".parse().unwrap(), 16).unwrap();
+        let addr = receiver.local_addr();
+        let backend = UdpBackend::new("127.0.0.1", addr.port()).unwrap();
+        let c = OscClient::new(backend);
         c.open().unwrap();
         c.send_playing_loops(&PlayingLoops {
             tempo: Some((120.0, 4)),
@@ -386,10 +359,20 @@ mod tests {
             range_end: 480,
         })
         .unwrap();
-        let b = c.backend.lock().unwrap();
-        assert_eq!(b.messages[0].type_tag(), ",fi");
-        assert_eq!(b.messages[1].type_tag(), ",iiiifs");
-        assert_eq!(b.messages[2].path, "/AdvanceLoopRange");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut messages = Vec::new();
+        while messages.len() < 3 && std::time::Instant::now() < deadline {
+            if let Some(m) = receiver.try_receive() {
+                messages.push(m);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].type_tag(), ",fi");
+        assert_eq!(messages[1].type_tag(), ",iiiifs");
+        assert_eq!(messages[2].path, "/AdvanceLoopRange");
+        receiver.shutdown();
     }
     #[test]
     fn rejects_bad_paths() {
@@ -408,7 +391,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(OscMessage::decode(&message.encode()).unwrap(), message);
-        let mut receiver = OscReceiver::bind("127.0.0.1:0".parse().unwrap(), 2).unwrap();
+        let mut receiver = OscReceiver::bind("127.0.0.1:0".parse().unwrap(), 16).unwrap();
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         socket
             .send_to(&message.encode(), receiver.local_addr())

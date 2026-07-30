@@ -42,14 +42,6 @@ pub trait AudioProcessor: Send {
     fn process(&mut self, callback: &mut AudioCallback<'_>);
 }
 
-impl<F> AudioProcessor for F
-where
-    F: for<'a> FnMut(&mut AudioCallback<'a>) + Send,
-{
-    fn process(&mut self, callback: &mut AudioCallback<'_>) {
-        self(callback);
-    }
-}
 
 /// Owned, mutable realtime callback.  Backends invoke it from exactly one
 /// playback thread at a time.
@@ -408,12 +400,6 @@ impl<B: AudioBackend> AudioIO<B> {
         self.activate_callback(Box::new(move |callback| processor.process(callback)))
     }
 
-    /// Activates a type-erased processor without wrapping it in shared or
-    /// mutex-protected ownership. Its final drop happens after backend close.
-    pub fn activate_boxed(&mut self, mut processor: Box<dyn AudioProcessor>) -> Result<(), String> {
-        self.activate_callback(Box::new(move |callback| processor.process(callback)))
-    }
-
     fn activate_callback(&mut self, callback: AudioCallbackFn) -> Result<(), String> {
         let callback_thread = Arc::clone(&self.callback_thread);
         let mut callback = callback;
@@ -483,7 +469,7 @@ impl<B: AudioBackend> AudioIO<B> {
         self.backend.recovery_metrics()
     }
     pub fn get_position(&self) -> JackPosition {
-        *self.position.lock().expect("position poisoned")
+        *self.position.lock().unwrap_or_else(|e| e.into_inner())
     }
     pub fn is_sync(&self) -> bool {
         self.sync_active.load(Ordering::Acquire)

@@ -36,12 +36,6 @@ impl LoopTrayItem {
             y: -1,
         }
     }
-    pub fn compare(&self, other: &Self) -> i32 {
-        other.loop_id - self.loop_id
-    }
-    pub fn matches(&self, loop_id: i32) -> bool {
-        self.loop_id == loop_id
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

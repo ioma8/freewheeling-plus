@@ -14,49 +14,8 @@ pub enum PathExpandResult {
     MissingHome,
 }
 
-/// Byte-accurate C token span. Unlike the UTF-8 convenience wrapper below,
-/// this supports every possible `char` delimiter and terminates at the first
-/// NUL byte exactly like `fweelin_split_token`.
-#[derive(Debug, PartialEq, Eq)]
-pub struct ByteTokenSpan<'a> {
-    pub begin: &'a [u8],
-    pub len: usize,
-    pub next: Option<&'a [u8]>,
-}
-
 fn c_string_bytes(src: &[u8]) -> &[u8] {
     &src[..src.iter().position(|byte| *byte == 0).unwrap_or(src.len())]
-}
-
-pub fn split_token_bytes(src: Option<&[u8]>, delim: u8) -> ByteTokenSpan<'_> {
-    let Some(src) = src else {
-        return ByteTokenSpan {
-            begin: b"",
-            len: 0,
-            next: None,
-        };
-    };
-    let src = c_string_bytes(src);
-    let len = if delim == 0 {
-        src.len()
-    } else {
-        src.iter()
-            .position(|byte| *byte == delim)
-            .unwrap_or(src.len())
-    };
-    ByteTokenSpan {
-        begin: src,
-        len,
-        next: (delim != 0 && len < src.len()).then(|| &src[len + 1..]),
-    }
-}
-
-pub fn dup_token_bytes(span: &ByteTokenSpan<'_>) -> Vec<u8> {
-    span.begin[..span.len]
-        .iter()
-        .copied()
-        .chain(std::iter::once(0))
-        .collect()
 }
 
 pub fn split_token(src: &str, delim: u8) -> TokenSpan<'_> {
@@ -73,8 +32,7 @@ pub fn split_token(src: &str, delim: u8) -> TokenSpan<'_> {
         begin: src,
         len,
         // Config text uses ASCII delimiters. Preserve this UTF-8 convenience
-        // API without allowing an arbitrary byte delimiter to panic; callers
-        // needing exact C byte semantics use `split_token_bytes`.
+        // API without allowing an arbitrary byte delimiter to panic.
         next: (delim != 0 && len < bytes.len())
             .then(|| src.get(len + 1..))
             .flatten(),
@@ -193,17 +151,6 @@ pub fn alloc_saveable_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn byte_token_helpers_match_c_delimiter_and_nul_rules() {
-        let span = split_token_bytes(Some(b"one,two\0ignored"), b',');
-        assert_eq!(&span.begin[..span.len], b"one");
-        assert_eq!(span.next, Some(&b"two"[..]));
-        assert_eq!(dup_token_bytes(&span), b"one\0");
-
-        let non_utf8 = split_token_bytes(Some(&[0xff, b'/', 0xfe]), b'/');
-        assert_eq!(dup_token_bytes(&non_utf8), vec![0xff, 0]);
-    }
 
     #[test]
     fn bounded_copy_append_and_home_expansion_stop_at_c_nul() {

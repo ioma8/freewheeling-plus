@@ -39,6 +39,8 @@ pub struct LoopPath {
 pub fn saveable_stub(base: &str, hash: &str, name: Option<&str>, ext: Option<&str>) -> String {
     let mut s = format!("{}-{}", base, hash);
     if let Some(n) = name.filter(|n| !n.is_empty()) {
+        // write! to a String is infallible (fmt::Write::write_str for String
+        // never returns Err), so unwrap is safe.
         write!(s, "-{n}").unwrap();
     }
     s.push_str(ext.unwrap_or(""));
@@ -83,7 +85,12 @@ pub fn split_filename(filename: &str, base_len: usize) -> Result<(String, String
 }
 
 pub fn encode_hash(hash: &[u8; HASH_LENGTH]) -> String {
-    hash.iter().map(|b| format!("{b:02X}")).collect()
+    let mut s = String::with_capacity(HASH_LENGTH * 2);
+    for b in hash {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02X}");
+    }
+    s
 }
 pub fn decode_hash(s: &str) -> Option<[u8; HASH_LENGTH]> {
     if s.len() != HASH_LENGTH * 2 {

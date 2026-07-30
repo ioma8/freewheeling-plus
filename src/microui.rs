@@ -20,10 +20,6 @@ const BACKDROP: Color = Color(0, 0, 0, 170);
 fn sy(m: &RenderMetrics, v: i32) -> i32 {
     m.extent(v, m.scale_y)
 }
-fn scale(m: &RenderMetrics) -> f32 {
-    m.scale_y.max(m.scale_x)
-}
-
 /// Styled text with Retina-scaled font size.
 fn txt(
     r: &mut dyn Renderer,
@@ -38,7 +34,7 @@ fn txt(
     r.draw(DrawOp::StyledText(
         text.into(),
         "default".into(),
-        12.0 * scale(m),
+        12.0 * m.scale_y.max(m.scale_x),
         x,
         y,
         c,
@@ -67,16 +63,6 @@ fn title_bar(r: &mut dyn Renderer, m: &RenderMetrics, x: i32, y: i32, w: i32, la
     let (x1, y1, x2, y2) = (m.x(x), m.y(y), m.x(x + w), m.y(y + h));
     r.draw(DrawOp::Box(x1, y1, x2, y2, TITLE_BG));
     txt(r, label, (x1 + x2) / 2, y1 + sy(m, 16), TITLE_FG, 0, -1, m);
-}
-
-/// Left-aligned label.
-fn label(r: &mut dyn Renderer, m: &RenderMetrics, x: i32, y: i32, text: &str) {
-    txt(r, text, m.x(x), m.y(y), LABEL_DIM, -1, -1, m);
-}
-
-/// A value string (brighter than label).
-fn value(r: &mut dyn Renderer, m: &RenderMetrics, x: i32, y: i32, text: &str) {
-    txt(r, text, m.x(x), m.y(y), TEXT, -1, -1, m);
 }
 
 /// Draw a microui-style button.  Returns the hit-rect (in logical coords)
@@ -138,13 +124,13 @@ pub fn settings_overlay(
     // Content area starts below the title bar (py + 24 + padding)
     let cy = py + 24 + 6;
 
-    label(r, m, px + 8, cy, "Stream Output Path:");
+    txt(r, "Stream Output Path:", m.x(px + 8), m.y(cy), LABEL_DIM, -1, -1, m);
     let path = if stream_path.is_empty() {
         "(default)"
     } else {
         stream_path
     };
-    value(r, m, px + 8, cy + 18, path);
+    txt(r, path, m.x(px + 8), m.y(cy + 18), TEXT, -1, -1, m);
 
     // Test Beep button
     let btn_x = px + 8;

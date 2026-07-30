@@ -11,49 +11,41 @@ use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderMetrics {
-    pub logical_width: u32,
-    pub logical_height: u32,
-    pub drawable_width: u32,
-    pub drawable_height: u32,
+    pub logical_width: i32,
+    pub logical_height: i32,
+    pub drawable_width: i32,
+    pub drawable_height: i32,
     pub scale_x: f32,
     pub scale_y: f32,
 }
 
 impl RenderMetrics {
+    /// Construct from unsigned sizes (from window metrics where 0 = unset).
     pub fn from_sizes(logical: (u32, u32), drawable: (u32, u32)) -> Self {
-        // This is FweelinComputeVideoScale verbatim in unsigned-size form:
-        // an absent logical extent inherits a drawable extent, and vice versa.
-        // The previous `max(1)` denominator retained zero drawable sizes and
-        // therefore diverged while a window was being minimized or resized.
-        let logical_width = if logical.0 == 0 {
-            drawable.0.max(1)
+        Self::new(logical.0 as i32, logical.1 as i32, drawable.0 as i32, drawable.1 as i32)
+    }
+
+    /// Construct from possibly-negative sizes (negative = unset sentinel).
+    pub fn new(w: i32, h: i32, dw: i32, dh: i32) -> Self {
+        let logical_width = if w <= 0 {
+            if dw > 0 { dw } else { 1 }
         } else {
-            logical.0
+            w
         };
-        let logical_height = if logical.1 == 0 {
-            drawable.1.max(1)
+        let logical_height = if h <= 0 {
+            if dh > 0 { dh } else { 1 }
         } else {
-            logical.1
+            h
         };
-        let drawable_width = if drawable.0 == 0 {
-            logical_width
-        } else {
-            drawable.0
-        };
-        let drawable_height = if drawable.1 == 0 {
-            logical_height
-        } else {
-            drawable.1
-        };
-        let sx = drawable_width as f32 / logical_width as f32;
-        let sy = drawable_height as f32 / logical_height as f32;
+        let drawable_width = if dw <= 0 { logical_width } else { dw };
+        let drawable_height = if dh <= 0 { logical_height } else { dh };
         Self {
             logical_width,
             logical_height,
             drawable_width,
             drawable_height,
-            scale_x: sx,
-            scale_y: sy,
+            scale_x: drawable_width as f32 / logical_width as f32,
+            scale_y: drawable_height as f32 / logical_height as f32,
         }
     }
 
@@ -64,16 +56,23 @@ impl RenderMetrics {
         if scale <= 0.0 {
             return value;
         }
-        // C++ casts `value * scale + .5f` to int (truncate toward zero) and
-        // retains one drawable pixel for every positive logical extent.
         ((value as f32 * scale + 0.5) as i32).max(1)
     }
 
+    pub fn x(&self, v: i32) -> i32 {
+        Self::scale_extent(v, self.scale_x)
+    }
+    pub fn y(&self, v: i32) -> i32 {
+        Self::scale_extent(v, self.scale_y)
+    }
     pub fn scale_x(&self, value: i32) -> i32 {
         Self::scale_extent(value, self.scale_x)
     }
     pub fn scale_y(&self, value: i32) -> i32 {
         Self::scale_extent(value, self.scale_y)
+    }
+    pub fn extent(&self, v: i32, s: f32) -> i32 {
+        Self::scale_extent(v, s)
     }
     pub fn scale_font(&self, points: i32) -> i32 {
         self.scale_y(points)
@@ -110,9 +109,6 @@ pub trait VideoBackend: Send + 'static {
     fn close(&mut self);
 }
 
-pub trait VideoRenderer: Send + 'static {
-    fn render(&mut self, frame: &mut VideoFrame);
-}
 
 enum Command {
     Frame(VideoFrame),
@@ -148,7 +144,7 @@ impl<B: VideoBackend> VideoIO<B> {
             backend: Some(backend),
         }
     }
-    pub fn activate<R: VideoRenderer>(&mut self, mut renderer: R) -> Result<(), String> {
+    pub fn activate<F: FnMut(&mut VideoFrame) + Send + 'static>(&mut self, mut renderer: F) -> Result<(), String> {
         if B::requires_main_thread() {
             return Err(
                 "video backend requires the Cocoa main thread and cannot run in generic VideoIO"
@@ -162,7 +158,7 @@ impl<B: VideoBackend> VideoIO<B> {
         let active = Arc::clone(&self.active);
         let metrics = Arc::clone(&self.metrics);
         let time = Arc::clone(&self.video_time);
-        let mode = *self.mode.lock().expect("video mode poisoned");
+        let mode = *self.mode.lock().unwrap_or_else(|e| e.into_inner());
         let mut backend = self
             .backend
             .take()
@@ -175,23 +171,23 @@ impl<B: VideoBackend> VideoIO<B> {
                 return Err(error);
             }
         };
-        *metrics.lock().expect("video metrics poisoned") = opened;
+        *metrics.lock().unwrap_or_else(|e| e.into_inner()) = opened;
         self.tx = Some(tx);
         self.thread = Some(thread::spawn(move || {
             let start = Instant::now();
             while active.load(Ordering::Acquire) {
                 match rx.recv() {
                     Ok(Command::Frame(mut frame)) => {
-                        renderer.render(&mut frame);
+                        renderer(&mut frame);
                         if backend.present(&frame).is_err() {
                             active.store(false, Ordering::Release);
                         }
-                        *time.lock().expect("video time poisoned") = start.elapsed().as_secs_f64();
+                        *time.lock().unwrap_or_else(|e| e.into_inner()) = start.elapsed().as_secs_f64();
                     }
                     Ok(Command::Mode(m, reply)) => {
                         let result = backend.set_mode(m);
                         if let Ok(ref value) = result {
-                            *metrics.lock().expect("video metrics poisoned") = *value;
+                            *metrics.lock().unwrap_or_else(|e| e.into_inner()) = *value;
                         }
                         let _ = reply.send(result);
                     }
@@ -213,9 +209,9 @@ impl<B: VideoBackend> VideoIO<B> {
     pub fn set_video_mode(&self, fullscreen: bool) -> Result<RenderMetrics, String> {
         let mode = VideoMode {
             fullscreen,
-            windowed_size: self.mode.lock().expect("video mode poisoned").windowed_size,
+            windowed_size: self.mode.lock().unwrap_or_else(|e| e.into_inner()).windowed_size,
         };
-        *self.mode.lock().expect("video mode poisoned") = mode;
+        *self.mode.lock().unwrap_or_else(|e| e.into_inner()) = mode;
         let (tx, rx) = mpsc::channel();
         self.tx
             .as_ref()
@@ -228,13 +224,13 @@ impl<B: VideoBackend> VideoIO<B> {
         self.active.load(Ordering::Acquire)
     }
     pub fn video_time(&self) -> f64 {
-        *self.video_time.lock().expect("video time poisoned")
+        *self.video_time.lock().unwrap_or_else(|e| e.into_inner())
     }
     pub fn render_metrics(&self) -> RenderMetrics {
-        *self.metrics.lock().expect("video metrics poisoned")
+        *self.metrics.lock().unwrap_or_else(|e| e.into_inner())
     }
     pub fn fullscreen(&self) -> bool {
-        self.mode.lock().expect("video mode poisoned").fullscreen
+        self.mode.lock().unwrap_or_else(|e| e.into_inner()).fullscreen
     }
     pub fn close(&mut self) {
         self.active.store(false, Ordering::Release);
@@ -242,7 +238,7 @@ impl<B: VideoBackend> VideoIO<B> {
             let _ = tx.send(Command::Stop);
         }
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            crate::event::join_with_timeout(thread);
         }
     }
 }
@@ -274,12 +270,6 @@ mod tests {
         }
         fn close(&mut self) {}
     }
-    struct Identity;
-    impl VideoRenderer for Identity {
-        fn render(&mut self, f: &mut VideoFrame) {
-            f.timestamp += 1.0;
-        }
-    }
     #[test]
     fn lifecycle_mode_and_frame_flow() {
         let mut v = VideoIO::new(
@@ -289,7 +279,7 @@ mod tests {
             },
             (640, 480),
         );
-        v.activate(Identity).unwrap();
+        v.activate(|f| f.timestamp += 1.0).unwrap();
         v.submit(VideoFrame {
             pixels: vec![],
             width: 0,
@@ -326,7 +316,7 @@ mod tests {
     #[test]
     fn rejects_main_thread_backend_before_starting_worker() {
         let mut video = VideoIO::new(MainThreadOnly, (640, 480));
-        let error = video.activate(Identity).unwrap_err();
+        let error = video.activate(|f| f.timestamp += 1.0).unwrap_err();
         assert!(error.contains("requires the Cocoa main thread"));
         assert!(!video.is_active());
     }

@@ -161,7 +161,7 @@ impl AudioBlock {
     }
     pub fn serialize<W: Write>(&self, w: &mut W) -> io::Result<()> {
         w.write_all(b"FWB1")?;
-        write_u64(w, self.total_len() as u64)?;
+        w.write_all(&self.total_len().to_le_bytes())?;
         for i in 0..self.total_len() {
             w.write_all(&self.sample(i).unwrap().to_le_bytes())?;
         }
@@ -173,7 +173,9 @@ impl AudioBlock {
         if &magic != b"FWB1" {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid block"));
         }
-        let n = read_u64(r)? as usize;
+        let mut n_buf = [0; 8];
+        r.read_exact(&mut n_buf)?;
+        let n = u64::from_le_bytes(n_buf) as usize;
         let mut b = Self::new(n);
         for s in &mut b.samples {
             let mut x = [0; 4];
@@ -195,20 +197,11 @@ impl Preallocated for AudioBlock {
     }
 }
 
-fn write_u64<W: Write>(w: &mut W, n: u64) -> io::Result<()> {
-    w.write_all(&n.to_le_bytes())
-}
-fn read_u64<R: Read>(r: &mut R) -> io::Result<u64> {
-    let mut b = [0; 8];
-    r.read_exact(&mut b)?;
-    Ok(u64::from_le_bytes(b))
-}
 
 pub struct AudioBlockIterator<'a> {
     pub block: &'a mut AudioBlock,
     pub position: usize,
     pub fragment_size: usize,
-    stopped: bool,
 }
 impl<'a> AudioBlockIterator<'a> {
     pub fn new(block: &'a mut AudioBlock, fragment_size: usize) -> Self {
@@ -216,7 +209,6 @@ impl<'a> AudioBlockIterator<'a> {
             block,
             position: 0,
             fragment_size,
-            stopped: false,
         }
     }
     pub fn jump(&mut self, offset: usize) {
@@ -288,12 +280,6 @@ impl<'a> AudioBlockIterator<'a> {
     }
     pub fn next_fragment(&mut self) {
         self.position = (self.position + self.fragment_size).min(self.block.total_len());
-    }
-    pub fn stop(&mut self) {
-        self.stopped = true;
-    }
-    pub fn stopped(&self) -> bool {
-        self.stopped
     }
 }
 

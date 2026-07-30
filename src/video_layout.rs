@@ -31,45 +31,6 @@ impl FloFont {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct FloStringList {
-    pub str: String,
-    pub str2: Option<String>,
-    pub next: Option<Box<FloStringList>>,
-}
-impl FloStringList {
-    pub fn new(str: impl Into<String>, str2: Option<String>) -> Self {
-        Self {
-            str: str.into(),
-            str2,
-            next: None,
-        }
-    }
-    pub fn push(&mut self, item: FloStringList) {
-        match &mut self.next {
-            Some(next) => next.push(item),
-            None => self.next = Some(Box::new(item)),
-        }
-    }
-    pub fn get(&self, index: usize, column: usize) -> Option<&str> {
-        let mut cur = self;
-        for _ in 0..index {
-            cur = cur.next.as_deref()?;
-        }
-        match column {
-            0 => Some(&cur.str),
-            1 => cur.str2.as_deref(),
-            _ => None,
-        }
-    }
-    pub fn len(&self) -> usize {
-        1 + self.next.as_deref().map_or(0, Self::len)
-    }
-    pub fn is_empty(&self) -> bool {
-        false
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FloLayoutBox {
     pub left: i32,
@@ -224,13 +185,5 @@ mod tests {
                 .width,
             8
         );
-    }
-    #[test]
-    fn string_list_preserves_two_columns() {
-        let mut list = FloStringList::new("a", Some("b".into()));
-        list.push(FloStringList::new("c", None));
-        assert_eq!(list.len(), 2);
-        assert_eq!(list.get(1, 0), Some("c"));
-        assert_eq!(list.get(0, 1), Some("b"));
     }
 }

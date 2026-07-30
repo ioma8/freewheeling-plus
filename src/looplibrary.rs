@@ -8,25 +8,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use crate::core::LoopTrayItem;
+use crate::block;
 
 pub const OUTPUT_LOOP_NAME: &str = "loop";
 pub const OUTPUT_STREAM_NAME: &str = "live";
 pub const OUTPUT_TIMING_EXT: &str = ".wav.usx";
 pub const OUTPUT_DATA_EXT: &str = ".xml";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Codec {
-    #[default]
-    Unknown,
-    Vorbis,
-    Wav,
-    Flac,
-    Au,
-}
-
 pub trait LibraryRuntime {
     fn library_path(&self) -> &Path;
-    fn audio_extensions(&self) -> &[(&str, Codec)];
+    fn audio_extensions(&self) -> &[(&str, block::Codec)];
 }
 
 pub trait LoopSource {
@@ -36,7 +27,7 @@ pub trait LoopSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LibraryFileInfo {
     pub exists: bool,
-    pub codec: Codec,
+    pub codec: block::Codec,
     pub name: Option<PathBuf>,
 }
 
@@ -44,7 +35,7 @@ impl Default for LibraryFileInfo {
     fn default() -> Self {
         Self {
             exists: false,
-            codec: Codec::Unknown,
+            codec: block::Codec::Unknown,
             name: None,
         }
     }
@@ -82,11 +73,11 @@ impl LibraryHelper {
     }
 
     pub fn data_filename_from_stub(stub: &Path) -> LibraryFileInfo {
-        find_file_extensions(stub, &[(OUTPUT_DATA_EXT, Codec::Unknown)])
+        find_file_extensions(stub, &[(OUTPUT_DATA_EXT, block::Codec::Unknown)])
     }
 }
 
-fn find_file_extensions(stub: &Path, exts: &[(&str, Codec)]) -> LibraryFileInfo {
+fn find_file_extensions(stub: &Path, exts: &[(&str, block::Codec)]) -> LibraryFileInfo {
     for &(ext, codec) in exts {
         let exact = PathBuf::from(format!("{}{}", stub.display(), ext));
         if exact.is_file() {
@@ -180,13 +171,13 @@ mod tests {
     use super::*;
     struct R {
         path: PathBuf,
-        exts: Vec<(&'static str, Codec)>,
+        exts: Vec<(&'static str, block::Codec)>,
     }
     impl LibraryRuntime for R {
         fn library_path(&self) -> &Path {
             &self.path
         }
-        fn audio_extensions(&self) -> &[(&str, Codec)] {
+        fn audio_extensions(&self) -> &[(&str, block::Codec)] {
             &self.exts
         }
     }
@@ -202,7 +193,7 @@ mod tests {
         fs::create_dir_all(&d).unwrap();
         let r = R {
             path: d.clone(),
-            exts: vec![(".wav", Codec::Wav)],
+            exts: vec![(".wav", block::Codec::Wav)],
         };
         assert_eq!(
             LibraryHelper::stubname_from_loop(&r, &L),
@@ -226,7 +217,7 @@ mod tests {
         fs::create_dir_all(&d).unwrap();
         let r = R {
             path: d.clone(),
-            exts: vec![(".wav", Codec::Wav), (".ogg", Codec::Vorbis)],
+            exts: vec![(".wav", block::Codec::Wav), (".ogg", block::Codec::Vorbis)],
         };
         // There is no exact `loop-HASH.wav`; both are wildcard candidates.
         // C++ tries WAV before Vorbis and glob sorts `-a` before `-z`.
@@ -234,7 +225,7 @@ mod tests {
         fs::write(d.join("loop-HASH-a.wav"), b"x").unwrap();
         fs::write(d.join("loop-HASH-0.ogg"), b"x").unwrap();
         let found = LibraryHelper::loop_filename_from_stub(&r, &d.join("loop-HASH"));
-        assert_eq!(found.codec, Codec::Wav);
+        assert_eq!(found.codec, block::Codec::Wav);
         assert_eq!(found.name, Some(d.join("loop-HASH-a.wav")));
         let _ = fs::remove_dir_all(d);
     }
