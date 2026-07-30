@@ -367,8 +367,8 @@ impl MainThreadVideo {
         renderer.metrics = crate::videoio_displays::RenderMetrics::new(
             size.0 as i32,
             size.1 as i32,
-            drawable_size.0 as i32,
-            drawable_size.1 as i32,
+            drawable_size.0,
+            drawable_size.1,
         );
         Ok(Self {
             backend,

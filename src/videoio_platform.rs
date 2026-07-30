@@ -29,7 +29,7 @@ pub mod native_ui_scene;
 /// immediately before a frame is presented.  The default methods are real
 /// hooks (rather than no-op implementations): a backend must opt into the
 /// event loop explicitly.
-
+///
 /// The logical scene sent to the display/layout adapters.
 pub struct DisplayScene {
     pub displays: Vec<Box<dyn Display>>,

@@ -304,7 +304,7 @@ impl Drop for OscReceiver {
 fn padded_string(out: &mut Vec<u8>, value: &str) {
     out.extend(value.as_bytes());
     out.push(0);
-    while !out.len().is_multiple_of(4) {
+    while out.len() % 4 != 0 {
         out.push(0);
     }
 }

@@ -2987,7 +2987,7 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                             if slot.pulse_synced
                                 && slot.pulse_beats != 0
                                 && slot.len != 0
-                                && self.pulse_long_count.is_multiple_of(slot.pulse_beats) =>
+                                && self.pulse_long_count % slot.pulse_beats == 0 =>
                         {
                             let expected = pulse_synced_loop_position(
                                 self.pulse_frames,
@@ -3434,7 +3434,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                     if denominator > 0.0001 {
                         let correlation = (dot / denominator).abs();
                         let candidate_offset = sample
-                            .saturating_sub(CALIBRATION_PULSE_FRAMES as u64 - 1)
+                            .saturating_sub(CALIBRATION_PULSE_FRAMES - 1)
                             .saturating_sub(expected);
                         if correlation >= 0.80
                             && calibration.earliest_strong_offset.is_none()
@@ -3527,7 +3527,7 @@ mod tests {
 
     #[test]
     fn command_queue_can_clear_every_supported_loop() {
-        assert!(DEFAULT_COMMAND_CAPACITY >= MAX_RUNTIME_LOOPS);
+        const { assert!(DEFAULT_COMMAND_CAPACITY >= MAX_RUNTIME_LOOPS) };
     }
     use crate::audioio::JackPosition;
     use crate::block::Codec;
