@@ -42,7 +42,6 @@ pub trait AudioProcessor: Send {
     fn process(&mut self, callback: &mut AudioCallback<'_>);
 }
 
-
 /// Owned, mutable realtime callback.  Backends invoke it from exactly one
 /// playback thread at a time.
 pub type AudioCallbackFn = Box<dyn for<'a> FnMut(&mut AudioCallback<'a>) + Send + 'static>;
@@ -117,7 +116,11 @@ pub trait AudioBackend: Send {
 
     /// Send a MIDI event through the backend (JACK). Returns error when
     /// the backend does not support MIDI output integrated with audio.
-    fn send_midi(&mut self, _msg: crate::midiio::MidiPortMessage, _offset: NFrames) -> Result<(), String> {
+    fn send_midi(
+        &mut self,
+        _msg: crate::midiio::MidiPortMessage,
+        _offset: NFrames,
+    ) -> Result<(), String> {
         Err("MIDI not supported by this audio backend".into())
     }
 }
@@ -134,7 +137,8 @@ pub struct BackendInfo {
 /// constructed from a common type regardless of which backend is selected
 /// at startup.
 pub enum AnyAudioBackend {
-    /// Cross-platform CPAL backend (default on Linux, fallback on macOS).
+    /// Cross-platform CPAL backend (default on Linux; explicit override on
+    /// macOS, where it is the split-clock fallback).
     Cpal(Box<crate::audio_native_cpal::CpalAudioBackend>),
     /// JACK backend (Linux and macOS).
     #[cfg(all(

@@ -273,7 +273,10 @@ impl AudioRecoveryController {
         }
     }
 
-    fn poll<A: RecoverableAudio>(&mut self, audio: &mut A, now: Instant) -> Result<(), String> {
+    /// Returns `Ok(true)` when this call performed a successful recovery, so
+    /// the owner can re-seed route-dependent DSP state (recording alignment)
+    /// and queue a fresh latency calibration for the new route.
+    fn poll<A: RecoverableAudio>(&mut self, audio: &mut A, now: Instant) -> Result<bool, String> {
         if self.exhausted {
             return Err(format!(
                 "audio recovery exhausted: {}",
@@ -284,10 +287,10 @@ impl AudioRecoveryController {
             self.next_retry = None;
             self.consecutive_failures = 0;
             self.last_error = None;
-            return Ok(());
+            return Ok(false);
         }
         if self.next_retry.is_some_and(|deadline| now < deadline) {
-            return Ok(());
+            return Ok(false);
         }
         self.total_attempts = self.total_attempts.saturating_add(1);
         match audio.recover() {
@@ -295,7 +298,7 @@ impl AudioRecoveryController {
                 self.consecutive_failures = 0;
                 self.next_retry = None;
                 self.last_error = None;
-                Ok(())
+                Ok(true)
             }
             Err(error) => {
                 self.consecutive_failures = self.consecutive_failures.saturating_add(1);
@@ -312,7 +315,7 @@ impl AudioRecoveryController {
                     .saturating_mul(multiplier)
                     .min(RECOVERY_MAX_BACKOFF);
                 self.next_retry = Some(now + delay);
-                Ok(())
+                Ok(false)
             }
         }
     }
@@ -1023,9 +1026,29 @@ impl NativeRuntime {
         let RuntimeResources {
             audio,
             audio_recovery,
+            controls,
             ..
         } = &mut *r;
-        audio_recovery.poll(audio.as_mut().ok_or("audio is closed")?, now)
+        let audio = audio.as_mut().ok_or("audio is closed")?;
+        let recovered = audio_recovery.poll(audio, now)?;
+        if recovered {
+            // The backend destroyed the old route (and its owned aggregate),
+            // created a fresh route, and re-activated the duplex callback
+            // before returning. The alignment measured on the old route is
+            // stale: re-seed it with the new route's driver estimate, then
+            // measure the physical round trip of the new aggregate device.
+            let alignment = audio.input_latency_frames();
+            if let Some(controls) = controls.as_mut() {
+                let _ = controls.try_command(RuntimeCommand::SetRecordingAlignmentFrames {
+                    frames: alignment,
+                });
+                let _ = controls.try_command(RuntimeCommand::CalibrateLatency);
+            }
+            eprintln!(
+                "[AUDIO-DIAG] audio: route recreated; recalibrating round-trip latency"
+            );
+        }
+        Ok(())
     }
 
     fn report_diagnostics(r: &mut RuntimeResources, now: Instant) {
@@ -3305,9 +3328,37 @@ impl NativeStartupAdapter for NativeRuntime {
                     .map_err(|_| "CoreAudio setup thread panicked".to_string())?;
                 r.audio = Some(audio);
                 result?;
-                // Measure the complete output-to-microphone path once the
-                // realtime callback is actually running. The DSP keeps the
-                // result as the alignment for subsequently recorded loops.
+                // Measure the complete output-to-microphone path only after
+                // the duplex callback has actually produced input and output
+                // frames; probing before the aggregate is capturing measures
+                // silence. Bounded so startup can never hang. JACK exposes no
+                // status snapshot and is left ungated.
+                let callback_deadline = Instant::now() + Duration::from_secs(3);
+                loop {
+                    let callback_healthy = match r
+                        .audio
+                        .as_ref()
+                        .and_then(|audio| audio.backend().status())
+                    {
+                        None => true,
+                        Some(status) => {
+                            status.capture_callbacks > 0 && status.playback_callbacks > 0
+                        }
+                    };
+                    if callback_healthy || Instant::now() >= callback_deadline {
+                        break;
+                    }
+                    let state = Self::ui_scene_state(&r);
+                    if let Some(video) = r.video.as_mut() {
+                        video.update(Instant::now(), state)?;
+                    }
+                    if let Some(input) = r.input.as_mut() {
+                        let _ = input.poll();
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                // The DSP keeps the measured result as the alignment for
+                // subsequently recorded loops.
                 r.controls
                     .as_mut()
                     .ok_or("DSP controls are closed")?
@@ -4283,20 +4334,23 @@ mod tests {
             processor_generation: 41,
         };
 
-        controller.poll(&mut audio, start).unwrap();
+        // Failed attempts and in-backoff polls report no completed recovery.
+        assert!(!controller.poll(&mut audio, start).unwrap());
         let status = controller.status(start);
         assert_eq!(status.consecutive_failures, 1);
         assert_eq!(status.retry_in, Some(RECOVERY_INITIAL_BACKOFF));
-        controller
+        assert!(!controller
             .poll(&mut audio, start + Duration::from_millis(99))
-            .unwrap();
+            .unwrap());
         assert_eq!(audio.attempts, 1);
-        controller
+        assert!(!controller
             .poll(&mut audio, start + Duration::from_millis(100))
-            .unwrap();
-        controller
+            .unwrap());
+        // The attempt that finally succeeds reports `true` so the owner can
+        // re-seed route-dependent DSP state and recalibrate latency.
+        assert!(controller
             .poll(&mut audio, start + Duration::from_millis(300))
-            .unwrap();
+            .unwrap());
 
         assert_eq!(audio.attempts, 3);
         assert_eq!(audio.processor_generation, 41);
@@ -4323,7 +4377,7 @@ mod tests {
         let mut terminal = None;
         for _ in 0..RECOVERY_MAX_ATTEMPTS {
             match controller.poll(&mut audio, now) {
-                Ok(()) => {
+                Ok(_) => {
                     let delay = controller.status(now).retry_in.unwrap();
                     now += delay;
                 }

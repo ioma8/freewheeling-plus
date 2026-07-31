@@ -582,6 +582,7 @@ version = "0.1.0"
 dependencies = [
  "alsa",
  "claxon",
+ "core-foundation",
  "coreaudio-sys",
  "cpal",
  "crossbeam-queue",

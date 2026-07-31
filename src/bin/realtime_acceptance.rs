@@ -1,6 +1,6 @@
 //! Real-hardware realtime acceptance runner.
 
-use freewheeling_plus::audioio::{AudioBackend, AudioCallback};
+use freewheeling_plus::audioio::{AudioBackend, AudioCallback, AudioCallbackFn, BackendInfo};
 use freewheeling_plus::realtime_guard::{
     CallbackCountingAllocator, RealtimeMetrics, reset_violation_counters,
 };
@@ -78,7 +78,13 @@ fn run() -> Result<(), String> {
             .sample_rss()
             .map_err(|error| format!("cannot sample resident memory: {error}"))?;
     }
+    // Opt-in macOS aggregate contract: capture and playback frame counts must
+    // stay matched with zero dropped/fabricated input frames, and the private
+    // aggregate must disappear once FreeWheeling closes it.
+    let aggregate_device = capture_aggregate_device(&backend);
+    let stream_diagnostics = capture_stream_diagnostics(&backend);
     backend.close();
+    verify_aggregate_cleanup(aggregate_device, stream_diagnostics)?;
 
     let result = metrics.snapshot(info.sample_rate, info.buffer_size);
     if result.callback_count == 0 {
@@ -286,18 +292,70 @@ fn print_device_diagnostics(requested: RequestedFormat) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(all(target_os = "linux", feature = "jack")))]
-type NativeBackend = freewheeling_plus::audio_native_cpal::CpalAudioBackend;
-
-#[cfg(not(all(target_os = "linux", feature = "jack")))]
-fn native_backend(requested: RequestedFormat) -> Result<NativeBackend, String> {
-    Ok(NativeBackend::new(
-        Default::default(),
-        cpal_options(requested),
-    ))
+/// macOS acceptance backend. `FWP_ACCEPTANCE_BACKEND=audiounit` (opt-in)
+/// exercises the private CoreAudio Aggregate Device path that the default
+/// MacBook mic/speaker route uses; `cpal` (default) keeps the split-clock
+/// fallback behavior.
+#[cfg(target_os = "macos")]
+enum NativeBackend {
+    Cpal(Box<freewheeling_plus::audio_native_cpal::CpalAudioBackend>),
+    AudioUnit(Box<freewheeling_plus::macos_audio_unit::MacosAudioUnitBackend>),
 }
 
-#[cfg(not(all(target_os = "linux", feature = "jack")))]
+#[cfg(target_os = "macos")]
+impl NativeBackend {
+    fn open(&mut self, name: &str) -> Result<BackendInfo, String> {
+        match self {
+            NativeBackend::Cpal(backend) => backend.open(name),
+            NativeBackend::AudioUnit(backend) => backend.open(name),
+        }
+    }
+
+    fn activate(&mut self, callback: AudioCallbackFn) -> Result<(), String> {
+        match self {
+            NativeBackend::Cpal(backend) => backend.activate(callback),
+            NativeBackend::AudioUnit(backend) => backend.activate(callback),
+        }
+    }
+
+    fn close(&mut self) {
+        match self {
+            NativeBackend::Cpal(backend) => backend.close(),
+            NativeBackend::AudioUnit(backend) => backend.close(),
+        }
+    }
+
+    fn set_realtime_metrics(&mut self, metrics: Arc<RealtimeMetrics>) {
+        match self {
+            NativeBackend::Cpal(backend) => backend.set_realtime_metrics(metrics),
+            NativeBackend::AudioUnit(backend) => backend.set_realtime_metrics(metrics),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn native_backend(requested: RequestedFormat) -> Result<NativeBackend, String> {
+    let kind = std::env::var("FWP_ACCEPTANCE_BACKEND").unwrap_or_else(|_| "cpal".into());
+    match kind.to_lowercase().as_str() {
+        "cpal" => Ok(NativeBackend::Cpal(Box::new(
+            freewheeling_plus::audio_native_cpal::CpalAudioBackend::new(
+                Default::default(),
+                cpal_options(requested),
+            ),
+        ))),
+        "audiounit" => Ok(NativeBackend::AudioUnit(Box::new(
+            freewheeling_plus::macos_audio_unit::MacosAudioUnitBackend::new(
+                Default::default(),
+                cpal_options(requested),
+            ),
+        ))),
+        other => Err(format!(
+            "unknown FWP_ACCEPTANCE_BACKEND {other:?} (expected \"cpal\" or \"audiounit\")"
+        )),
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn print_device_diagnostics(requested: RequestedFormat) -> Result<(), String> {
     use freewheeling_plus::audio_native_cpal::CpalAudioBackend;
 
@@ -317,6 +375,186 @@ fn print_device_diagnostics(requested: RequestedFormat) -> Result<(), String> {
             device.id, device.name, device.is_default
         );
     }
+    Ok(())
+}
+
+/// Aggregate device owned by the backend, for the opt-in macOS cleanup check.
+#[cfg(target_os = "macos")]
+fn capture_aggregate_device(backend: &NativeBackend) -> Option<u32> {
+    match backend {
+        NativeBackend::AudioUnit(backend) => backend.owned_aggregate_device(),
+        NativeBackend::Cpal(_) => None,
+    }
+}
+
+/// Reliable-path frame diagnostics (AudioUnit aggregate route only).
+#[cfg(target_os = "macos")]
+fn capture_stream_diagnostics(
+    backend: &NativeBackend,
+) -> Option<freewheeling_plus::audio_native_cpal::CpalStreamDiagnostics> {
+    match backend {
+        NativeBackend::AudioUnit(backend) => Some(backend.status().stream),
+        NativeBackend::Cpal(_) => None,
+    }
+}
+
+/// Verify the aggregate acceptance contract after `close`: every captured
+/// frame reached the DSP exactly once (matched capture/playback counts, zero
+/// missing/trimmed/mismatched frames) and the private aggregate device has
+/// disappeared from the HAL device list.
+#[cfg(target_os = "macos")]
+fn verify_aggregate_cleanup(
+    aggregate_device: Option<u32>,
+    diagnostics: Option<freewheeling_plus::audio_native_cpal::CpalStreamDiagnostics>,
+) -> Result<(), String> {
+    let Some(device) = aggregate_device else {
+        return Ok(());
+    };
+    let Some(stream) = diagnostics else {
+        return Err("AudioUnit acceptance run produced no stream diagnostics".into());
+    };
+    if stream.capture_frames != stream.playback_frames {
+        return Err(format!(
+            "capture/playback frame counts diverged: capture={} playback={}",
+            stream.capture_frames, stream.playback_frames
+        ));
+    }
+    if stream.missing_frames != 0 || stream.trimmed_frames != 0 {
+        return Err(format!(
+            "duplex callback dropped or fabricated frames: missing={} trimmed={}",
+            stream.missing_frames, stream.trimmed_frames
+        ));
+    }
+    if stream.frame_size_mismatches != 0 {
+        return Err(format!(
+            "duplex callback observed {} buffer size mismatches",
+            stream.frame_size_mismatches
+        ));
+    }
+    // Destruction is asynchronous inside the HAL; poll for disappearance.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let present = hal_device_ids()?.contains(&device);
+        if !present {
+            eprintln!(
+                "[AUDIO-DIAG] acceptance: private aggregate device {device} removed after close"
+            );
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "private aggregate device {device} still present after close"
+            ));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn hal_device_ids() -> Result<Vec<u32>, String> {
+    use coreaudio_sys::{
+        AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectPropertyAddress,
+        AudioObjectID,
+    };
+    // kAudioObjectSystemObject, defined locally to avoid SDK binding churn.
+    const K_AUDIO_OBJECT_SYSTEM_OBJECT: u32 = 1;
+    const K_AUDIO_HARDWARE_PROPERTY_DEVICES: u32 = 0x6465_7623; // 'dev#'
+    let address = AudioObjectPropertyAddress {
+        mSelector: K_AUDIO_HARDWARE_PROPERTY_DEVICES,
+        mScope: 0,
+        mElement: 0,
+    };
+    let mut size = 0u32;
+    // SAFETY: first call with a null data pointer only requests the size.
+    let status = unsafe {
+        AudioObjectGetPropertyDataSize(
+            K_AUDIO_OBJECT_SYSTEM_OBJECT,
+            &address,
+            0,
+            std::ptr::null(),
+            &mut size,
+        )
+    };
+    if status != 0 {
+        return Err(format!(
+            "cannot query CoreAudio device list size (OSStatus {status})"
+        ));
+    }
+    let count = size as usize / std::mem::size_of::<AudioObjectID>();
+    let mut ids = vec![0u32; count];
+    // SAFETY: the buffer matches the size CoreAudio reported.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            K_AUDIO_OBJECT_SYSTEM_OBJECT,
+            &address,
+            0,
+            std::ptr::null(),
+            &mut size,
+            ids.as_mut_ptr().cast(),
+        )
+    };
+    if status != 0 {
+        return Err(format!(
+            "cannot query CoreAudio device list (OSStatus {status})"
+        ));
+    }
+    Ok(ids)
+}
+
+#[cfg(not(any(target_os = "macos", all(target_os = "linux", feature = "jack"))))]
+type NativeBackend = freewheeling_plus::audio_native_cpal::CpalAudioBackend;
+
+#[cfg(not(any(target_os = "macos", all(target_os = "linux", feature = "jack"))))]
+fn native_backend(requested: RequestedFormat) -> Result<NativeBackend, String> {
+    Ok(NativeBackend::new(
+        Default::default(),
+        cpal_options(requested),
+    ))
+}
+
+#[cfg(not(any(target_os = "macos", all(target_os = "linux", feature = "jack"))))]
+fn print_device_diagnostics(requested: RequestedFormat) -> Result<(), String> {
+    use freewheeling_plus::audio_native_cpal::CpalAudioBackend;
+
+    eprintln!(
+        "realtime acceptance request: CPAL, sample_rate={} Hz, buffer_frames={}",
+        requested.sample_rate, requested.buffer_frames
+    );
+    for device in CpalAudioBackend::discover_input_devices()? {
+        eprintln!(
+            "CPAL input device: id={:?}, name={:?}, default={}",
+            device.id, device.name, device.is_default
+        );
+    }
+    for device in CpalAudioBackend::discover_output_devices()? {
+        eprintln!(
+            "CPAL output device: id={:?}, name={:?}, default={}",
+            device.id, device.name, device.is_default
+        );
+    }
+    Ok(())
+}
+
+/// Aggregate device owned by the backend, for the opt-in cleanup check.
+#[cfg(not(target_os = "macos"))]
+fn capture_aggregate_device(_backend: &NativeBackend) -> Option<u32> {
+    None
+}
+
+/// Reliable-path frame diagnostics (macOS AudioUnit aggregate route only).
+#[cfg(not(target_os = "macos"))]
+fn capture_stream_diagnostics(
+    _backend: &NativeBackend,
+) -> Option<freewheeling_plus::audio_native_cpal::CpalStreamDiagnostics> {
+    None
+}
+
+/// Aggregate acceptance verification is macOS/AudioUnit-specific.
+#[cfg(not(target_os = "macos"))]
+fn verify_aggregate_cleanup(
+    _aggregate_device: Option<u32>,
+    _diagnostics: Option<freewheeling_plus::audio_native_cpal::CpalStreamDiagnostics>,
+) -> Result<(), String> {
     Ok(())
 }
 

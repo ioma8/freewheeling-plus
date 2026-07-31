@@ -1951,6 +1951,16 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
             return;
         }
         match command {
+            // While the latency probe is active its chirps are inside the
+            // rolling input history and the live input. Accepting a recording
+            // now would bake probe audio into the new loop through the
+            // pre-downbeat prefill, so reject the gesture until calibration
+            // finishes (a few seconds after startup or route recreation).
+            RuntimeCommand::Record { .. } | RuntimeCommand::Overdub { .. }
+                if self.latency_calibration.is_some() =>
+            {
+                self.send_status(RuntimeStatus::CommandRejected(command));
+            }
             RuntimeCommand::Record { slot } => {
                 self.stop_recording(true);
                 let index = slot as usize;
@@ -2840,6 +2850,7 @@ impl RuntimeCommand {
         }
     }
 }
+
 
 impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
     fn process(&mut self, callback: &mut AudioCallback<'_>) {
@@ -3734,53 +3745,64 @@ mod tests {
 
     #[test]
     fn records_triggers_mutes_overdubs_and_erases() {
-        let (mut processor, mut controls) = processor(0.0);
-        controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
-            .unwrap();
-        run(&mut processor, &[1.0, 0.5], &[0.25, -0.25]);
-        controls.try_command(RuntimeCommand::StopRecord).unwrap();
-        let played = run(&mut processor, &[0.0; 2], &[0.0; 2]);
-        // The production master stage follows the C++ limiter: its final
-        // format guard caps a full-scale sample at 0.99, while the gain
-        // envelope only changes by a fraction of a percent here.
-        assert_eq!(played[0][0], 0.99);
-        assert!((played[0][1] - 0.5).abs() < 0.001);
-        controls
-            .try_command(RuntimeCommand::Overdub {
-                slot: 0,
-                feedback: 0.5,
-                gain: 1.0,
+        // Debug-build DSP frames (the apply_command match arms) can
+        // exceed a megabyte, so run every DSP test on a dedicated
+        // 8 MiB stack; the default 2 MiB test-thread stack leaves
+        // these tests inside codegen luck.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                        let (mut processor, mut controls) = processor(0.0);
+                        controls
+                            .try_command(RuntimeCommand::Record { slot: 0 })
+                            .unwrap();
+                        run(&mut processor, &[1.0, 0.5], &[0.25, -0.25]);
+                        controls.try_command(RuntimeCommand::StopRecord).unwrap();
+                        let played = run(&mut processor, &[0.0; 2], &[0.0; 2]);
+                        // The production master stage follows the C++ limiter: its final
+                        // format guard caps a full-scale sample at 0.99, while the gain
+                        // envelope only changes by a fraction of a percent here.
+                        assert_eq!(played[0][0], 0.99);
+                        assert!((played[0][1] - 0.5).abs() < 0.001);
+                        controls
+                            .try_command(RuntimeCommand::Overdub {
+                                slot: 0,
+                                feedback: 0.5,
+                                gain: 1.0,
+                            })
+                            .unwrap();
+                        let overdubbed = run(&mut processor, &[0.5, 0.5], &[0.0, 0.0]);
+                        assert_eq!(overdubbed[0][0], 0.99);
+                        // C++ outputs the old loop fragment before recording the overdubbed
+                        // replacement, so its second sample is the original 0.5, not 0.75.
+                        assert!((overdubbed[0][1] - 0.5).abs() < 0.002);
+                        controls.try_command(RuntimeCommand::StopRecord).unwrap();
+                        controls
+                            .try_command(RuntimeCommand::Mute {
+                                slot: 0,
+                                muted: true,
+                            })
+                            .unwrap();
+                        assert_eq!(run(&mut processor, &[0.0; 2], &[0.0; 2])[0], [0.0; 2]);
+                        controls
+                            .try_command(RuntimeCommand::Erase { slot: 0 })
+                            .unwrap();
+                        controls
+                            .try_command(RuntimeCommand::RequestSnapshot)
+                            .unwrap();
+                        run(&mut processor, &[], &[]);
+                        let snapshot = loop {
+                            match controls.try_status().expect("expected status") {
+                                RuntimeStatus::Snapshot(snapshot) => break snapshot,
+                                RuntimeStatus::LoopCompleted { slot: 0 } => {}
+                                other => panic!("unexpected status: {other:?}"),
+                            }
+                        };
+                        assert_eq!(snapshot.loops[0].mode, LoopMode::Empty);
             })
+            .unwrap()
+            .join()
             .unwrap();
-        let overdubbed = run(&mut processor, &[0.5, 0.5], &[0.0, 0.0]);
-        assert_eq!(overdubbed[0][0], 0.99);
-        // C++ outputs the old loop fragment before recording the overdubbed
-        // replacement, so its second sample is the original 0.5, not 0.75.
-        assert!((overdubbed[0][1] - 0.5).abs() < 0.002);
-        controls.try_command(RuntimeCommand::StopRecord).unwrap();
-        controls
-            .try_command(RuntimeCommand::Mute {
-                slot: 0,
-                muted: true,
-            })
-            .unwrap();
-        assert_eq!(run(&mut processor, &[0.0; 2], &[0.0; 2])[0], [0.0; 2]);
-        controls
-            .try_command(RuntimeCommand::Erase { slot: 0 })
-            .unwrap();
-        controls
-            .try_command(RuntimeCommand::RequestSnapshot)
-            .unwrap();
-        run(&mut processor, &[], &[]);
-        let snapshot = loop {
-            match controls.try_status().expect("expected status") {
-                RuntimeStatus::Snapshot(snapshot) => break snapshot,
-                RuntimeStatus::LoopCompleted { slot: 0 } => {}
-                other => panic!("unexpected status: {other:?}"),
-            }
-        };
-        assert_eq!(snapshot.loops[0].mode, LoopMode::Empty);
     }
 
     #[test]
@@ -3927,29 +3949,164 @@ mod tests {
     }
 
     #[test]
-    fn selected_pulse_uses_live_completed_loop_length() {
+    fn alignment_is_recalibrated_after_route_recreation() {
+        // The runtime re-seeds the alignment for a recreated route and queues
+        // a fresh calibration; the DSP must replace the provisional value with
+        // the newly measured round trip.
+        let (mut processor, mut controls) = processor(0.0);
+        controls
+            .try_command(RuntimeCommand::SetRecordingAlignmentFrames { frames: 42 })
+            .unwrap();
+        controls
+            .try_command(RuntimeCommand::CalibrateLatency)
+            .unwrap();
+        // Commands are applied by the audio callback; drain them.
+        run(&mut processor, &[], &[]);
+        assert_eq!(processor.recording_alignment_frames, 42);
+        let first_sample = processor
+            .latency_calibration
+            .as_ref()
+            .expect("calibration queued")
+            .first_sample;
+        assert_eq!(first_sample, u64::from(processor.sample_rate) / 10);
+
+        let spacing = u64::from(processor.sample_rate) * CALIBRATION_PULSE_SPACING_MILLIS / 1_000;
+        let delay = 240_u64;
+        let end = spacing * CALIBRATION_PULSES as u64 + u64::from(processor.sample_rate) / 2 + 1;
+        for sample in 0..end {
+            let pulse_index = sample / spacing;
+            let level = (0..CALIBRATION_PULSE_FRAMES).find_map(|offset| {
+                let delayed = sample.saturating_sub(first_sample + spacing * pulse_index);
+                (delayed == delay + offset).then(|| {
+                    calibration_tone_sample_at(offset, processor.sample_rate) * 0.08
+                })
+            });
+            processor.measure_latency_sample(sample, level.unwrap_or(0.0));
+            if processor.latency_calibration.is_none() {
+                break;
+            }
+        }
+
+        assert!(processor.latency_calibration.is_none());
+        assert!(
+            (232..=248).contains(&processor.recording_alignment_frames),
+            "measured {}",
+            processor.recording_alignment_frames
+        );
+        assert!(matches!(
+            controls.try_status(),
+            Some(RuntimeStatus::LatencyMeasured { .. })
+        ));
+    }
+
+    #[test]
+    fn recording_is_rejected_while_latency_calibration_is_active() {
+        let (mut processor, mut controls) = processor(0.0);
+        processor.latency_calibration = Some(LatencyCalibration {
+            first_sample: 0,
+            detections: [None; CALIBRATION_PULSES],
+            correlation_window: [0.0; CALIBRATION_PULSE_FRAMES as usize],
+            correlation_position: 0,
+            correlation_seen: 0,
+            best_correlation: 0.0,
+            best_offset: 0,
+            earliest_strong_offset: None,
+        });
+        controls
+            .try_command(RuntimeCommand::Record { slot: 0 })
+            .unwrap();
+        run(&mut processor, &[1.0; 4], &[0.0; 4]);
+        // Probe audio must not enter a recording, not even through the
+        // input-history prefill.
+        assert!(processor.recording.is_none());
+        assert!(matches!(
+            controls.try_status(),
+            Some(RuntimeStatus::CommandRejected(RuntimeCommand::Record {
+                slot: 0
+            }))
+        ));
+        // Once calibration is over the same gesture records normally.
+        processor.latency_calibration = None;
+        controls
+            .try_command(RuntimeCommand::Record { slot: 0 })
+            .unwrap();
+        run(&mut processor, &[1.0; 4], &[0.0; 4]);
+        assert_eq!(processor.recording, Some(0));
+        assert_eq!(processor.loops[0].len, 4);
+    }
+
+    #[test]
+    fn duplex_callback_preserves_every_input_frame_in_order() {
+        // Regression: the reliable duplex path must deliver every captured
+        // frame to recording in order, with no zero insertion, trimming, or
+        // frame-count mismatch. Feed a deterministic waveform through the
+        // processor callback and require bit-exact storage.
         let (mut processor, mut controls) = processor(0.0);
         controls
             .try_command(RuntimeCommand::Record { slot: 0 })
             .unwrap();
-        run(&mut processor, &[1.0, 0.5, 0.25], &[0.0; 3]);
+        let frames = 32usize;
+        let left: Vec<f32> = (0..frames).map(|i| (i as f32 * 0.001).sin()).collect();
+        let right: Vec<f32> = (0..frames).map(|i| (i as f32 * 0.003).cos()).collect();
+        run(&mut processor, &left, &right);
         controls.try_command(RuntimeCommand::StopRecord).unwrap();
-        controls
-            .try_command(RuntimeCommand::SetPulseFromLoop { slot: 0 })
-            .unwrap();
-        controls
-            .try_command(RuntimeCommand::RequestSnapshot)
-            .unwrap();
         run(&mut processor, &[], &[]);
 
-        let snapshot = loop {
-            match controls.try_status().expect("expected status") {
-                RuntimeStatus::Snapshot(snapshot) => break snapshot,
-                RuntimeStatus::LoopCompleted { slot: 0 } => {}
-                other => panic!("unexpected status: {other:?}"),
-            }
-        };
-        assert_eq!(snapshot.pulse_frames, 3);
+        assert_eq!(processor.loops[0].len, frames);
+        for (frame, expected) in left.iter().enumerate() {
+            let (actual, _) = processor.loops[0].sample_at(frame);
+            assert_eq!(
+                actual, *expected,
+                "left frame {frame} was altered before recording"
+            );
+        }
+        for (frame, expected) in right.iter().enumerate() {
+            let (_, actual) = processor.loops[0].sample_at(frame);
+            assert_eq!(
+                actual, *expected,
+                "right frame {frame} was altered before recording"
+            );
+        }
+        // No frame was dropped or fabricated: the recorded length equals the
+        // fed frame count exactly.
+        assert_eq!(processor.loops[0].len as u64, frames as u64);
+    }
+
+    #[test]
+    fn selected_pulse_uses_live_completed_loop_length() {
+        // Debug-build DSP frames (the apply_command match arms) can
+        // exceed a megabyte, so run every DSP test on a dedicated
+        // 8 MiB stack; the default 2 MiB test-thread stack leaves
+        // these tests inside codegen luck.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                        let (mut processor, mut controls) = processor(0.0);
+                        controls
+                            .try_command(RuntimeCommand::Record { slot: 0 })
+                            .unwrap();
+                        run(&mut processor, &[1.0, 0.5, 0.25], &[0.0; 3]);
+                        controls.try_command(RuntimeCommand::StopRecord).unwrap();
+                        controls
+                            .try_command(RuntimeCommand::SetPulseFromLoop { slot: 0 })
+                            .unwrap();
+                        controls
+                            .try_command(RuntimeCommand::RequestSnapshot)
+                            .unwrap();
+                        run(&mut processor, &[], &[]);
+
+                        let snapshot = loop {
+                            match controls.try_status().expect("expected status") {
+                                RuntimeStatus::Snapshot(snapshot) => break snapshot,
+                                RuntimeStatus::LoopCompleted { slot: 0 } => {}
+                                other => panic!("unexpected status: {other:?}"),
+                            }
+                        };
+                        assert_eq!(snapshot.pulse_frames, 3);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
@@ -4281,57 +4438,79 @@ mod tests {
 
     #[test]
     fn cpp_subdivide_persists_and_divides_the_next_loop_defined_pulse() {
-        let (mut processor, mut controls) = processor(0.0);
-        controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
-            .unwrap();
-        run(&mut processor, &[1.0; 6], &[0.0; 6]);
-        controls.try_command(RuntimeCommand::StopRecord).unwrap();
-        controls
-            .try_command(RuntimeCommand::SetPulseSubdivide { beats: 3 })
-            .unwrap();
-        controls
-            .try_command(RuntimeCommand::SetPulseFromLoop { slot: 0 })
-            .unwrap();
-        controls
-            .try_command(RuntimeCommand::RequestSnapshot)
-            .unwrap();
-        run(&mut processor, &[], &[]);
+        // Debug-build DSP frames (the apply_command match arms) can
+        // exceed a megabyte, so run every DSP test on a dedicated
+        // 8 MiB stack; the default 2 MiB test-thread stack leaves
+        // these tests inside codegen luck.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                        let (mut processor, mut controls) = processor(0.0);
+                        controls
+                            .try_command(RuntimeCommand::Record { slot: 0 })
+                            .unwrap();
+                        run(&mut processor, &[1.0; 6], &[0.0; 6]);
+                        controls.try_command(RuntimeCommand::StopRecord).unwrap();
+                        controls
+                            .try_command(RuntimeCommand::SetPulseSubdivide { beats: 3 })
+                            .unwrap();
+                        controls
+                            .try_command(RuntimeCommand::SetPulseFromLoop { slot: 0 })
+                            .unwrap();
+                        controls
+                            .try_command(RuntimeCommand::RequestSnapshot)
+                            .unwrap();
+                        run(&mut processor, &[], &[]);
 
-        let snapshot = loop {
-            match controls.try_status().expect("expected status") {
-                RuntimeStatus::Snapshot(snapshot) => break snapshot,
-                RuntimeStatus::LoopCompleted { slot: 0 } => {}
-                other => panic!("unexpected status: {other:?}"),
-            }
-        };
-        assert_eq!(snapshot.pulse_frames, 2);
-        assert_eq!(processor.loops[0].pulse_beats, 3);
+                        let snapshot = loop {
+                            match controls.try_status().expect("expected status") {
+                                RuntimeStatus::Snapshot(snapshot) => break snapshot,
+                                RuntimeStatus::LoopCompleted { slot: 0 } => {}
+                                other => panic!("unexpected status: {other:?}"),
+                            }
+                        };
+                        assert_eq!(snapshot.pulse_frames, 2);
+                        assert_eq!(processor.loops[0].pulse_beats, 3);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
     fn pulse_long_count_uses_the_cpp_lcm_of_synchronised_loop_beats() {
-        let (mut processor, mut controls) = processor(0.0);
-        processor.pulse_sync_active = true;
-        processor.pulse_frames = 4;
-        processor.pulse_position = 3;
-        // C++ grows the long count when synchronised loops are activated,
-        // rather than deriving it from every stored loop on each callback.
-        processor.extend_pulse_long_count(2, false);
-        processor.extend_pulse_long_count(3, false);
-        // One frame crosses a pulse boundary: lcm(2, 3) == 6 and the current
-        // long-count advances once.
-        run(&mut processor, &[0.0], &[0.0]);
-        controls
-            .try_command(RuntimeCommand::RequestSnapshot)
+        // Debug-build DSP frames (the apply_command match arms) can
+        // exceed a megabyte, so run every DSP test on a dedicated
+        // 8 MiB stack; the default 2 MiB test-thread stack leaves
+        // these tests inside codegen luck.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                        let (mut processor, mut controls) = processor(0.0);
+                        processor.pulse_sync_active = true;
+                        processor.pulse_frames = 4;
+                        processor.pulse_position = 3;
+                        // C++ grows the long count when synchronised loops are activated,
+                        // rather than deriving it from every stored loop on each callback.
+                        processor.extend_pulse_long_count(2, false);
+                        processor.extend_pulse_long_count(3, false);
+                        // One frame crosses a pulse boundary: lcm(2, 3) == 6 and the current
+                        // long-count advances once.
+                        run(&mut processor, &[0.0], &[0.0]);
+                        controls
+                            .try_command(RuntimeCommand::RequestSnapshot)
+                            .unwrap();
+                        run(&mut processor, &[], &[]);
+                        let snapshot = match controls.try_status().expect("expected status") {
+                            RuntimeStatus::Snapshot(snapshot) => snapshot,
+                            other => panic!("unexpected status: {other:?}"),
+                        };
+                        assert_eq!(snapshot.pulse_long_length, 6);
+                        assert_eq!(snapshot.pulse_long_count, 1);
+            })
+            .unwrap()
+            .join()
             .unwrap();
-        run(&mut processor, &[], &[]);
-        let snapshot = match controls.try_status().expect("expected status") {
-            RuntimeStatus::Snapshot(snapshot) => snapshot,
-            other => panic!("unexpected status: {other:?}"),
-        };
-        assert_eq!(snapshot.pulse_long_length, 6);
-        assert_eq!(snapshot.pulse_long_count, 1);
     }
 
     #[test]
@@ -4385,48 +4564,59 @@ mod tests {
 
     #[test]
     fn selected_pulse_quantizes_new_recording_to_beat_boundaries() {
-        let (mut processor, mut controls) = processor(0.0);
-        controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
-            .unwrap();
-        run(&mut processor, &[1.0; 4], &[0.0; 4]);
-        controls.try_command(RuntimeCommand::StopRecord).unwrap();
-        run(&mut processor, &[], &[]);
+        // Debug-build DSP frames (the apply_command match arms) can
+        // exceed a megabyte, so run every DSP test on a dedicated
+        // 8 MiB stack; the default 2 MiB test-thread stack leaves
+        // these tests inside codegen luck.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                        let (mut processor, mut controls) = processor(0.0);
+                        controls
+                            .try_command(RuntimeCommand::Record { slot: 0 })
+                            .unwrap();
+                        run(&mut processor, &[1.0; 4], &[0.0; 4]);
+                        controls.try_command(RuntimeCommand::StopRecord).unwrap();
+                        run(&mut processor, &[], &[]);
 
-        controls
-            .try_command(RuntimeCommand::SetPulseFromLoop { slot: 0 })
-            .unwrap();
-        controls
-            .try_command(RuntimeCommand::Record { slot: 1 })
-            .unwrap();
-        run(&mut processor, &[0.5; 6], &[0.0; 6]);
-        controls.try_command(RuntimeCommand::StopRecord).unwrap();
-        // Stop was requested in the second half, so C++ continues through
-        // the upcoming downbeat and records its 1,024-frame crossfade tail.
-        run(&mut processor, &[0.5; 2], &[0.0; 2]);
-        for _ in 0..(REC_TAIL_FRAMES / 32) {
-            run(&mut processor, &[0.0; 32], &[0.0; 32]);
-        }
-        controls
-            .try_command(RuntimeCommand::RequestSnapshot)
-            .unwrap();
-        run(&mut processor, &[], &[]);
+                        controls
+                            .try_command(RuntimeCommand::SetPulseFromLoop { slot: 0 })
+                            .unwrap();
+                        controls
+                            .try_command(RuntimeCommand::Record { slot: 1 })
+                            .unwrap();
+                        run(&mut processor, &[0.5; 6], &[0.0; 6]);
+                        controls.try_command(RuntimeCommand::StopRecord).unwrap();
+                        // Stop was requested in the second half, so C++ continues through
+                        // the upcoming downbeat and records its 1,024-frame crossfade tail.
+                        run(&mut processor, &[0.5; 2], &[0.0; 2]);
+                        for _ in 0..(REC_TAIL_FRAMES / 32) {
+                            run(&mut processor, &[0.0; 32], &[0.0; 32]);
+                        }
+                        controls
+                            .try_command(RuntimeCommand::RequestSnapshot)
+                            .unwrap();
+                        run(&mut processor, &[], &[]);
 
-        let snapshot = loop {
-            match controls.try_status().expect("expected status") {
-                RuntimeStatus::Snapshot(snapshot) => break snapshot,
-                RuntimeStatus::LoopCompleted { .. } => {}
-                other => panic!("unexpected status: {other:?}"),
-            }
-        };
-        assert_eq!(snapshot.pulse_frames, 4);
-        assert_eq!(snapshot.loops[1].frames, 8 + REC_TAIL_FRAMES as u32);
-        // The loop phase is captured when C++ deactivates the recorder.  The
-        // delayed tail then advances the live pulse, so comparing the loop
-        // position with the later snapshot pulse position is incorrect.
-        assert_eq!(snapshot.loops[1].position, snapshot.pulse_frames);
-        // The retained tail is crossfade material, not 256 extra beats.
-        assert_eq!(processor.loops[1].pulse_beats, 2);
+                        let snapshot = loop {
+                            match controls.try_status().expect("expected status") {
+                                RuntimeStatus::Snapshot(snapshot) => break snapshot,
+                                RuntimeStatus::LoopCompleted { .. } => {}
+                                other => panic!("unexpected status: {other:?}"),
+                            }
+                        };
+                        assert_eq!(snapshot.pulse_frames, 4);
+                        assert_eq!(snapshot.loops[1].frames, 8 + REC_TAIL_FRAMES as u32);
+                        // The loop phase is captured when C++ deactivates the recorder.  The
+                        // delayed tail then advances the live pulse, so comparing the loop
+                        // position with the later snapshot pulse position is incorrect.
+                        assert_eq!(snapshot.loops[1].position, snapshot.pulse_frames);
+                        // The retained tail is crossfade material, not 256 extra beats.
+                        assert_eq!(processor.loops[1].pulse_beats, 2);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
