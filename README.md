@@ -83,6 +83,16 @@ The audio backend is selected at startup via the `FWEELIN_AUDIO_BACKEND` environ
 cargo run --release -- --smoke-test
 ```
 
+## Startup audio latency calibration
+
+After audio starts, FreeWheeling plays five short swept chirps through the
+speakers and listens for their return through the microphone. It measures the
+round-trip delay in audio frames, rejects missed or inconsistent detections,
+and uses the resulting consensus offset to align synchronized recordings and
+overdubs. Keep the speakers audible and the microphone unobstructed during
+startup; if the return signal is too quiet, the app keeps its provisional
+driver-based alignment instead.
+
 ## Essential live-session controls
 
 These are the default keyboard and mouse controls for a basic session.
