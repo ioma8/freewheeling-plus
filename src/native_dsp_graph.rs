@@ -1730,6 +1730,10 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
         self.pulse_long_length = new_length;
     }
 
+    fn recording_tail_frames(&self) -> usize {
+        REC_TAIL_FRAMES.max(self.recording_alignment_frames as usize)
+    }
+
     fn stop_recording(&mut self, notify: bool) {
         self.recording_waiting_start = false;
         self.recording_waiting_stop = false;
@@ -1878,8 +1882,9 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
         let index = self.recording.expect("recording checked above");
         let pulse = self.pulse_frames.max(1) as usize;
         let position = self.pulse_position as usize % pulse;
+        let recording_tail_frames = self.recording_tail_frames();
         let short_tail_after_non_downbeat_start = self.recording_start_phase != 0
-            && position < REC_TAIL_FRAMES
+            && position < recording_tail_frames
             && !self.recording_waiting_start;
         if (self.recording_started_late || short_tail_after_non_downbeat_start)
             && !self.recording_waiting_start
@@ -1900,7 +1905,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 .min(u64::from(u32::MAX)) as u32;
             let target_len = (beats as usize)
                 .saturating_mul(pulse)
-                .saturating_add(REC_TAIL_FRAMES);
+                .saturating_add(recording_tail_frames);
             self.loops[index].pulse_beats = beats;
             self.extend_pulse_long_count(beats, true);
             self.recording_pulse_extension_applied = true;
@@ -1917,7 +1922,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
         // GetPos() < REC_TAIL_LEN` schedules the delayed end-sync. The
         // second term matters just after a downbeat, even though that phase
         // is in the first half.
-        if position * 2 < pulse && position >= REC_TAIL_FRAMES {
+        if position * 2 < pulse && position >= recording_tail_frames {
             self.recording_end_justify = false;
             // `LoopManager::Deactivate` preserves the current completed
             // callback count, but never creates a zero-beat loop.
@@ -2949,7 +2954,7 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                     // A stop requested before the start downbeat still
                     // starts at that downbeat in the C++ implementation.
                     self.recording_waiting_start = false;
-                    self.recording_tail_remaining = Some(REC_TAIL_FRAMES);
+                    self.recording_tail_remaining = Some(self.recording_tail_frames());
                 } else if self.recording_waiting_start {
                     self.recording_waiting_start = false;
                 }
@@ -4614,6 +4619,41 @@ mod tests {
         assert_eq!(processor.loops[0].sample_at(0).0, -1.0);
         assert_eq!(processor.loops[0].sample_at(511).0, -1.0);
         assert_eq!(processor.loops[0].sample_at(512).0, 1.0);
+    }
+
+    #[test]
+    fn sync_recording_captures_a_latency_tail_beyond_the_legacy_tail() {
+        let (mut processor, mut controls) = processor(0.0);
+        processor.pulse_sync_active = true;
+        processor.pulse_frames = 4096;
+        processor.recording_alignment_frames = 2337;
+        processor.input_history_left.resize(4096, 0.0);
+        processor.input_history_right.resize(4096, 0.0);
+
+        run(&mut processor, &[-1.0; 32], &[0.0; 32]);
+        for _ in 1..16 {
+            run(&mut processor, &[-1.0; 32], &[0.0; 32]);
+        }
+        assert_eq!(processor.pulse_position, 512);
+
+        controls
+            .try_command(RuntimeCommand::Record { slot: 0 })
+            .unwrap();
+        for _ in 0..128 {
+            run(&mut processor, &[1.0; 32], &[0.0; 32]);
+        }
+        controls.try_command(RuntimeCommand::StopRecord).unwrap();
+
+        for _ in 0..80 {
+            run(&mut processor, &[1.0; 32], &[0.0; 32]);
+            if processor.recording.is_none() {
+                break;
+            }
+        }
+
+        assert_eq!(processor.recording, None);
+        assert_eq!(processor.loops[0].pulse_beats, 1);
+        assert_eq!(processor.loops[0].len, 4096 + 2337);
     }
 
     #[test]
