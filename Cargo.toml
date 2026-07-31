@@ -12,6 +12,14 @@ crate-type = ["cdylib", "rlib"]
 default = []
 jack = ["dep:jack"]
 
+# The realtime DSP runs on CoreAudio's 512 KiB IO thread. Debug builds (opt 0)
+# give the huge audio-callback match functions frames over a megabyte because
+# stack slots are never reused; opt-level 1 collapses those frames so the app
+# and its tests cannot overflow the audio thread. Realtime behavior is
+# unaffected (release builds are unchanged).
+[profile.dev]
+opt-level = 1
+
 [dependencies]
 libc = "0.2"
 roxmltree = "0.20"
@@ -37,6 +45,7 @@ jack = { version = "0.13.5", optional = true }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
+core-foundation = "0.10"
 coreaudio-sys = { version = "0.2", features = ["audio_unit"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

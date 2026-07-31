@@ -18,9 +18,6 @@ pub mod realtime_guard {
     pub use freewheeling_plus::realtime_guard::*;
 }
 
-#[path = "../src/linux_native.rs"]
-mod linux_native;
-
 #[test]
 fn transport_commands_retain_exact_frame_requests() {
     assert_ne!(

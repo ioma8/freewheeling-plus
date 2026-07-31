@@ -5,9 +5,18 @@
 //! immediately invokes the DSP with the device's output buffers.  There is no
 //! capture/playback queue and consequently no extra callback of monitor or
 //! recording latency.
+//!
+//! When the selected input and output devices have different CoreAudio device
+//! IDs (the ordinary MacBook mic/speaker route), the backend creates a private
+//! CoreAudio Aggregate Device whose master clock is the output device and
+//! whose input subdevice has drift compensation enabled. The HAL AudioUnit is
+//! opened against that single aggregate, so capture and playback share one
+//! clock domain and one duplex callback; no captured frame can be trimmed or
+//! replaced by the backend. The aggregate is private to this process and is
+//! destroyed on close, recovery, or drop.
 
 use crate::audio_native_cpal::{
-    AudioDeviceInfo, AudioLatency, CpalAudioBackend, CpalAudioOptions, CpalAudioStatus,
+    AudioDeviceInfo, AudioLatency, CpalAudioOptions, CpalAudioStatus, CpalStreamDiagnostics,
     DeviceSelection,
 };
 use crate::audioio::{
@@ -15,6 +24,12 @@ use crate::audioio::{
     JackPosition, NFrames, NUM_CHANNELS,
 };
 use crate::realtime_guard::RealtimeMetrics;
+use core_foundation::array::{CFArray, CFArrayRef};
+use core_foundation::base::{CFType, TCFType};
+use core_foundation::string::CFStringRef;
+use core_foundation::dictionary::CFDictionary;
+use core_foundation::number::CFNumber;
+use core_foundation::string::CFString;
 use std::ffi::c_void;
 use std::ptr;
 use std::sync::Arc;
@@ -54,6 +69,18 @@ const K_AUDIO_DEVICE_PROPERTY_NOMINAL_SAMPLE_RATE: u32 = 0x6e73_7274;
 const K_AUDIO_DEVICE_PROPERTY_BUFFER_FRAME_SIZE: u32 = 0x6673_697a;
 const K_AUDIO_DEVICE_PROPERTY_LATENCY: u32 = 0x6c74_6e63;
 const K_AUDIO_DEVICE_PROPERTY_SAFETY_OFFSET: u32 = 0x7361_6674;
+const K_AUDIO_DEVICE_PROPERTY_DEVICE_UID: u32 = 0x7569_6420; // 'uid '
+const K_AUDIO_AGGREGATE_PROPERTY_FULL_SUBDEVICE_LIST: u32 = 0x6772_7570; // 'grup'
+// CoreFoundation keys of the aggregate-device composition dictionary. The
+// values are the same strings CoreAudio defines in AudioHardware.h; the
+// bindgen-generated constants are byte placeholders, not usable CFStringRefs.
+const AGGREGATE_KEY_UID: &str = "uid";
+const AGGREGATE_KEY_NAME: &str = "name";
+const AGGREGATE_KEY_SUBDEVICES: &str = "subdevices";
+const AGGREGATE_KEY_MASTER: &str = "master";
+const AGGREGATE_KEY_PRIVATE: &str = "private";
+const AGGREGATE_KEY_DRIFT: &str = "drift";
+const AGGREGATE_NAME: &str = "FreeWheeling Aggregate";
 const K_AUDIO_OBJECT_SYSTEM_OBJECT: u32 = 1;
 const K_AUDIO_OBJECT_SCOPE_GLOBAL: u32 = 0;
 const K_AUDIO_OBJECT_ELEMENT_MAIN: u32 = 0;
@@ -78,6 +105,14 @@ struct SharedMetrics {
     callback_panics: AtomicU64,
     active: AtomicBool,
     cpu_load_bits: AtomicU32,
+    // Reliable-path frame diagnostics. The duplex callback captures and plays
+    // the same frame count per callback, so capture_frames and playback_frames
+    // must stay equal and the corruption counters must stay zero.
+    capture_frames: AtomicU64,
+    playback_frames: AtomicU64,
+    trimmed_frames: AtomicU64,
+    missing_frames: AtomicU64,
+    frame_size_mismatches: AtomicU64,
 }
 
 impl SharedMetrics {
@@ -94,6 +129,16 @@ impl SharedMetrics {
             callback_total_nanos: self.callback_total_nanos.load(Ordering::Relaxed),
             recovery_requests: self.recovery_requests.load(Ordering::Relaxed),
             ..AudioMetrics::default()
+        }
+    }
+    fn stream_diagnostics(&self) -> CpalStreamDiagnostics {
+        CpalStreamDiagnostics {
+            capture_frames: self.capture_frames.load(Ordering::Relaxed),
+            playback_frames: self.playback_frames.load(Ordering::Relaxed),
+            max_queue_frames: 0,
+            trimmed_frames: self.trimmed_frames.load(Ordering::Relaxed),
+            missing_frames: self.missing_frames.load(Ordering::Relaxed),
+            frame_size_mismatches: self.frame_size_mismatches.load(Ordering::Relaxed),
         }
     }
 }
@@ -120,6 +165,34 @@ struct BufferRestore {
     previous_frames: u32,
     applied_frames: u32,
 }
+
+/// Explicit CoreAudio route state owned by the backend.
+///
+/// `active_device` is the device the HAL AudioUnit is bound to: either a
+/// single physical device (when input and output already share one device ID)
+/// or the private aggregate created by this process. An aggregate is never
+/// adopted from the system; `owned_aggregate_uid` is `Some` exactly when this
+/// process created the active device and therefore must destroy it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CoreAudioRoute {
+    requested_input: u32,
+    requested_output: u32,
+    active_device: u32,
+    owned_aggregate_uid: Option<String>,
+}
+
+/// A private CoreAudio Aggregate Device created and owned by this process.
+struct OwnedAggregate {
+    device_id: u32,
+    uid: String,
+    input_id: u32,
+    output_id: u32,
+    drift_compensation: bool,
+}
+
+/// Monotonic per-process counter so every aggregate UID is unique even when
+/// routes are recreated in the same process lifetime.
+static AGGREGATE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 unsafe impl Send for CallbackState {}
 
@@ -166,19 +239,13 @@ impl CallbackState {
 
 /// A macOS-only backend that mirrors the original C++ HAL AudioUnit path.
 pub struct MacosAudioUnitBackend {
-    selection: DeviceSelection,
     options: CpalAudioOptions,
-    /// A HAL Output unit cannot use one physical device for output and another
-    /// one for capture. For that ordinary macOS setup, retain a functional
-    /// CPAL duplex route instead of silently returning capture errors forever.
-    fallback: Option<CpalAudioBackend>,
     unit: AudioUnit,
     state: Option<Box<CallbackState>>,
     info: Option<BackendInfo>,
     latency: Option<AudioLatency>,
     buffer_restores: Vec<BufferRestore>,
-    input_device: Option<u32>,
-    output_device: Option<u32>,
+    route: Option<CoreAudioRoute>,
     metrics: Arc<SharedMetrics>,
     realtime_metrics: Option<Arc<RealtimeMetrics>>,
     route_poll_origin: Instant,
@@ -191,18 +258,15 @@ pub struct MacosAudioUnitBackend {
 unsafe impl Send for MacosAudioUnitBackend {}
 
 impl MacosAudioUnitBackend {
-    pub fn new(selection: DeviceSelection, options: CpalAudioOptions) -> Self {
+    pub fn new(_selection: DeviceSelection, options: CpalAudioOptions) -> Self {
         Self {
-            selection,
             options,
-            fallback: None,
             unit: ptr::null_mut(),
             state: None,
             info: None,
             latency: None,
             buffer_restores: Vec::new(),
-            input_device: None,
-            output_device: None,
+            route: None,
             metrics: Arc::new(SharedMetrics::default()),
             realtime_metrics: None,
             route_poll_origin: Instant::now(),
@@ -211,20 +275,19 @@ impl MacosAudioUnitBackend {
     }
 
     pub fn set_realtime_metrics(&mut self, metrics: Arc<RealtimeMetrics>) {
-        if let Some(fallback) = &mut self.fallback {
-            fallback.set_realtime_metrics(Arc::clone(&metrics));
+        // The callback state is built during open(), before the acceptance
+        // runner attaches its instrumentation; update the live state as well
+        // so instrumentation always sees the realtime callback.
+        if let Some(state) = &mut self.state {
+            state.realtime_metrics = Some(Arc::clone(&metrics));
         }
         self.realtime_metrics = Some(metrics);
     }
 
     pub fn status(&self) -> CpalAudioStatus {
-        if let Some(fallback) = &self.fallback {
-            let mut status = fallback.status();
-            status.latency = self.latency;
-            return status;
-        }
-        let input = self.input_device.map(device_info);
-        let output = self.output_device.map(device_info);
+        let route = self.route.as_ref();
+        let input = route.map(|route| device_info(route.requested_input));
+        let output = route.map(|route| device_info(route.requested_output));
         CpalAudioStatus {
             active: self.metrics.active.load(Ordering::Acquire),
             input,
@@ -236,7 +299,38 @@ impl MacosAudioUnitBackend {
             playback_callbacks: self.metrics.callbacks.load(Ordering::Relaxed),
             latency: self.latency,
             metrics: self.metrics.snapshot(),
+            stream: self.metrics.stream_diagnostics(),
         }
+    }
+
+    /// Verify both AudioUnit sides negotiated the expected non-interleaved
+    /// stereo float format and buffer count before starting IO. A mismatch
+    /// here means the device rejected the requested layout, so starting the
+    /// callback would deliver corrupt or truncated audio.
+    /// Verify both AudioUnit sides negotiated the expected non-interleaved
+    /// stereo float format before starting IO. The HAL output unit exposes the
+    /// playback side on the input scope (element 0) and the capture side on
+    /// the output scope (element 1); those are the two (scope, element) pairs
+    /// `configure` sets, so a mismatch here means the device rejected the
+    /// requested layout and starting the callback would deliver corrupt or
+    /// truncated audio.
+    fn validate_duplex_format(&self) -> Result<(), String> {
+        for (scope, element, side) in [
+            (K_AUDIO_UNIT_SCOPE_INPUT, 0, "playback"),
+            (K_AUDIO_UNIT_SCOPE_OUTPUT, 1, "capture"),
+        ] {
+            let format = audio_unit_format(self.unit, scope, element)?;
+            let non_interleaved = format.mFormatFlags & K_AUDIO_FORMAT_FLAG_IS_NON_INTERLEAVED != 0;
+            let float = format.mFormatFlags & K_AUDIO_FORMAT_FLAG_IS_FLOAT != 0;
+            if format.mChannelsPerFrame < NUM_CHANNELS as u32 || !non_interleaved || !float {
+                return Err(format!(
+                    "CoreAudio {side} format is not non-interleaved stereo float \
+                     (channels={}, flags=0x{:x}); refusing to start the duplex callback",
+                    format.mChannelsPerFrame, format.mFormatFlags
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn requested_frames(&self) -> u32 {
@@ -251,7 +345,25 @@ impl MacosAudioUnitBackend {
         self.state.as_mut().and_then(|state| state.processor.take())
     }
 
+    /// Open the HAL AudioUnit against the route's active device (the private
+    /// aggregate when one was created, otherwise the single physical device).
+    ///
+    /// The aggregate is created by `open()` before this runs, so every failure
+    /// path here unwinds through `dispose_unit` + `destroy_owned_aggregate` and
+    /// never leaves an owned aggregate or a running AudioUnit behind.
     fn configure(&mut self) -> Result<BackendInfo, String> {
+        let (active, aggregate_path, requested_input, requested_output) = self
+            .route
+            .as_ref()
+            .map(|route| {
+                (
+                    route.active_device,
+                    route.owned_aggregate_uid.is_some(),
+                    route.requested_input,
+                    route.requested_output,
+                )
+            })
+            .ok_or("audio route must be resolved before configuring the AudioUnit")?;
         let desc = AudioComponentDescription {
             componentType: K_AUDIO_UNIT_TYPE_OUTPUT,
             componentSubType: K_AUDIO_UNIT_SUBTYPE_HAL_OUTPUT,
@@ -289,17 +401,15 @@ impl MacosAudioUnitBackend {
                 &1u32,
                 "enable output",
             )?;
-            let input = default_device(K_AUDIO_HARDWARE_PROPERTY_DEFAULT_INPUT_DEVICE)?;
-            let output = default_device(K_AUDIO_HARDWARE_PROPERTY_DEFAULT_OUTPUT_DEVICE)?;
             set_property(
                 unit,
                 K_AUDIO_OUTPUT_UNIT_PROPERTY_CURRENT_DEVICE,
                 K_AUDIO_UNIT_SCOPE_GLOBAL,
                 0,
-                &output,
-                "select output device",
+                &active,
+                "select duplex audio device",
             )?;
-            let rate = nominal_rate(output)
+            let rate = nominal_rate(active)
                 .unwrap_or(DEFAULT_RATE as f64)
                 .round()
                 .max(1.0) as u32;
@@ -320,24 +430,6 @@ impl MacosAudioUnitBackend {
                 &format,
                 "set input stream format",
             )?;
-            let (previous_frames, frames) =
-                set_low_latency_buffer(output, self.requested_frames())?;
-            if previous_frames != frames {
-                self.buffer_restores.push(BufferRestore {
-                    device: output,
-                    previous_frames,
-                    applied_frames: frames,
-                });
-            }
-            let max_frames = (MAX_CALLBACK_FRAMES as u32).max(frames);
-            set_property(
-                unit,
-                K_AUDIO_UNIT_PROPERTY_MAXIMUM_FRAMES_PER_SLICE,
-                K_AUDIO_UNIT_SCOPE_GLOBAL,
-                0,
-                &max_frames,
-                "set maximum frames per slice",
-            )?;
             let mut state = Box::new(CallbackState::new(
                 rate,
                 Arc::clone(&self.metrics),
@@ -356,13 +448,43 @@ impl MacosAudioUnitBackend {
                 &callback,
                 "set duplex render callback",
             )?;
-            check(
-                unsafe { AudioUnitInitialize(unit) },
-                "initialize HAL audio unit",
+            let frames = if aggregate_path {
+                // An aggregate device only honours its buffer-frame-size
+                // property once its IO proc is attached, which happens when
+                // the AudioUnit is initialized. Negotiate after that point and
+                // always report the size the device actually returned.
+                check(
+                    unsafe { AudioUnitInitialize(unit) },
+                    "initialize HAL audio unit",
+                )?;
+                let (_, actual) = set_low_latency_buffer(active, self.requested_frames())?;
+                actual
+            } else {
+                let (previous_frames, actual) =
+                    set_low_latency_buffer(active, self.requested_frames())?;
+                if previous_frames != actual {
+                    self.buffer_restores.push(BufferRestore {
+                        device: active,
+                        previous_frames,
+                        applied_frames: actual,
+                    });
+                }
+                check(
+                    unsafe { AudioUnitInitialize(unit) },
+                    "initialize HAL audio unit",
+                )?;
+                actual
+            };
+            let max_frames = (MAX_CALLBACK_FRAMES as u32).max(frames);
+            set_property(
+                unit,
+                K_AUDIO_UNIT_PROPERTY_MAXIMUM_FRAMES_PER_SLICE,
+                K_AUDIO_UNIT_SCOPE_GLOBAL,
+                0,
+                &max_frames,
+                "set maximum frames per slice",
             )?;
-            self.input_device = Some(input);
-            self.output_device = Some(output);
-            self.latency = latency_estimate(input, output, frames, 0);
+            self.latency = latency_estimate(requested_input, requested_output, frames, 0);
             self.state = Some(state);
             Ok(BackendInfo {
                 sample_rate: rate,
@@ -372,10 +494,14 @@ impl MacosAudioUnitBackend {
         if setup.is_err() {
             self.dispose_unit();
             self.restore_device_buffers();
+            self.destroy_owned_aggregate();
         }
         setup
     }
 
+    /// Stop, uninitialize, and dispose the HAL AudioUnit. The owned aggregate
+    /// (if any) is intentionally left alive so the caller controls the exact
+    /// teardown order; `destroy_owned_aggregate` runs after this.
     fn dispose_unit(&mut self) {
         if !self.unit.is_null() {
             // SAFETY: only called by the owner after a successful stop (or
@@ -390,36 +516,43 @@ impl MacosAudioUnitBackend {
         self.metrics.active.store(false, Ordering::Release);
         self.info = None;
         self.latency = None;
-        self.input_device = None;
-        self.output_device = None;
     }
 
-    fn remember_fallback_buffers(&mut self, input: u32, output: u32, frames: u32) {
-        for device in [input, output] {
-            if self
-                .buffer_restores
-                .iter()
-                .any(|restore| restore.device == device)
-            {
-                continue;
+    /// Device ID of the private aggregate currently owned by this backend, if
+    /// any. Exposed for acceptance instrumentation that verifies the device is
+    /// gone after close.
+    pub fn owned_aggregate_device(&self) -> Option<u32> {
+        self.route
+            .as_ref()
+            .filter(|route| route.owned_aggregate_uid.is_some())
+            .map(|route| route.active_device)
+    }
+
+    /// Claim the device that must be destroyed for the current route. The
+    /// `take` makes destruction exactly-once: a second call returns `None`.
+    /// Routes whose active device was discovered (never created by this
+    /// process) return `None` and are never destroyed.
+    fn take_owned_aggregate_device(&mut self) -> Option<u32> {
+        let route = self.route.as_mut()?;
+        route
+            .owned_aggregate_uid
+            .take()
+            .map(|_| route.active_device)
+    }
+
+    /// Destroy the private aggregate owned by this process, if any, and clear
+    /// the route. Runs on close, recovery, drop, and every setup failure after
+    /// aggregate creation. Never touches a device FreeWheeling discovered.
+    fn destroy_owned_aggregate(&mut self) {
+        if let Some(device) = self.take_owned_aggregate_device() {
+            match destroy_aggregate_device(device) {
+                Ok(()) => {
+                    eprintln!("[AUDIO-DIAG] audio: destroyed private aggregate device {device}")
+                }
+                Err(error) => eprintln!("[AUDIO-DIAG] audio: {error}"),
             }
-            let Some(previous_frames) = device_u32(
-                device,
-                K_AUDIO_DEVICE_PROPERTY_BUFFER_FRAME_SIZE,
-                K_AUDIO_OBJECT_SCOPE_GLOBAL,
-            )
-            .ok() else {
-                continue;
-            };
-            // CPAL applies the requested fixed size when building streams.
-            // Save the system setting first and record the applied value only
-            // after it is observable below.
-            self.buffer_restores.push(BufferRestore {
-                device,
-                previous_frames,
-                applied_frames: frames,
-            });
         }
+        self.route = None;
     }
 
     fn restore_device_buffers(&mut self) {
@@ -444,9 +577,7 @@ impl MacosAudioUnitBackend {
     }
 
     fn direct_route_changed(&self) -> bool {
-        let (Some(input), Some(output), Some(info)) =
-            (self.input_device, self.output_device, self.info)
-        else {
+        let (Some(route), Some(info)) = (self.route.as_ref(), self.info) else {
             return false;
         };
         let elapsed_ms = self.route_poll_origin.elapsed().as_millis() as u64;
@@ -466,16 +597,16 @@ impl MacosAudioUnitBackend {
         }
         let defaults_changed = !matches!(
             default_device(K_AUDIO_HARDWARE_PROPERTY_DEFAULT_INPUT_DEVICE),
-            Ok(current) if current == input
+            Ok(current) if current == route.requested_input
         ) || !matches!(
             default_device(K_AUDIO_HARDWARE_PROPERTY_DEFAULT_OUTPUT_DEVICE),
-            Ok(current) if current == output
+            Ok(current) if current == route.requested_output
         );
-        let device_format_changed = nominal_rate(output)
+        let device_format_changed = nominal_rate(route.active_device)
             .map(|rate| rate.round() as u32 != info.sample_rate)
             .unwrap_or(true)
             || device_u32(
-                output,
+                route.active_device,
                 K_AUDIO_DEVICE_PROPERTY_BUFFER_FRAME_SIZE,
                 K_AUDIO_OBJECT_SCOPE_GLOBAL,
             )
@@ -490,50 +621,47 @@ impl AudioBackend for MacosAudioUnitBackend {
         self.close();
         let input = default_device(K_AUDIO_HARDWARE_PROPERTY_DEFAULT_INPUT_DEVICE)?;
         let output = default_device(K_AUDIO_HARDWARE_PROPERTY_DEFAULT_OUTPUT_DEVICE)?;
-        if input != output {
+        // When input and output are different devices (the ordinary MacBook
+        // mic/speaker route), a private aggregate is required: a HAL Output
+        // unit cannot bind one physical device for output and another for
+        // capture, and the split-stream alternative corrupts recorded frames.
+        let aggregate = if input != output {
             eprintln!(
-                "FreeWheeling audio: default input device {input} and output device {output} differ; \
-                 using the default macOS duplex mic/speaker route (expected on MacBooks). \
-                 A matching duplex or Aggregate Device only enables the optional single-callback path."
+                "[AUDIO-DIAG] audio: input device {input} and output device {output} differ; \
+                 creating a private CoreAudio Aggregate Device"
             );
-            let mut fallback = CpalAudioBackend::new(self.selection.clone(), self.options);
-            if let Some(metrics) = &self.realtime_metrics {
-                fallback.set_realtime_metrics(Arc::clone(metrics));
-            }
-            self.remember_fallback_buffers(input, output, self.requested_frames());
-            let info = match fallback.open("FreeWheeling") {
-                Ok(info) => info,
-                Err(error) => {
-                    self.restore_device_buffers();
-                    return Err(error);
-                }
-            };
-            // A device may clamp the request. Restore only the value CPAL
-            // actually applied, not an optimistic requested value.
-            for restore in &mut self.buffer_restores {
-                if let Ok(actual) = device_u32(
-                    restore.device,
-                    K_AUDIO_DEVICE_PROPERTY_BUFFER_FRAME_SIZE,
-                    K_AUDIO_OBJECT_SCOPE_GLOBAL,
-                ) {
-                    restore.applied_frames = actual;
-                }
-            }
-            self.input_device = Some(input);
-            self.output_device = Some(output);
-            self.latency = latency_estimate(input, output, info.buffer_size, info.buffer_size);
-            self.fallback = Some(fallback);
-            return Ok(info);
-        }
+            let aggregate = OwnedAggregate::create(input, output)?;
+            eprintln!(
+                "[AUDIO-DIAG] audio: aggregate uid={} device={} input={} output={} \
+                 master=output drift_compensation={}",
+                aggregate.uid,
+                aggregate.device_id,
+                aggregate.input_id,
+                aggregate.output_id,
+                aggregate.drift_compensation,
+            );
+            Some(aggregate)
+        } else {
+            None
+        };
+        self.route = Some(CoreAudioRoute {
+            requested_input: input,
+            requested_output: output,
+            active_device: aggregate
+                .as_ref()
+                .map_or(output, |aggregate| aggregate.device_id),
+            owned_aggregate_uid: aggregate.map(|aggregate| aggregate.uid),
+        });
+        // configure unwinds in reverse order on failure (dispose AudioUnit,
+        // restore device buffer sizes, destroy the owned aggregate); nothing
+        // is left behind on a failed open.
         let info = self.configure()?;
         self.info = Some(info);
         Ok(info)
     }
 
     fn activate(&mut self, callback: AudioCallbackFn) -> Result<(), String> {
-        if let Some(fallback) = &mut self.fallback {
-            return fallback.activate(callback);
-        }
+        self.validate_duplex_format()?;
         let state = self
             .state
             .as_mut()
@@ -554,23 +682,18 @@ impl AudioBackend for MacosAudioUnitBackend {
     }
 
     fn close(&mut self) {
-        if let Some(mut fallback) = self.fallback.take() {
-            fallback.close();
-        }
         self.dispose_unit();
         // SAFETY: AudioOutputUnitStop inside dispose_unit is synchronous
         // (Apple docs: "does not return until the unit has stopped"), so
         // no render callback accesses state after this point.
         self.state = None;
         self.restore_device_buffers();
+        self.destroy_owned_aggregate();
     }
 
     fn relocate(&mut self, _frame: NFrames) {}
 
     fn metrics(&self) -> AudioMetrics {
-        if let Some(fallback) = &self.fallback {
-            return fallback.metrics();
-        }
         self.metrics.snapshot()
     }
 
@@ -585,16 +708,10 @@ impl AudioBackend for MacosAudioUnitBackend {
     }
 
     fn cpu_load(&self) -> Option<f32> {
-        if let Some(fallback) = &self.fallback {
-            return fallback.cpu_load();
-        }
         Some(self.metrics.cpu_load())
     }
 
     fn recovery_requested(&self) -> bool {
-        if let Some(fallback) = &self.fallback {
-            return fallback.recovery_requested();
-        }
         if self.direct_route_changed() {
             self.metrics
                 .recovery_requests
@@ -605,9 +722,10 @@ impl AudioBackend for MacosAudioUnitBackend {
     }
 
     fn recover(&mut self) -> Result<BackendInfo, String> {
-        if let Some(fallback) = &mut self.fallback {
-            return fallback.recover();
-        }
+        // Recovery closes the old AudioUnit, destroys the old owned aggregate,
+        // creates a fresh aggregate for the current route, and reopens the
+        // duplex callback with the retained processor.
+        eprintln!("[AUDIO-DIAG] audio: route changed; recreating audio route");
         let callback = self
             .take_callback()
             .ok_or("audio callback is unavailable for recovery")?;
@@ -617,9 +735,6 @@ impl AudioBackend for MacosAudioUnitBackend {
     }
 
     fn recovery_metrics(&self) -> AudioRecoveryMetrics {
-        if let Some(fallback) = &self.fallback {
-            return fallback.recovery_metrics();
-        }
         AudioRecoveryMetrics::default()
     }
 }
@@ -673,10 +788,25 @@ unsafe extern "C" fn render_callback(
         )
     } != NO_ERR
     {
+        // A failed render leaves no capture frames for this callback. The
+        // zero fill below would fabricate input, so count it as missing and
+        // let diagnostics expose the failure instead of hiding it.
         state.input_left[..count].fill(0.0);
         state.input_right[..count].fill(0.0);
         state.metrics.stream_errors.fetch_add(1, Ordering::Relaxed);
+        state
+            .metrics
+            .missing_frames
+            .fetch_add(frames as u64, Ordering::Relaxed);
     }
+    state
+        .metrics
+        .capture_frames
+        .fetch_add(frames as u64, Ordering::Relaxed);
+    state
+        .metrics
+        .playback_frames
+        .fetch_add(frames as u64, Ordering::Relaxed);
     // Reconstruct `state` inside the closure from the raw pointer ref_con
     // rather than capturing &mut CallbackState, so catch_unwind compiles
     // without AssertUnwindSafe.  Panics in an audio callback corrupt the
@@ -688,24 +818,37 @@ unsafe extern "C" fn render_callback(
         // SAFETY: HAL is configured for non-interleaved f32 stereo. The
         // callback's `frames` cannot exceed either supplied buffer size.
         let output = unsafe { &mut *io_data };
+        if output.mNumberBuffers < NUM_CHANNELS as u32 {
+            state
+                .metrics
+                .frame_size_mismatches
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         let left_buffer = unsafe { buffer_at(io_data, 0) };
         let left = left_buffer.mData.cast::<f32>();
         if left.is_null() || left_buffer.mDataByteSize < frames * 4 {
+            state
+                .metrics
+                .frame_size_mismatches
+                .fetch_add(1, Ordering::Relaxed);
             return;
         }
         // SAFETY: left was validated above (non-null, sufficient size).
         let left = unsafe { std::slice::from_raw_parts_mut(left, count) };
-        let right = if output.mNumberBuffers > 1 {
+        let right = {
             let right_buffer = unsafe { buffer_at(io_data, 1) };
             let pointer = right_buffer.mData.cast::<f32>();
             if pointer.is_null() || right_buffer.mDataByteSize < frames * 4 {
+                state
+                    .metrics
+                    .frame_size_mismatches
+                    .fetch_add(1, Ordering::Relaxed);
                 None
             } else {
                 // SAFETY: pointer was validated above.
                 Some(unsafe { std::slice::from_raw_parts_mut(pointer, count) })
             }
-        } else {
-            None
         };
         state.scratch_right[..count].fill(0.0);
         left.fill(0.0);
@@ -841,6 +984,30 @@ fn set_property<T>(
     )
 }
 
+fn audio_unit_format(
+    unit: AudioUnit,
+    scope: u32,
+    element: u32,
+) -> Result<AudioStreamBasicDescription, String> {
+    let mut format = AudioStreamBasicDescription::default();
+    let mut size = std::mem::size_of::<AudioStreamBasicDescription>() as u32;
+    // SAFETY: output pointer points to initialized local storage.
+    check(
+        unsafe {
+            AudioUnitGetProperty(
+                unit,
+                K_AUDIO_UNIT_PROPERTY_STREAM_FORMAT,
+                scope,
+                element,
+                (&mut format as *mut AudioStreamBasicDescription).cast(),
+                &mut size,
+            )
+        },
+        "query audio unit stream format",
+    )?;
+    Ok(format)
+}
+
 fn default_device(selector: u32) -> Result<u32, String> {
     let address = AudioObjectPropertyAddress {
         mSelector: selector,
@@ -951,12 +1118,7 @@ fn device_u32(device: u32, selector: u32, scope: u32) -> Result<u32, String> {
     Ok(value)
 }
 
-fn set_device_u32(
-    device: u32,
-    selector: u32,
-    scope: u32,
-    value: u32,
-) -> Result<(), String> {
+fn set_device_u32(device: u32, selector: u32, scope: u32, value: u32) -> Result<(), String> {
     let address = AudioObjectPropertyAddress {
         mSelector: selector,
         mScope: scope,
@@ -975,6 +1137,220 @@ fn set_device_u32(
             )
         },
         "set audio device property",
+    )
+}
+
+/// Read the device's `kAudioDevicePropertyDeviceUID` as a Rust string.
+fn device_uid(device: u32) -> Result<String, String> {
+    let address = AudioObjectPropertyAddress {
+        mSelector: K_AUDIO_DEVICE_PROPERTY_DEVICE_UID,
+        mScope: K_AUDIO_OBJECT_SCOPE_GLOBAL,
+        mElement: K_AUDIO_OBJECT_ELEMENT_MAIN,
+    };
+    let mut size = 0u32;
+    // SAFETY: first call with a null data pointer only requests the size.
+    check(
+        unsafe { AudioObjectGetPropertyDataSize(device, &address, 0, ptr::null(), &mut size) },
+        "query device UID size",
+    )?;
+    let mut bytes = vec![0u8; size as usize];
+    // SAFETY: the buffer matches the size CoreAudio reported.
+    check(
+        unsafe {
+            AudioObjectGetPropertyData(
+                device,
+                &address,
+                0,
+                ptr::null(),
+                &mut size,
+                bytes.as_mut_ptr().cast(),
+            )
+        },
+        "query device UID",
+    )?;
+    // The buffer holds the CFStringRef *value*; dereference it rather than
+    // passing the buffer address. The returned object is owned by this call
+    // (Create Rule); wrapping without retaining matches that ownership.
+    let string = unsafe {
+        let reference: CFStringRef = ptr::read_unaligned(bytes.as_ptr().cast());
+        CFString::wrap_under_create_rule(reference)
+    };
+    let uid = string.to_string();
+    if uid.is_empty() {
+        return Err(format!("CoreAudio device {device} has no UID"));
+    }
+    Ok(uid)
+}
+
+/// Build the Core Foundation composition dictionary for a private aggregate
+/// device. Pure builder, kept testable without touching the HAL.
+///
+/// - `uid` is a unique, process-scoped aggregate UID;
+/// - `private = 1` keeps the device out of the user's global device list;
+/// - the output subdevice is the master clock;
+/// - the input subdevice has drift compensation enabled.
+fn aggregate_description(uid: &str, input_uid: &str, output_uid: &str) -> CFDictionary {
+    let input_subdevice = CFDictionary::<CFString, CFType>::from_CFType_pairs(&[
+        (
+            CFString::new(AGGREGATE_KEY_UID),
+            CFString::new(input_uid).into_CFType(),
+        ),
+        (
+            CFString::new(AGGREGATE_KEY_DRIFT),
+            CFNumber::from(1i32).into_CFType(),
+        ),
+    ]);
+    let output_subdevice = CFDictionary::<CFString, CFType>::from_CFType_pairs(&[(
+        CFString::new(AGGREGATE_KEY_UID),
+        CFString::new(output_uid).into_CFType(),
+    )]);
+    let subdevices = CFArray::<CFType>::from_CFTypes(&[
+        input_subdevice.into_CFType(),
+        output_subdevice.into_CFType(),
+    ]);
+    CFDictionary::<CFString, CFType>::from_CFType_pairs(&[
+        (
+            CFString::new(AGGREGATE_KEY_UID),
+            CFString::new(uid).into_CFType(),
+        ),
+        (
+            CFString::new(AGGREGATE_KEY_NAME),
+            CFString::new(AGGREGATE_NAME).into_CFType(),
+        ),
+        (
+            CFString::new(AGGREGATE_KEY_SUBDEVICES),
+            subdevices.into_CFType(),
+        ),
+        (
+            CFString::new(AGGREGATE_KEY_MASTER),
+            CFString::new(output_uid).into_CFType(),
+        ),
+        (
+            CFString::new(AGGREGATE_KEY_PRIVATE),
+            CFNumber::from(1i32).into_CFType(),
+        ),
+    ])
+    .into_untyped()
+}
+
+/// A unique, process-scoped aggregate UID. Includes the process ID and a
+/// monotonic per-process counter so routes recreated in one process lifetime
+/// never collide with each other or with devices another process created.
+fn aggregate_uid(input: u32, output: u32) -> String {
+    let sequence = AGGREGATE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "org.freewheeling.aggregate.{}.{sequence:x}.{input:x}.{output:x}",
+        std::process::id()
+    )
+}
+
+impl OwnedAggregate {
+    /// Create a private aggregate device over `input` and `output`, with the
+    /// output device as master clock and drift compensation on the input.
+    fn create(input: u32, output: u32) -> Result<Self, String> {
+        let input_uid = device_uid(input)?;
+        let output_uid = device_uid(output)?;
+        let uid = aggregate_uid(input, output);
+        let description = aggregate_description(&uid, &input_uid, &output_uid);
+        let mut device_id = 0u32;
+        check(
+            unsafe {
+                AudioHardwareCreateAggregateDevice(
+                    description.as_CFTypeRef().cast(),
+                    &mut device_id,
+                )
+            },
+            &format!("create private aggregate device {uid}"),
+        )?;
+        let aggregate = Self {
+            device_id,
+            uid,
+            input_id: input,
+            output_id: output,
+            drift_compensation: true,
+        };
+        if let Err(error) = aggregate.verify(&input_uid, &output_uid) {
+            // Never hand a half-verified aggregate to the backend: destroy it
+            // immediately so a verification failure cannot leak a private
+            // device into the session.
+            let _ = destroy_aggregate_device(device_id);
+            return Err(error);
+        }
+        Ok(aggregate)
+    }
+
+    /// Confirm the created aggregate actually contains both requested
+    /// subdevices before any AudioUnit opens it.
+    fn verify(&self, input_uid: &str, output_uid: &str) -> Result<(), String> {
+        let address = AudioObjectPropertyAddress {
+            mSelector: K_AUDIO_AGGREGATE_PROPERTY_FULL_SUBDEVICE_LIST,
+            mScope: K_AUDIO_OBJECT_SCOPE_GLOBAL,
+            mElement: K_AUDIO_OBJECT_ELEMENT_MAIN,
+        };
+        let mut size = 0u32;
+        // SAFETY: first call with a null data pointer only requests the size.
+        check(
+            unsafe {
+                AudioObjectGetPropertyDataSize(self.device_id, &address, 0, ptr::null(), &mut size)
+            },
+            "query aggregate subdevice list size",
+        )?;
+        let mut bytes = vec![0u8; size as usize];
+        // SAFETY: the buffer matches the size CoreAudio reported.
+        check(
+            unsafe {
+                AudioObjectGetPropertyData(
+                    self.device_id,
+                    &address,
+                    0,
+                    ptr::null(),
+                    &mut size,
+                    bytes.as_mut_ptr().cast(),
+                )
+            },
+            "query aggregate subdevice list",
+        )?;
+        // The buffer holds the CFArrayRef *value*; dereference it rather than
+        // passing the buffer address. The returned CFArray of CFStrings is
+        // owned by this call (Create Rule); wrapping without retaining
+        // transfers that ownership to the wrapper, which releases it on drop.
+        let subdevices = unsafe {
+            let reference: CFArrayRef = ptr::read_unaligned(bytes.as_ptr().cast());
+            CFArray::<CFType>::wrap_under_create_rule(reference)
+        };
+        let mut found_input = false;
+        let mut found_output = false;
+        for index in 0..subdevices.len() {
+            let Some(item) = subdevices.get(index) else {
+                continue;
+            };
+            // SAFETY: the full sub-device list is documented as CFStrings.
+            // Get rule: the element is owned by the array, so retain-on-take
+            // with release-on-drop balances to a no-op instead of releasing
+            // the array's own reference.
+            let subdevice = unsafe { CFString::wrap_under_get_rule(item.as_CFTypeRef().cast()) };
+            let uid = subdevice.to_string();
+            found_input |= uid == input_uid;
+            found_output |= uid == output_uid;
+        }
+        if !found_input || !found_output {
+            return Err(format!(
+                "CoreAudio aggregate {0} ({1}) is missing requested subdevices \
+                 input={2} ({input_uid}) output={3} ({output_uid})",
+                self.device_id, self.uid, self.input_id, self.output_id
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Destroy an aggregate device previously created by this process. The
+/// destruction is asynchronous inside the HAL; a failed destroy is reported
+/// loudly because the private device would otherwise leak into the session.
+fn destroy_aggregate_device(device: u32) -> Result<(), String> {
+    check(
+        unsafe { AudioHardwareDestroyAggregateDevice(device) },
+        &format!("destroy private aggregate device {device}"),
     )
 }
 
@@ -1043,3 +1419,130 @@ fn pcm_format(rate: u32) -> AudioStreamBasicDescription {
         mReserved: 0,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core_foundation::base::{CFIndex, CFTypeRef};
+
+    fn dict_value(dict: &CFDictionary, key: &str) -> Option<CFTypeRef> {
+        let key = CFString::new(key);
+        dict.find(key.as_CFTypeRef()).map(|value| *value)
+    }
+
+    fn dict_string(dict: &CFDictionary, key: &str) -> Option<String> {
+        let raw = dict_value(dict, key)?;
+        // SAFETY: the dictionary value is a CFString for the tested keys.
+        let string = unsafe { CFString::wrap_under_get_rule(raw.cast()) };
+        Some(string.to_string())
+    }
+
+    fn dict_number(dict: &CFDictionary, key: &str) -> Option<i32> {
+        let raw = dict_value(dict, key)?;
+        // SAFETY: the dictionary value is a CFNumber for the tested keys.
+        let number = unsafe { CFNumber::wrap_under_get_rule(raw.cast()) };
+        number.to_i32()
+    }
+
+    fn dict_array(dict: &CFDictionary, key: &str) -> Option<CFArray<CFType>> {
+        let raw = dict_value(dict, key)?;
+        // SAFETY: the dictionary value is a CFArray for the tested keys.
+        Some(unsafe { CFArray::wrap_under_get_rule(raw.cast()) })
+    }
+
+    fn array_subdict(array: &CFArray<CFType>, index: usize) -> CFDictionary {
+        let item = array.get(index as CFIndex).expect("index in range");
+        // SAFETY: the array holds CFDictionary values for the tested index.
+        unsafe { CFDictionary::wrap_under_get_rule(item.as_CFTypeRef().cast()) }
+    }
+
+    fn test_backend() -> MacosAudioUnitBackend {
+        MacosAudioUnitBackend::new(DeviceSelection::default(), CpalAudioOptions::default())
+    }
+
+    #[test]
+    fn aggregate_description_sets_master_private_and_uids() {
+        let dict = aggregate_description("org.freewheeling.test.1", "input-uid", "output-uid");
+        assert_eq!(
+            dict_string(&dict, "uid"),
+            Some("org.freewheeling.test.1".into())
+        );
+        assert_eq!(dict_string(&dict, "name"), Some(AGGREGATE_NAME.to_string()));
+        // The output subdevice is the master clock.
+        assert_eq!(dict_string(&dict, "master"), Some("output-uid".into()));
+        // The device is private to this process and never published globally.
+        assert_eq!(dict_number(&dict, "private"), Some(1));
+    }
+
+    #[test]
+    fn aggregate_description_subdevices_carry_drift_on_input_only() {
+        let dict = aggregate_description("org.freewheeling.test.2", "input-uid", "output-uid");
+        let subdevices = dict_array(&dict, "subdevices").expect("subdevices key");
+        assert_eq!(subdevices.len(), 2);
+        let input = array_subdict(&subdevices, 0);
+        assert_eq!(dict_string(&input, "uid"), Some("input-uid".into()));
+        assert_eq!(dict_number(&input, "drift"), Some(1));
+        let output = array_subdict(&subdevices, 1);
+        assert_eq!(dict_string(&output, "uid"), Some("output-uid".into()));
+        assert_eq!(dict_number(&output, "drift"), None);
+    }
+
+    #[test]
+    fn aggregate_uids_are_unique_per_creation() {
+        let first = aggregate_uid(0x11, 0x22);
+        let second = aggregate_uid(0x11, 0x22);
+        assert_ne!(first, second);
+        assert!(first.starts_with(&format!(
+            "org.freewheeling.aggregate.{}.",
+            std::process::id()
+        )));
+    }
+
+    #[test]
+    fn owned_aggregate_device_is_destroyed_exactly_once() {
+        let mut backend = test_backend();
+        backend.route = Some(CoreAudioRoute {
+            requested_input: 0x11,
+            requested_output: 0x22,
+            active_device: 0x99,
+            owned_aggregate_uid: Some("org.freewheeling.test.owned".into()),
+        });
+        // The first claim consumes the ownership; a second claim is a no-op,
+        // so the HAL destroy call can never run twice for one aggregate.
+        assert_eq!(backend.take_owned_aggregate_device(), Some(0x99));
+        assert_eq!(backend.take_owned_aggregate_device(), None);
+        // destroy_owned_aggregate on an already-claimed route is a no-op too.
+        backend.route = None;
+        backend.destroy_owned_aggregate();
+    }
+
+    #[test]
+    fn discovered_route_device_is_never_destroyed() {
+        let mut backend = test_backend();
+        // Same device for input and output: the route is a discovered physical
+        // device, never an aggregate created by FreeWheeling.
+        backend.route = Some(CoreAudioRoute {
+            requested_input: 0x11,
+            requested_output: 0x11,
+            active_device: 0x11,
+            owned_aggregate_uid: None,
+        });
+        assert_eq!(backend.take_owned_aggregate_device(), None);
+    }
+
+    #[test]
+    fn destroy_owned_aggregate_clears_route_and_never_destroys_discovered_device() {
+        let mut backend = test_backend();
+        backend.route = Some(CoreAudioRoute {
+            requested_input: 0x11,
+            requested_output: 0x11,
+            active_device: 0x11,
+            owned_aggregate_uid: None,
+        });
+        // An externally supplied device (or a matching direct route) must not
+        // be destroyed; destroy_owned_aggregate only clears the route.
+        backend.destroy_owned_aggregate();
+        assert!(backend.route.is_none());
+    }
+}
+
