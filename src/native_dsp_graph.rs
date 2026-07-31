@@ -1467,7 +1467,7 @@ struct LatencyCalibration {
 const CALIBRATION_PULSE_SPACING_MILLIS: u64 = 500;
 const CALIBRATION_PULSES: usize = 5;
 // A longer coded marker provides processing gain when the speaker is quiet.
-const CALIBRATION_PULSE_FRAMES: u64 = 2_048;
+const CALIBRATION_PULSE_FRAMES: u64 = 1_024;
 const CALIBRATION_MIN_RETURN_FRAMES: u64 = 32;
 const CALIBRATION_MIN_VALID_PULSES: usize = 3;
 const CALIBRATION_MAX_SPREAD_FRAMES: u64 = 128;
