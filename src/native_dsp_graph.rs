@@ -1453,7 +1453,7 @@ pub struct RuntimeAudioProcessor<B: FluidSynthBackend = FluidLiteBackend> {
 
 struct LatencyCalibration {
     first_sample: u64,
-    detections: [Option<u64>; 3],
+    detections: [Option<u64>; CALIBRATION_PULSES],
     correlation_window: [f32; CALIBRATION_PULSE_FRAMES as usize],
     correlation_position: usize,
     correlation_seen: usize,
@@ -1462,9 +1462,18 @@ struct LatencyCalibration {
     earliest_strong_offset: Option<u64>,
 }
 
-const CALIBRATION_PULSE_SPACING_SECONDS: u64 = 1;
-const CALIBRATION_PULSE_FRAMES: u64 = 192;
+// Keep the probes short enough to finish startup quickly, but far enough apart
+// that a room reflection cannot be mistaken for the next marker.
+const CALIBRATION_PULSE_SPACING_MILLIS: u64 = 500;
+const CALIBRATION_PULSES: usize = 5;
+// A longer coded marker provides processing gain when the speaker is quiet.
+const CALIBRATION_PULSE_FRAMES: u64 = 2_048;
 const CALIBRATION_MIN_RETURN_FRAMES: u64 = 32;
+const CALIBRATION_MIN_VALID_PULSES: usize = 3;
+const CALIBRATION_MAX_SPREAD_FRAMES: u64 = 128;
+const CALIBRATION_STRONG_CORRELATION: f32 = 0.45;
+const CALIBRATION_MIN_CORRELATION: f32 = 0.30;
+const CALIBRATION_INVALID_DETECTION: u64 = u64::MAX;
 
 /// Constructs the concrete processor and its non-realtime control endpoint.
 /// Uses the production FluidLite synth backend.
@@ -2232,7 +2241,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                         first_sample: self
                             .sample_clock
                             .saturating_add(u64::from(self.sample_rate / 10)),
-                        detections: [None; 3],
+                        detections: [None; CALIBRATION_PULSES],
                         correlation_window: [0.0; CALIBRATION_PULSE_FRAMES as usize],
                         correlation_position: 0,
                         correlation_seen: 0,
@@ -3390,7 +3399,7 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
 impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
     fn measure_latency_sample(&mut self, sample: u64, level: f32) {
         let rate = u64::from(self.sample_rate);
-        let spacing = rate * CALIBRATION_PULSE_SPACING_SECONDS;
+        let spacing = rate * CALIBRATION_PULSE_SPACING_MILLIS / 1_000;
         let outcome = {
             let Some(calibration) = self.latency_calibration.as_mut() else {
                 return;
@@ -3436,7 +3445,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                         let candidate_offset = sample
                             .saturating_sub(CALIBRATION_PULSE_FRAMES - 1)
                             .saturating_sub(expected);
-                        if correlation >= 0.80
+                        if correlation >= CALIBRATION_STRONG_CORRELATION
                             && calibration.earliest_strong_offset.is_none()
                         {
                             calibration.earliest_strong_offset = Some(candidate_offset);
@@ -3450,35 +3459,74 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
             }
 
             if sample > expected + max_offset {
-                if calibration.best_correlation < 0.35
-                    || calibration.earliest_strong_offset.is_none()
+                calibration.detections[index] = if calibration.best_correlation
+                    >= CALIBRATION_MIN_CORRELATION
                 {
-                    Some(0)
-                } else {
-                    calibration.detections[index] = Some(
+                    Some(
                         expected
                             + calibration
                                 .earliest_strong_offset
                                 .unwrap_or(calibration.best_offset),
-                    );
-                    calibration.correlation_position = 0;
-                    calibration.correlation_seen = 0;
-                    calibration.best_correlation = 0.0;
-                    calibration.best_offset = 0;
-                    calibration.earliest_strong_offset = None;
+                    )
+                } else {
+                    Some(CALIBRATION_INVALID_DETECTION)
+                };
+                calibration.correlation_position = 0;
+                calibration.correlation_seen = 0;
+                calibration.best_correlation = 0.0;
+                calibration.best_offset = 0;
+                calibration.earliest_strong_offset = None;
 
-                    if calibration.detections.iter().all(Option::is_some) {
-                        let mut offsets = [0_u64; 3];
-                        for (index, detected) in calibration.detections.iter().enumerate() {
-                            offsets[index] = detected.unwrap().saturating_sub(
+                if calibration.detections.iter().all(Option::is_some) {
+                    let mut offsets = [0_u64; CALIBRATION_PULSES];
+                    let mut valid = 0;
+                    for (index, detected) in calibration.detections.iter().enumerate() {
+                        let Some(detected) = detected else {
+                            continue;
+                        };
+                        if *detected != CALIBRATION_INVALID_DETECTION {
+                            offsets[valid] = detected.saturating_sub(
                                 calibration.first_sample + spacing * index as u64,
                             );
+                            valid += 1;
                         }
-                        offsets.sort_unstable();
-                        Some(offsets[1].min(u64::from(u32::MAX)) as u32)
-                    } else {
-                        None
                     }
+                    if valid < CALIBRATION_MIN_VALID_PULSES {
+                        Some(0)
+                    } else {
+                        offsets[..valid].sort_unstable();
+                        let mut best_start = 0;
+                        let mut best_count = 0;
+                        let mut best_span = u64::MAX;
+                        for start in 0..valid {
+                            let mut count = 1;
+                            while start + count < valid
+                                && offsets[start + count] - offsets[start]
+                                    <= CALIBRATION_MAX_SPREAD_FRAMES
+                            {
+                                count += 1;
+                            }
+                            if count > best_count
+                                || (count == best_count
+                                    && offsets[start + count - 1] - offsets[start] < best_span)
+                            {
+                                best_start = start;
+                                best_count = count;
+                                best_span = offsets[start + count - 1] - offsets[start];
+                            }
+                        }
+                        if best_count < CALIBRATION_MIN_VALID_PULSES {
+                            Some(0)
+                        } else {
+                            Some(
+                                offsets[best_start + best_count / 2]
+                                    .min(u64::from(u32::MAX))
+                                    as u32,
+                            )
+                        }
+                    }
+                } else {
+                    None
                 }
             } else {
                 None
@@ -3498,8 +3546,8 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
 
     fn calibration_tone_sample(&self, sample: u64) -> Option<f32> {
         let calibration = self.latency_calibration.as_ref()?;
-        let spacing = u64::from(self.sample_rate) * CALIBRATION_PULSE_SPACING_SECONDS;
-        for index in 0..3_u64 {
+        let spacing = u64::from(self.sample_rate) * CALIBRATION_PULSE_SPACING_MILLIS / 1_000;
+        for index in 0..CALIBRATION_PULSES as u64 {
             let start = calibration.first_sample + spacing * index;
             let offset = sample.checked_sub(start)?;
             if offset < CALIBRATION_PULSE_FRAMES {
@@ -3513,12 +3561,14 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
 fn calibration_tone_sample_at(offset: u64, sample_rate: u32) -> f32 {
     let time = offset as f32 / sample_rate as f32;
     let duration = CALIBRATION_PULSE_FRAMES as f32 / sample_rate as f32;
-    let sweep = 1_100.0 / duration;
-    let phase = 700.0 * time + 0.5 * sweep * time * time;
+    let start_frequency = 500.0;
+    let end_frequency = (sample_rate as f32 * 0.45).clamp(2_000.0, 6_000.0);
+    let sweep = (end_frequency - start_frequency) / duration;
+    let phase = start_frequency * time + 0.5 * sweep * time * time;
     let envelope = 0.5
         - 0.5
             * (std::f32::consts::TAU * offset as f32 / CALIBRATION_PULSE_FRAMES as f32).cos();
-    0.75 * envelope * (std::f32::consts::TAU * phase).sin()
+    0.9 * envelope * (std::f32::consts::TAU * phase).sin()
 }
 
 #[cfg(test)]
@@ -3817,13 +3867,13 @@ mod tests {
     }
 
     #[test]
-    fn latency_calibration_correlates_a_quiet_delayed_tone() {
+    fn latency_calibration_handles_noise_missed_probes_and_outliers() {
         let (mut processor, mut controls) = processor(0.0);
         let first_sample = 0;
         let delay = 240_u64;
         processor.latency_calibration = Some(LatencyCalibration {
             first_sample,
-            detections: [None; 3],
+            detections: [None; CALIBRATION_PULSES],
             correlation_window: [0.0; CALIBRATION_PULSE_FRAMES as usize],
             correlation_position: 0,
             correlation_seen: 0,
@@ -3832,21 +3882,28 @@ mod tests {
             earliest_strong_offset: None,
         });
 
-        let end = u64::from(processor.sample_rate) * 3
-            + u64::from(processor.sample_rate) / 2
-            + 1;
+        let spacing = u64::from(processor.sample_rate) * CALIBRATION_PULSE_SPACING_MILLIS / 1_000;
+        let end = spacing * CALIBRATION_PULSES as u64 + u64::from(processor.sample_rate) / 2 + 1;
         for sample in 0..end {
-            let level = (0..CALIBRATION_PULSE_FRAMES).find_map(|offset| {
-                let delayed = sample.saturating_sub(
-                    first_sample
-                        + u64::from(processor.sample_rate)
-                            * (sample / u64::from(processor.sample_rate)),
-                );
-                (delayed == delay + offset).then(|| {
-                    calibration_tone_sample_at(offset, processor.sample_rate)
+            let pulse_index = sample / spacing;
+            let level = if pulse_index == 2 {
+                None
+            } else {
+                (0..CALIBRATION_PULSE_FRAMES).find_map(|offset| {
+                    let delayed = sample.saturating_sub(
+                        first_sample
+                            + spacing * pulse_index,
+                    );
+                    let pulse_delay = if pulse_index == 3 { 5_000 } else { delay };
+                    (delayed == pulse_delay + offset).then(|| {
+                        calibration_tone_sample_at(offset, processor.sample_rate) * 0.08
+                    })
                 })
-            });
-            processor.measure_latency_sample(sample, level.unwrap_or(0.0));
+            };
+            let noise = 0.055
+                * (sample as f32 * 0.017).sin()
+                + 0.035 * (sample as f32 * 0.043).cos();
+            processor.measure_latency_sample(sample, level.unwrap_or(0.0) + noise);
             if processor.latency_calibration.is_none() {
                 break;
             }
