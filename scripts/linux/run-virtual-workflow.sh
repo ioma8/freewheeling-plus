@@ -2,7 +2,7 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
 CRATE="$ROOT/freewheeling-plus"
-EVIDENCE_DIR=${FWP_ACCEPTANCE_EVIDENCE_DIR:-$ROOT/acceptance-evidence/linux-virtual}
+EVIDENCE_DIR=${FWP_ACCEPTANCE_EVIDENCE_DIR:-$CRATE/acceptance-evidence/linux-virtual}
 RUNTIME=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}/freewheeling-jack-${UID:-$(id -u)}}
 RESULT="$RUNTIME/performance.json"
 ATTESTATION="$EVIDENCE_DIR/attestation.json"

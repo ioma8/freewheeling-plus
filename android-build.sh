@@ -83,6 +83,15 @@ fi
 # cargo-apk requires a release signing key even for local builds. Use the
 # Android debug key when no release key was configured explicitly; callers can
 # still provide CARGO_APK_RELEASE_KEYSTORE[_PASSWORD] or manifest metadata.
+# CI runners have no Android Studio, so synthesize the standard debug
+# keystore (same alias/passwords Android Studio generates) when absent.
+if [ ! -f "$HOME/.android/debug.keystore" ] && command -v keytool >/dev/null 2>&1; then
+    mkdir -p "$HOME/.android"
+    keytool -genkeypair -keystore "$HOME/.android/debug.keystore" \
+        -storepass android -alias androiddebugkey -keypass android \
+        -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -validity 3650 \
+        >/dev/null 2>&1 || rm -f "$HOME/.android/debug.keystore"
+fi
 if [ -z "${CARGO_APK_RELEASE_KEYSTORE+x}" ] \
     && [ -z "${CARGO_APK_RELEASE_KEYSTORE_PASSWORD+x}" ] \
     && ! grep -q '^\[package\.metadata\.android\.signing\.release\]' Cargo.toml 2>/dev/null \
