@@ -7,7 +7,7 @@ RUNTIME=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}/freewheeling-jack-${UID:-$(id -u)}}
 RESULT="$RUNTIME/performance.json"
 ATTESTATION="$EVIDENCE_DIR/attestation.json"
 for command in cargo git python3; do command -v "$command" >/dev/null || { echo "error: missing command: $command" >&2; exit 127; }; done
-REVISION=$(git -C "$ROOT" rev-parse --verify HEAD)
+REVISION=$(git -C "$CRATE" rev-parse --verify HEAD)
 [ -n "$REVISION" ] || { echo "error: cannot determine checked-out revision" >&2; exit 1; }
 rm -f "$ATTESTATION" "$RESULT"
 mkdir -p "$EVIDENCE_DIR"
