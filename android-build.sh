@@ -38,6 +38,11 @@ if [ ! -d "$ANDROID_NDK_HOME" ]; then
     exit 1
 fi
 
+# Fetch dependency sources before patching: on a fresh cache the sdl2-sys
+# source is only extracted when cargo builds it, and the Android workarounds
+# below must apply before that build runs.
+cargo fetch --target aarch64-linux-android
+
 # SDL 2.26.4 still calls ALooper_pollAll(), which is marked unavailable by
 # the Android NDK headers. The APIs have the same signature here, and SDL's
 # sensor queue is created without a callback, so pollOnce is the compatible

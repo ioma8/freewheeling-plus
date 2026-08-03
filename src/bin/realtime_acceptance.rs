@@ -4,7 +4,7 @@ use freewheeling_plus::audioio::{AudioBackend, AudioCallback};
 #[cfg(target_os = "macos")]
 use freewheeling_plus::audioio::{AudioCallbackFn, BackendInfo};
 use freewheeling_plus::realtime_guard::{
-    CallbackCountingAllocator, RealtimeMetrics, reset_violation_counters,
+    CallbackCountingAllocator, PerformanceResult, RealtimeMetrics, reset_violation_counters,
 };
 use std::env;
 use std::fs;
@@ -110,36 +110,88 @@ fn run() -> Result<(), String> {
             result.callback_count, expected_callbacks
         ));
     }
-    let mut json = result.to_json().replacen(
-        &format!("\"duration_seconds\": {:.6}", result.duration_seconds),
-        &format!("\"duration_seconds\": {:.6}", total_duration),
-        1,
+    let json = attestation_json(
+        &result,
+        total_duration,
+        elapsed,
+        duration,
+        expected_callbacks,
+    )?;
+    atomic_write(&output, json.as_bytes())
+        .map_err(|error| format!("cannot write {}: {error}", output.display()))
+}
+
+/// Build the complete attestation JSON document: the measured performance
+/// metrics plus the provenance fields recorded around the acceptance run.
+/// Constructed as a `serde_json::Value` so the output always parses, even
+/// when the set of provenance fields changes.
+fn attestation_json(
+    result: &PerformanceResult,
+    total_duration: f64,
+    elapsed: f64,
+    duration: Duration,
+    expected_callbacks: u64,
+) -> Result<String, String> {
+    let mut document: serde_json::Value = serde_json::from_str(&result.to_json())
+        .map_err(|error| format!("internal performance JSON is invalid: {error}"))?;
+    let fields = document
+        .as_object_mut()
+        .ok_or_else(|| String::from("internal performance JSON is not an object"))?;
+    fields.insert(
+        "duration_seconds".into(),
+        serde_json::json!(total_duration),
     );
-    let binding = format!(
-        "  \"git_revision\": \"{}\",\n  \"evidence_mode\": \"{}\",\n  \"platform\": \"{}\",\n  \"host\": \"{}\",\n  \"recorded_at_unix\": {},\n  \"requested_duration_seconds\": {},\n  \"prior_elapsed_seconds\": {:.3},\n  \"segment_duration_seconds\": {:.6},\n  \"expected_minimum_callbacks\": {},\n  \"attestation_complete\": {}\n",
-        json_escape(&env::var("FWP_ACCEPTANCE_REVISION").unwrap_or_else(|_| "unknown".into())),
-        json_escape(
-            &env::var("FWP_ACCEPTANCE_EVIDENCE_MODE").unwrap_or_else(|_| "unspecified".into())
-        ),
-        if cfg!(target_os = "linux") {
+    fields.insert(
+        "git_revision".into(),
+        serde_json::json!(env::var("FWP_ACCEPTANCE_REVISION")
+            .unwrap_or_else(|_| "unknown".into())),
+    );
+    fields.insert(
+        "evidence_mode".into(),
+        serde_json::json!(env::var("FWP_ACCEPTANCE_EVIDENCE_MODE")
+            .unwrap_or_else(|_| "unspecified".into())),
+    );
+    fields.insert(
+        "platform".into(),
+        serde_json::json!(if cfg!(target_os = "linux") {
             "linux"
         } else {
             "macos"
-        },
-        json_escape(&env::var("HOSTNAME").unwrap_or_else(|_| "unknown".into())),
-        SystemTime::now()
+        }),
+    );
+    fields.insert(
+        "host".into(),
+        serde_json::json!(env::var("HOSTNAME").unwrap_or_else(|_| "unknown".into())),
+    );
+    fields.insert(
+        "recorded_at_unix".into(),
+        serde_json::json!(SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs(),
-        elapsed + duration.as_secs_f64(),
-        elapsed,
-        result.duration_seconds,
-        expected_callbacks,
-        total_duration + 0.001 >= elapsed + duration.as_secs_f64(),
+            .as_secs()),
     );
-    json.insert_str(json.len() - 2, &binding);
-    atomic_write(&output, json.as_bytes())
-        .map_err(|error| format!("cannot write {}: {error}", output.display()))
+    fields.insert(
+        "requested_duration_seconds".into(),
+        serde_json::json!(elapsed + duration.as_secs_f64()),
+    );
+    fields.insert(
+        "prior_elapsed_seconds".into(),
+        serde_json::json!(elapsed),
+    );
+    fields.insert(
+        "segment_duration_seconds".into(),
+        serde_json::json!(result.duration_seconds),
+    );
+    fields.insert(
+        "expected_minimum_callbacks".into(),
+        serde_json::json!(expected_callbacks),
+    );
+    fields.insert(
+        "attestation_complete".into(),
+        serde_json::json!(total_duration + 0.001 >= elapsed + duration.as_secs_f64()),
+    );
+    serde_json::to_string_pretty(&document)
+        .map_err(|error| format!("cannot serialize performance result: {error}"))
 }
 
 fn prior_elapsed_seconds() -> Result<f64, String> {
@@ -165,11 +217,6 @@ fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension("json.tmp");
     fs::write(&temporary, contents)?;
     fs::rename(temporary, path)
-}
-
-fn json_escape(value: &str) -> String {
-    let s = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string());
-    s[1..s.len() - 1].to_string()
 }
 
 fn passthrough(callback: &mut AudioCallback<'_>) {
@@ -626,5 +673,37 @@ mod tests {
             }),
             128
         );
+    }
+
+    #[test]
+    fn attestation_json_parses_and_carries_provenance() {
+        let result = PerformanceResult {
+            schema_version: 1,
+            sample_rate_hz: 48_000,
+            buffer_frames: 256,
+            duration_seconds: 3.0,
+            callback_p99_us: 200.0,
+            callback_deadline_us: 5333.0,
+            callback_allocations: 0,
+            blocking_lock_attempts: 0,
+            unexplained_xruns: 0,
+            rss_start_bytes: 1000,
+            rss_peak_bytes: 2000,
+            callback_count: 562,
+            deadline_misses: 0,
+        };
+        // SAFETY: test-only; no other code reads these variables concurrently.
+        unsafe {
+            std::env::set_var("FWP_ACCEPTANCE_REVISION", "deadbeef");
+            std::env::set_var("FWP_ACCEPTANCE_EVIDENCE_MODE", "virtual-jack");
+        }
+        let json = attestation_json(&result, 3.0, 0.0, Duration::from_secs(3), 500).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let object = value.as_object().unwrap();
+        assert_eq!(object["git_revision"], "deadbeef");
+        assert_eq!(object["evidence_mode"], "virtual-jack");
+        assert_eq!(object["attestation_complete"], true);
+        assert_eq!(object["expected_minimum_callbacks"], 500);
+        assert_eq!(object["sample_rate_hz"], 48_000);
     }
 }
