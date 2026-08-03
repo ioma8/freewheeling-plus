@@ -8,6 +8,7 @@ use freewheeling_plus::processor_queue::{ProcessorCommand, ProcessorCommandQueue
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
+use std::time::Duration;
 
 struct CountListener(Arc<AtomicUsize>);
 impl EventListener for CountListener {
