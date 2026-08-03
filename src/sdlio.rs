@@ -83,6 +83,14 @@ pub struct Sdl2InputBackend {
     video: sdl2::VideoSubsystem,
     event_pump: sdl2::EventPump,
     joysticks: Vec<sdl2::joystick::Joystick>,
+    /// Cached window pixel size, refreshed from `SizeChanged` events, used to
+    /// translate normalized SDL touch coordinates into mouse coordinates.
+    window_size: (u32, u32),
+    /// The touch finger currently acting as the mouse pointer. SDL2's Android
+    /// backend delivers only touch events (it never synthesizes mouse
+    /// events), so the first finger to touch drives the pointer; additional
+    /// fingers are ignored until it lifts.
+    touch_mouse_finger: Option<i64>,
 }
 
 impl Sdl2InputBackend {
@@ -118,11 +126,26 @@ impl Sdl2InputBackend {
             video,
             event_pump,
             joysticks,
+            window_size: (640, 480),
+            touch_mouse_finger: None,
         })
     }
     pub fn joystick_count(&self) -> usize {
         self.joysticks.len()
     }
+    /// Translate a normalized SDL touch coordinate (0.0..=1.0 over the window)
+    /// into a window pixel position for the mouse event path.
+    fn touch_pixel(&self, x: f32, y: f32) -> (i32, i32) {
+        touch_to_pixels(x, y, self.window_size.0, self.window_size.1)
+    }
+}
+
+/// Map a normalized SDL touch coordinate onto a window of `width` x `height`
+/// pixels, clamping out-of-range values the way SDL mouse coordinates are.
+fn touch_to_pixels(x: f32, y: f32, width: u32, height: u32) -> (i32, i32) {
+    let px = (x.clamp(0.0, 1.0) * width as f32) as i32;
+    let py = (y.clamp(0.0, 1.0) * height as f32) as i32;
+    (px, py)
 }
 
 impl SdlBackend for Sdl2InputBackend {
@@ -134,6 +157,13 @@ impl SdlBackend for Sdl2InputBackend {
                 eprintln!("FreeWheeling SDL event: {event:?}");
             }
             let translated = match event {
+                Event::Window {
+                    win_event: sdl2::event::WindowEvent::SizeChanged(width, height),
+                    ..
+                } => {
+                    self.window_size = (width.max(0) as u32, height.max(0) as u32);
+                    None
+                }
                 Event::Quit { .. } => Some(SdlEvent::Quit),
                 Event::JoyButtonDown {
                     which, button_idx, ..
@@ -150,6 +180,51 @@ impl SdlBackend for Sdl2InputBackend {
                     down: false,
                 }),
                 Event::MouseMotion { x, y, .. } => Some(SdlEvent::MouseMotion { x, y }),
+                // SDL2 touch events never become mouse events by themselves;
+                // on Android (and desktop touchscreens) the first finger to
+                // touch drives the pointer so the mouse-driven UI works.
+                Event::FingerDown {
+                    finger_id, x, y, ..
+                } => {
+                    if self.touch_mouse_finger.is_none() {
+                        self.touch_mouse_finger = Some(finger_id);
+                        let (px, py) = self.touch_pixel(x, y);
+                        Some(SdlEvent::MouseButton {
+                            button: 1,
+                            x: px,
+                            y: py,
+                            down: true,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                Event::FingerMotion {
+                    finger_id, x, y, ..
+                } => {
+                    if self.touch_mouse_finger == Some(finger_id) {
+                        let (px, py) = self.touch_pixel(x, y);
+                        Some(SdlEvent::MouseMotion { x: px, y: py })
+                    } else {
+                        None
+                    }
+                }
+                Event::FingerUp {
+                    finger_id, x, y, ..
+                } => {
+                    if self.touch_mouse_finger == Some(finger_id) {
+                        self.touch_mouse_finger = None;
+                        let (px, py) = self.touch_pixel(x, y);
+                        Some(SdlEvent::MouseButton {
+                            button: 1,
+                            x: px,
+                            y: py,
+                            down: false,
+                        })
+                    } else {
+                        None
+                    }
+                }
                 Event::MouseButtonDown {
                     mouse_btn, x, y, ..
                 } => Some(SdlEvent::MouseButton {
@@ -244,6 +319,7 @@ impl SdlBackend for Sdl2InputBackend {
     fn shutdown(&mut self) {
         self.video.text_input().stop();
         self.joysticks.clear();
+        self.touch_mouse_finger = None;
     }
 }
 
@@ -992,5 +1068,15 @@ mod tests {
         io.enable_key_repeat(true);
         assert!(io.poll().is_some());
         assert_eq!(io.take_pulse_subdivide(), Some(6));
+    }
+
+    #[test]
+    fn touch_coordinates_map_to_window_pixels() {
+        assert_eq!(touch_to_pixels(0.0, 0.0, 640, 480), (0, 0));
+        assert_eq!(touch_to_pixels(0.5, 0.5, 640, 480), (320, 240));
+        assert_eq!(touch_to_pixels(1.0, 1.0, 640, 480), (640, 480));
+        // Out-of-range values clamp instead of overflowing.
+        assert_eq!(touch_to_pixels(-0.5, 1.5, 640, 480), (0, 480));
+        assert_eq!(touch_to_pixels(0.25, 0.75, 1000, 2000), (250, 1500));
     }
 }

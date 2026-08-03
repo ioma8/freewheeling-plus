@@ -1,7 +1,12 @@
-//! Production CPAL duplex backend.
+//! Production CPAL duplex backend (split-clock fallback on macOS).
 //!
-//! CPAL owns separate capture and playback callbacks. Captured stereo frames
-//! cross a bounded `rtrb` queue; DSP remains exclusively owned by playback.
+//! CPAL owns separate capture and playback callbacks on distinct device
+//! clocks, connected by a bounded `rtrb` queue; DSP remains exclusively owned
+//! by playback. On macOS this path is the explicit `FWEELIN_AUDIO_BACKEND=cpal`
+//! override only — the default CoreAudio backend uses a private aggregate
+//! device instead, because the split clock domain can trim or fabricate
+//! captured frames under load. Diagnostics therefore label this path as the
+//! split-clock fallback.
 
 use crate::audioio::{
     AudioBackend, AudioCallback, AudioCallbackFn, AudioMetrics, AudioRecoveryMetrics, BackendInfo,
@@ -33,11 +38,10 @@ const DEFAULT_BUFFER_FRAMES: u32 = 256;
 #[cfg(not(any(target_os = "macos", target_os = "android")))]
 const DEFAULT_BUFFER_FRAMES: u32 = 64;
 const MIN_RING_PERIODS: usize = 2;
-// Capture and playback are separate streams on the non-aggregate macOS
-// fallback. Keep enough bounded headroom for the host to arm playback after
-// capture has started. Playback trims this safety backlog to one callback
-// period before invoking DSP, so the larger capacity is not extra steady-state
-// latency.
+// Capture and playback are separate streams on the split-clock fallback. Keep
+// enough bounded headroom for the host to arm playback after capture has
+// started. Playback trims this safety backlog to one callback period before
+// invoking DSP, so the larger capacity is not extra steady-state latency.
 const DEFAULT_RING_PERIODS: usize = 32;
 const MAX_CALLBACK_FRAMES: usize = 16_384;
 const ROUTE_POLL_INTERVAL_MS: u64 = 250;
@@ -81,6 +85,17 @@ pub struct CpalAudioStatus {
     pub playback_callbacks: u64,
     pub latency: Option<AudioLatency>,
     pub metrics: AudioMetrics,
+    pub stream: CpalStreamDiagnostics,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CpalStreamDiagnostics {
+    pub capture_frames: u64,
+    pub playback_frames: u64,
+    pub max_queue_frames: u64,
+    pub trimmed_frames: u64,
+    pub missing_frames: u64,
+    pub frame_size_mismatches: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,6 +135,12 @@ struct SharedMetrics {
     recovery_attempts: AtomicU64,
     recovery_failures: AtomicU64,
     cpu_load_bits: AtomicU32,
+    capture_frames: AtomicU64,
+    playback_frames: AtomicU64,
+    max_queue_frames: AtomicU64,
+    trimmed_frames: AtomicU64,
+    missing_frames: AtomicU64,
+    frame_size_mismatches: AtomicU64,
 }
 
 impl SharedMetrics {
@@ -146,6 +167,17 @@ impl SharedMetrics {
             callback_peak_nanos: self.callback_peak_nanos.load(Ordering::Relaxed),
             callback_total_nanos: self.callback_total_nanos.load(Ordering::Relaxed),
             recovery_requests: self.recovery_requests.load(Ordering::Relaxed),
+        }
+    }
+
+    fn stream_diagnostics(&self) -> CpalStreamDiagnostics {
+        CpalStreamDiagnostics {
+            capture_frames: self.capture_frames.load(Ordering::Relaxed),
+            playback_frames: self.playback_frames.load(Ordering::Relaxed),
+            max_queue_frames: self.max_queue_frames.load(Ordering::Relaxed),
+            trimmed_frames: self.trimmed_frames.load(Ordering::Relaxed),
+            missing_frames: self.missing_frames.load(Ordering::Relaxed),
+            frame_size_mismatches: self.frame_size_mismatches.load(Ordering::Relaxed),
         }
     }
 }
@@ -267,6 +299,7 @@ impl CpalAudioBackend {
             playback_callbacks: self.metrics.callbacks.load(Ordering::Relaxed),
             latency: None,
             metrics: self.metrics.snapshot(),
+            stream: self.metrics.stream_diagnostics(),
         }
     }
 
@@ -388,6 +421,22 @@ impl AudioBackend for CpalAudioBackend {
         self.opened = Some(opened);
         self.info = Some(info);
         self.route = Some(route);
+        if std::env::var_os("FWEELIN_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "[AUDIO-DIAG] CPAL split-clock fallback opened input={:?} output={:?} rate={} buffer={} input_channels={} output_channels={} ring_frames={}",
+                self.route.as_ref().map(|route| &route.input_name),
+                self.route.as_ref().map(|route| &route.output_name),
+                info.sample_rate,
+                info.buffer_size,
+                self.opened
+                    .as_ref()
+                    .map_or(0, |opened| opened.input_config.channels),
+                self.opened
+                    .as_ref()
+                    .map_or(0, |opened| opened.output_config.channels),
+                info.buffer_size as usize * self.options.ring_periods.max(MIN_RING_PERIODS),
+            );
+        }
         self.clear_recovery_request();
         Ok(info)
     }
@@ -422,6 +471,10 @@ impl AudioBackend for CpalAudioBackend {
                     input_metrics
                         .capture_callbacks
                         .fetch_add(1, Ordering::Relaxed);
+                    input_metrics.capture_frames.fetch_add(
+                        (data.len() / input_channels.max(1)) as u64,
+                        Ordering::Relaxed,
+                    );
                     capture_callback(data, input_channels, &mut producer, &input_metrics)
                 },
                 stream_error_callback(Arc::clone(&self.metrics), self.realtime_metrics.clone()),
@@ -460,10 +513,11 @@ impl AudioBackend for CpalAudioBackend {
             })?;
 
         // Start capture before playback. These are separate streams on the
-        // fallback route; starting playback first can consume several empty
-        // periods before CoreAudio schedules the input callback, which shows
-        // up as a permanent startup underrun in diagnostics and loses the
-        // first live input frames. Give capture a short non-realtime startup
+        // split-clock fallback route; starting playback first can consume
+        // several empty periods before CoreAudio schedules the input
+        // callback, which shows up as a permanent startup underrun in
+        // diagnostics and loses the first live input frames. Give capture a
+        // short non-realtime startup
         // window to publish at least one frame before arming playback. This
         // does not add steady-state latency: playback still trims the queue
         // to at most one callback period below.
@@ -842,6 +896,9 @@ fn playback_callback(
         // through it unnoticed.
         if frame_count != expected_frames {
             metrics.xruns.fetch_add(1, Ordering::Relaxed);
+            metrics
+                .frame_size_mismatches
+                .fetch_add(1, Ordering::Relaxed);
         }
         // Capture and playback are separate CPAL streams.  Capture is started
         // first and can fill several ring periods while playback starts.  If
@@ -849,6 +906,9 @@ fn playback_callback(
         // Keep at most one callback queued: enough phase tolerance without
         // allowing the ring's safety capacity to become audible delay.
         let queued = consumer.slots();
+        metrics
+            .max_queue_frames
+            .fetch_max(queued as u64, Ordering::Relaxed);
         let max_queued = frame_count;
         let trimmed = queued.saturating_sub(max_queued);
         for _ in 0..trimmed {
@@ -860,6 +920,9 @@ fn playback_callback(
         // count what it discards so clock drift is observable rather than
         // silently glitching audio.
         if trimmed != 0 {
+            metrics
+                .trimmed_frames
+                .fetch_add(trimmed as u64, Ordering::Relaxed);
             metrics
                 .capture_overruns
                 .fetch_add(trimmed as u64, Ordering::Relaxed);
@@ -905,11 +968,15 @@ fn playback_callback(
             }
             frame_position = frame_position.wrapping_add(frames as u64);
             if missing != 0 {
+                metrics.missing_frames.fetch_add(missing, Ordering::Relaxed);
                 metrics
                     .capture_underruns
                     .fetch_add(missing, Ordering::Relaxed);
             }
         }
+        metrics
+            .playback_frames
+            .fetch_add(frame_count as u64, Ordering::Relaxed);
         let nanos = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         metrics.callbacks.fetch_add(1, Ordering::Relaxed);
         metrics

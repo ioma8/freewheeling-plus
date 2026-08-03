@@ -12,6 +12,21 @@ crate-type = ["cdylib", "rlib"]
 default = []
 jack = ["dep:jack"]
 
+# The realtime DSP runs on CoreAudio's 512 KiB IO thread. Debug builds (opt 0)
+# give the huge audio-callback match functions frames over a megabyte because
+# stack slots are never reused; opt-level 1 collapses those frames so the app
+# and its tests cannot overflow the audio thread. Realtime behavior is
+# unaffected (release builds are unchanged).
+[profile.dev]
+opt-level = 1
+
+# The release DSP path spans core_dsp, the native graph, and the audio
+# adapters. Thin LTO lets the optimizer inline across those crate boundaries
+# without the link-time cost of full LTO, which keeps the realtime callback
+# hot while release CI stays fast.
+[profile.release]
+lto = "thin"
+
 [dependencies]
 libc = "0.2"
 roxmltree = "0.20"
@@ -30,6 +45,10 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 rtrb = "0.3.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[dev-dependencies]
+sha2 = "0.10"
+
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 jack = { version = "0.13.5", optional = true }
 
@@ -37,6 +56,7 @@ jack = { version = "0.13.5", optional = true }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
+core-foundation = "0.10"
 coreaudio-sys = { version = "0.2", features = ["audio_unit"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

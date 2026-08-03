@@ -1,0 +1,18 @@
+# Normalize text files to LF on every platform so line-ending-sensitive
+# checks (documented markers, recorded digests) behave identically in CI.
+* text=auto eol=lf
+
+# Binary assets stay byte-for-byte identical on every platform.
+*.sf2 binary
+*.ttf binary
+*.otf binary
+*.mid binary
+*.raw binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.flac binary
+*.ogg binary
+*.wav binary
+*.au binary
+fixtures/** binary

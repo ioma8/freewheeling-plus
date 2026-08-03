@@ -95,6 +95,7 @@ pub fn application_support_path(home: &Path) -> PathBuf {
         // Android internal storage: /data/data/<package>/
         // Matches Cargo.toml [package.metadata.bundle].identifier on Android.
         // SDL2's SDL_GetPrefPath is also available after init.
+        let _ = home;
         Path::new("/data/data/org.freewheeling.freewheeling-plus/files/.fweelin").to_path_buf()
     }
     #[cfg(not(any(target_os = "macos", target_os = "android")))]

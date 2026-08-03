@@ -30,7 +30,6 @@ pub const MAX_RT_STRUCTS: usize = 20;
 /// Number of data bytes in one config variable
 pub const CFG_VAR_SIZE: usize = 16;
 
-
 // ============================================================
 // CoreDataType
 // ============================================================
@@ -338,7 +337,14 @@ impl Default for UserVariable {
     }
 }
 
+impl fmt::Debug for UserVariable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "UserVariable({:?}, val={})", self.type_, self.print())
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod user_variable_tests {
     use super::*;
 
@@ -369,12 +375,6 @@ mod user_variable_tests {
         assert_eq!(value.print(), "1.24");
         value.set_range(-2, 9);
         assert_eq!(value.print(), "-2>9");
-    }
-}
-
-impl fmt::Debug for UserVariable {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "UserVariable({:?}, val={})", self.type_, self.print())
     }
 }
 
@@ -426,4 +426,3 @@ impl RTRWThreads {
         }
     }
 }
-

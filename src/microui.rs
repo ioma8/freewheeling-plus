@@ -3,6 +3,8 @@
 //! Every coordinate is in logical space (640×480).  The RenderMetrics
 //! scaling handles Retina via sx/sy.
 
+#![allow(clippy::too_many_arguments)]
+
 use crate::videoio_displays::{Color, DrawOp, RenderMetrics, Renderer};
 
 // ── microui colour palette ────────────────────────────────────────
