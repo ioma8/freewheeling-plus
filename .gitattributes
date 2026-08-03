@@ -1,8 +1,18 @@
-# Historical C++ golden fixtures carry recorded SHA-256 digests in
-# MANIFEST.sha256. Git's Windows autocrlf would rewrite LF into CRLF on
-# checkout and change those digests, so the fixtures must stay byte-for-byte
-# identical on every platform.
-fixtures/cpp-golden/** -text
+# Normalize text files to LF on every platform so line-ending-sensitive
+# checks (documented markers, recorded digests) behave identically in CI.
+* text=auto eol=lf
 
-# Reference audio/screenshot assets are byte-exact by contract.
-fixtures/** -text
+# Binary assets stay byte-for-byte identical on every platform.
+*.sf2 binary
+*.ttf binary
+*.otf binary
+*.mid binary
+*.raw binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.flac binary
+*.ogg binary
+*.wav binary
+*.au binary
+fixtures/** binary
