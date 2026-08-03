@@ -1,2 +1,0 @@
-[permissions]
-allow = ["Bash=git status && echo \"---BRANCH---\" && git branch --show-current && echo \"---RECENT LOG---\" && git log --oneline -15"]
