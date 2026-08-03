@@ -21,7 +21,12 @@ FreeWheeling+ currently runs on macOS (daily-driver) and Linux (tested occasiona
 
 ## 1. Windows
 
-### Effort: ~3 days
+### Status: VERIFIED in CI
+
+Windows is now built and tested on every CI run (check, clippy with
+`-D warnings`, and the full test suite on `windows-latest`), and release
+archives are built by the release workflow. A mingw cross-build script
+(`win-build.sh`) is included for local verification on macOS.
 
 ### Already Works
 
@@ -31,112 +36,52 @@ FreeWheeling+ currently runs on macOS (daily-driver) and Linux (tested occasiona
 - All pure-Rust codec, image, font, and config dependencies
 - `libc` crate works on Windows via mingw (signal.h has different constants)
 
-### Blockers
+### Resolved Blockers
 
 #### 1.1 Crate Dependencies — `Cargo.toml`
 
-```toml
-# Current (objc2 is top-level, always compiled):
-[dependencies]
-objc2 = "0.6"
-objc2-foundation = "0.3"
-objc2-app-kit = "0.3"
-jack = "0.13.5"              # already Linux-only
+The `objc2*` and macOS-only dependencies were already behind
+`[target.'cfg(target_os = "macos")']`; the `jack` crate is gated to
+Linux/macOS/Windows targets.
 
-# Change to:
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-foundation = "0.3"
-objc2-app-kit = "0.3"
-jack = "0.13.5"              # move here too (both macOS and Linux need it)
-```
+#### 1.2/1.3 Entry Point and Platform Impl
 
-Also gate `coreaudio-sys` and `macos_audio_unit.rs` — already done.
-
-#### 1.2 Entry Point — new `src/windows_main.rs`
-
-SDL2 on Windows expects `WinMain` (or provides `SDL_main`). Create:
-
-```rust
-// src/windows_main.rs — gated #[cfg(windows)]
-#![cfg(windows)]
-
-#[link_section = ".CRT$XCU"]
-#[used]
-static INIT_SDL: unsafe extern "C" fn() = init_sdl;
-
-unsafe extern "C" fn init_sdl() {
-    // SDL2 sets up console and calls our main
-}
-```
-
-Or use `sdl2::compile_link()` which provides `SDL_main` via the `sdl2` crate's `bundled` feature (already used). The `main.rs` just needs a `#[cfg(windows)] fn main()` that calls the same `Application::run()`.
-
-#### 1.3 Platform Impl — new `src/windows.rs`
-
-```rust
-//! Windows application platform (replaces macos::CocoaPlatform on Windows).
-
-pub struct WindowsPlatform {
-    // No Cocoa objects needed
-}
-
-impl Platform for WindowsPlatform {
-    type Error = String;
-
-    fn application_support_dir(&self) -> Result<PathBuf, Self::Error> {
-        // Use %APPDATA%/FreeWheeling or knownfolder FOLDERID_RoamingAppData
-        let appdata = std::env::var_os("APPDATA")
-            .ok_or_else(|| "APPDATA is not set".to_string())?;
-        Ok(Path::new(&appdata).join("FreeWheeling"))
-    }
-
-    fn initialize(&mut self) -> Result<(), Self::Error> {
-        // Nothing needed — SDL2 handles window creation
-        Ok(())
-    }
-
-    fn set_menu_and_foreground(&mut self) -> Result<(), Self::Error> {
-        // No-op: SDL2 manages the window
-        Ok(())
-    }
-
-    fn cleanup(&mut self) {
-        // No-op
-    }
-}
-```
+No `windows.rs`/`windows_main.rs` were needed: the `Platform` trait is
+unused in production (the doc's Android section notes the same), and the
+standard `main()` entry point links fine against SDL2's bundled Win32
+backend.
 
 #### 1.4 Signal Handling — `src/signal.rs`
 
-`libc::sigaction`, `libc::write(STDERR_FILENO, ...)`, and `libc::_exit()` all work on mingw. But Windows native structured exception handling (SEH) is different. Two options:
-
-- **Option A (low effort):** Use `libc` mingw signals (SIGSEGV, SIGFPE, etc.) — works but may not catch all crash types. Test with `#[cfg(windows)]`.
-- **Option B (better):** Add `windows-sys` crate and `AddVectoredExceptionHandler` for SEH translation. ~50 lines.
-
-**Recommendation:** Option A for initial port, Option B as follow-up.
+The signal text maps and handler registration now compile on non-Unix
+platforms (Option A): `SIGBUS`/`SIGUSR*` arms are gated to Unix, and the
+CRT `signal()` function catches console interrupts (Ctrl+C) for clean
+shutdown on Windows.
 
 #### 1.5 packaging_guardrails — `tests/packaging_guardrails.rs`
 
-The existing macOS bundling test (`bundle_verifier_requires_executable...`) needs a `#[cfg(not(windows))]` gate.
+The macOS bundling test is gated with `#![cfg(target_os = "macos")]`.
 
-### Files Changed
+### Current State
 
-| File | Change |
-|------|--------|
-| `Cargo.toml` | Move `objc2*` + `jack` behind `[target.'cfg(target_os = "macos")']` |
-| `src/lib.rs` | Add `#[cfg(windows)] pub mod windows;` |
-| `src/windows.rs` | **New** — `WindowsPlatform` impl |
-| `src/windows_main.rs` | **New** — `WinMain` entry point |
-| `src/signal.rs` | `#[cfg(windows)]` path using mingw signals |
-| `src/native_runtime.rs` | Use `WindowsPlatform` when `#[cfg(windows)]` |
-| `tests/packaging_guardrails.rs` | `#[cfg(not(windows))]` on bundling test |
+| File | Change | Status |
+|------|--------|--------|
+| `Cargo.toml` | macOS-only deps behind `cfg(target_os = "macos")` | ✅ Done |
+| `src/signal.rs` | Portable signal maps + CRT console-interrupt handlers | ✅ Done |
+| `src/bin/realtime_acceptance.rs` | Gate macOS-only imports | ✅ Done |
+| `.github/workflows/ci.yml` | Windows check/clippy/test job | ✅ Done |
+| `.github/workflows/release.yml` | Windows release archive | ✅ Done |
+| `win-build.sh` | mingw cross-build with toolchain discovery | ✅ Done |
 
 ---
 
 ## 2. Android
 
-### Effort: ~2 weeks
+### Status: builds in CI and releases
+
+A signed release APK is built on every CI run and attached to GitHub
+releases. Touch input mapping is implemented; on-device testing remains the
+open hardware gate.
 
 ### Already Works
 
@@ -152,95 +97,27 @@ The existing macOS bundling test (`bundle_verifier_requires_executable...`) need
 - ✅ `src/native_startup.rs` — `application_support_path` returns Android internal storage
 - ✅ `src/audio_native_cpal.rs` — `DEFAULT_BUFFER_FRAMES = 256` for Android OpenSL ES
 
-### Remaining Blockers
+### Implemented
+
+- ✅ `src/lib.rs` — `SDL_main` entry point for Android JNI glue
+- ✅ `src/main.rs` — Signal handlers (fatal + shutdown only, avoids SIGUSR*)
+- ✅ `src/native_startup.rs` — `application_support_path` returns Android internal storage
+- ✅ `src/audio_native_cpal.rs` — `DEFAULT_BUFFER_FRAMES = 256` for Android OpenSL ES
+- ✅ `src/sdlio.rs` — SDL touch events map to the mouse path (first finger
+  drives the pointer; extra fingers are ignored until it lifts), so the
+  mouse-driven UI is usable on Android and desktop touchscreens
+
+### Remaining
 
 #### 2.1 Build Toolchain
 
-Android builds require `cargo-ndk` + NDK r26+:
-
-```sh
-cargo install cargo-ndk
-rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
-cargo ndk -t arm64-v8a -o app/src/main/jniLibs build --release
-```
-
-SDK packaging needs `cargo-apk`:
-
-```sh
-cargo install cargo-apk
-cargo apk run --release
-```
-
-The `sdl2` crate's `bundled` feature compiles SDL2 from source for Android targets. Requires NDK tools on PATH.
-
-#### 2.2 Entry Point — `SDL_main`
-
-`cargo-apk` packages the Rust `cdylib` and Android's `NativeActivity` loads its
-`SDL_main` export through SDL2's Java glue. Keep the export in `src/lib.rs`:
-
-```rust
-#[cfg(target_os = "android")]
-#[unsafe(no_mangle)]
-pub extern "C" fn SDL_main(_argc: i32, _argv: *const *const i8) -> i32 {
-    Application::run()
-}
-```
-
-The `sdl2` crate's `use_main` or `raw` feature controls whether it provides `SDL_main` or expects the caller to. On Android, the Java glue calls `nativeInit` which eventually invokes the app's `SDL_main`.
-
-#### 2.3 Platform Impl — extend `src/windows.rs` or create `src/android.rs`
-
-```rust
-//! Android application platform.
-
-pub struct AndroidPlatform;
-
-impl Platform for AndroidPlatform {
-    type Error = String;
-
-    fn application_support_dir(&self) -> Result<PathBuf, Self::Error> {
-        // Internal storage: /data/data/<package>/
-        // SDL2 provides the internal path via JNI, but the simplest
-        // approach is a fixed relative path from the app's private dir.
-        Ok(PathBuf::from("/data/data/org.freewheeling.freewheeling-plus"))
-    }
-
-    fn initialize(&mut self) -> Result<(), Self::Error> { Ok(()) }
-    fn set_menu_and_foreground(&mut self) -> Result<(), Self::Error> { Ok(()) }
-    fn cleanup(&mut self) {}
-}
-```
-
-A more robust approach reads the app's internal path from `SDL_AndroidGetInternalStoragePath()` (via `sdl2::filesystem::pref_path()`).
-
-#### 2.4 Audio Buffer Tuning — `src/audio_native_cpal.rs`
-
-```rust
-// Current:
-#[cfg(target_os = "macos")]
-const DEFAULT_BUFFER_FRAMES: u32 = 16;
-#[cfg(not(target_os = "macos"))]
-const DEFAULT_BUFFER_FRAMES: u32 = 64;
-
-// Android may need larger buffers for reliable performance:
-#[cfg(target_os = "android")]
-const DEFAULT_BUFFER_FRAMES: u32 = 256;
-```
-
-#### 2.5 MIDI — `MidirMidiBackend` on Android
-
-The `midir` crate supports Android via the `default` feature, using ALSA sequencer through NDK. However, not all Android devices have ALSA MIDI — most use USB MIDI through the Android USB host API. This may require a separate `usb-midi` backend or fallback to no MIDI.
-
-#### 2.6 Screen Resolution and Input
-
-Android touch input comes through SDL2 as `SDL_FINGERDOWN`/`SDL_FINGERUP`/`SDL_FINGERMOTION`. The current `InputEvent` enum handles mouse events — touch events need mapping:
-
-```rust
-// In sdlio.rs or sdlkey_compat.rs:
-InputEvent::Touch { x: f32, y: f32, down: bool, finger_id: i64 }
-```
-
-The FreeWheeling UI is designed for a mouse-driven interface. Touch mapping needs testing but SDL2 handles the translation.
+`android-build.sh` builds the release APK via `cargo-apk`. It locates the
+SDK from `ANDROID_HOME`/`ANDROID_SDK_ROOT` or the conventional install
+paths, selects the NDK (`ANDROID_NDK_VERSION`, default 28.2.13676358),
+fetches dependency sources before applying the sdl2-sys Android workarounds
+(ALooper_pollAll→pollOnce, HIDAPI/C++ runtime link directives), and signs
+with the debug keystore unless a release key is configured. CI installs the
+SDK/NDK and runs the same script.
 
 ### Files Changed — Status
 
@@ -253,7 +130,11 @@ The FreeWheeling UI is designed for a mouse-driven interface. Touch mapping need
 | `src/native_startup.rs` | Android `application_support_path` | ✅ Done |
 | `src/main.rs` | Android signal handler registration | ✅ Done |
 | `src/audio_native_cpal.rs` | Android buffer size tuning (256 frames) | ✅ Done |
-| `src/sdlio.rs` | Handle `SDL_FINGERDOWN/UP/MOTION` | ❌ Future — needs touch event support in InputEvent |
+| `src/sdlio.rs` | Map `SDL_FINGERDOWN/UP/MOTION` to mouse events | ✅ Done |
+| `android-build.sh` | SDK discovery, sdl2-sys workarounds, signing | ✅ Done |
+| `.github/workflows/ci.yml` | Android release-APK job | ✅ Done |
+| `.github/workflows/release.yml` | Android APK release artifact | ✅ Done |
+| Device testing | Touch UX, latency on real hardware | ⏳ Hardware gate |
 | `native_runtime.rs` | Use `AndroidPlatform` | ❌ Not needed (Platform trait unused in production) |
 ---
 
@@ -489,12 +370,14 @@ pub mod ios;
 
 | Platform | Code Changes | Build Infrastructure | Testing | Total |
 |----------|-------------|---------------------|---------|-------|
-| **Windows** | ~200 lines across 4 files | None (cargo build works) | Manual smoke test | **~3 days** |
-| **Android** | ~150 lines across 4 files | `cargo-ndk` + `cargo-apk` setup | Emulator + device | **~2 weeks** |
-| **iOS** | ~400 lines across 6 files | `cargo-xcode` + Xcode config | Simulator + device + TestFlight | **~2-3 weeks** |
+| **Windows** | signal/CI fixes | Windows check/clippy/test CI + release archive | CI + release workflow | **landed** |
+| **Android** | touch mapping, build script | `cargo-apk` CI + release APK | Emulator + device | **landed (build); device testing open** |
+| **iOS** | ~400 lines across 6 files | `cargo-xcode` + Xcode config | Simulator + device + TestFlight | **future work** |
 
 ### Recommended Order
 
-1. **Windows** — unlocks the largest user base with the least effort. Most of the code already works.
-2. **iOS** — removes the AppKit dependency from the shared dep graph, making Windows cleaner too. CPAL on iOS works immediately, AudioUnit optimization can follow.
-3. **Android** — requires build toolchain investment but the audio/MIDI stack is already portable.
+1. **Windows** — done: CI and release archives are green.
+2. **Android** — build/packaging done; the remaining gate is on-device touch
+   and latency validation.
+3. **iOS** — not started; requires the AppKit dependency to be gated out of
+   the shared dependency graph.
