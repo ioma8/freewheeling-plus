@@ -43,13 +43,22 @@ fi
 # below must apply before that build runs.
 cargo fetch --target aarch64-linux-android
 
+# Apply a sed program in place portably: BSD sed wants `-i ''` while GNU sed
+# rejects it, so write to a temporary file and move it over the original.
+portable_sed() {
+    pattern=$1
+    file=$2
+    sed "$pattern" "$file" > "$file.tmp"
+    mv "$file.tmp" "$file"
+}
+
 # SDL 2.26.4 still calls ALooper_pollAll(), which is marked unavailable by
 # the Android NDK headers. The APIs have the same signature here, and SDL's
 # sensor queue is created without a callback, so pollOnce is the compatible
 # replacement for this call site.
 SDL2_SENSOR="$HOME/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sdl2-sys-0.38.0/SDL/src/sensor/android/SDL_androidsensor.c"
 if [ -f "$SDL2_SENSOR" ] && grep -q "ALooper_pollAll" "$SDL2_SENSOR" 2>/dev/null; then
-    sed -i '' 's/ALooper_pollAll/ALooper_pollOnce/g' "$SDL2_SENSOR"
+    portable_sed 's/ALooper_pollAll/ALooper_pollOnce/g' "$SDL2_SENSOR"
     echo "Patched sdl2-sys Android sensor source for current NDK headers"
 fi
 
@@ -57,16 +66,16 @@ fi
 # bundled SDL builds the Android HID implementation into libSDL2.a.
 SDL2_BUILD_RS="$HOME/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sdl2-sys-0.38.0/build.rs"
 if [ -f "$SDL2_BUILD_RS" ] && grep -q 'cargo:rustc-link-lib=hidapi' "$SDL2_BUILD_RS" 2>/dev/null; then
-    sed -i '' '/cargo:rustc-link-lib=hidapi/d' "$SDL2_BUILD_RS"
+    portable_sed '/cargo:rustc-link-lib=hidapi/d' "$SDL2_BUILD_RS"
     echo "Patched sdl2-sys Android HIDAPI link directive"
 fi
 if [ -f "$SDL2_BUILD_RS" ] && ! grep -q 'cargo:rustc-link-lib=c++_static' "$SDL2_BUILD_RS" 2>/dev/null; then
-    sed -i '' 's/println!("cargo:rustc-link-lib=OpenSLES");/println!("cargo:rustc-link-lib=OpenSLES");\
+    portable_sed 's/println!("cargo:rustc-link-lib=OpenSLES");/println!("cargo:rustc-link-lib=OpenSLES");\
             println!("cargo:rustc-link-lib=c++_static");/' "$SDL2_BUILD_RS"
     echo "Patched sdl2-sys Android C++ runtime link directive"
 fi
 if [ -f "$SDL2_BUILD_RS" ] && ! grep -q 'cargo:rustc-link-lib=c++abi' "$SDL2_BUILD_RS" 2>/dev/null; then
-    sed -i '' 's/println!("cargo:rustc-link-lib=c++_static");/println!("cargo:rustc-link-lib=c++_static");\
+    portable_sed 's/println!("cargo:rustc-link-lib=c++_static");/println!("cargo:rustc-link-lib=c++_static");\
             println!("cargo:rustc-link-lib=c++abi");/' "$SDL2_BUILD_RS"
     echo "Patched sdl2-sys Android C++ ABI link directive"
 fi

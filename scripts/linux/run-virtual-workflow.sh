@@ -18,7 +18,8 @@ FWP_PERFORMANCE_RESULT="$RESULT" FWP_REALTIME_ACCEPTANCE_SECONDS=${FWP_REALTIME_
   "$CRATE/scripts/linux/run-virtual-acceptance.sh"
 python3 - "$RESULT" "$ATTESTATION" "$REVISION" <<'PY'
 import hashlib, json, pathlib, sys
-result_path, attestation_path, revision = map(pathlib.Path, sys.argv[1:])
+result_path, attestation_path = map(pathlib.Path, sys.argv[1:3])
+revision = sys.argv[3]
 result = json.loads(result_path.read_text(encoding="utf-8"))
 if result.get("git_revision") != revision: raise SystemExit("error: result revision mismatch")
 if result.get("evidence_mode") != "virtual-jack": raise SystemExit("error: result evidence mode mismatch")
