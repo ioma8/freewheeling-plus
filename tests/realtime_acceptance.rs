@@ -69,11 +69,14 @@ fn memory_manager_recycles_deferred_items_before_shutdown() {
     });
     let item = ty.rt_new().unwrap();
     ty.rt_delete(item);
+    // The manager deliberately parks for up to one millisecond while idle,
+    // so yielding alone can exhaust the wait on a slower scheduler; poll
+    // with a bounded sleep like the mem module's own tests.
     for _ in 0..1000 {
         if recycled.load(Ordering::SeqCst) == 1 {
             break;
         }
-        thread::yield_now();
+        thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(recycled.load(Ordering::SeqCst), 1);
     assert!(ty.rt_new().is_some());
