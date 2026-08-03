@@ -35,11 +35,13 @@ fn category_files(root: &Path) -> BTreeSet<String> {
             if path.is_dir() {
                 visit(root, &path, files);
             } else {
+                // Manifest rows always use forward slashes; normalize the
+                // platform-native separator (backslash on Windows).
                 files.insert(
                     path.strip_prefix(root)
                         .unwrap()
                         .to_string_lossy()
-                        .into_owned(),
+                        .replace('\\', "/"),
                 );
             }
         }
