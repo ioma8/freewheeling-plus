@@ -155,7 +155,7 @@ impl MidiBackend for MidirMidiBackend {
             self.inputs.push(connection);
         }
         drop(sender);
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "android")))]
         for index in 0..output_count {
             let output = midir::MidiOutput::new(CLIENT_NAME)
                 .map_err(|e| format!("MIDI: cannot create output: {e}"))?;
@@ -164,8 +164,10 @@ impl MidiBackend for MidirMidiBackend {
                 &format!("{CLIENT_NAME} OUT {}", index + 1),
             )?);
         }
-        #[cfg(not(unix))]
+        #[cfg(not(all(unix, not(target_os = "android"))))]
         if output_count != 0 {
+            // Android's ALSA glue exposes hardware ports but no virtual
+            // ones; MIDI clock/echo destinations simply do not exist there.
             eprintln!("FreeWheeling: MIDI output is unavailable on this platform");
         }
         self.receiver = Some(receiver);

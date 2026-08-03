@@ -2,6 +2,8 @@
 # Android build script for freewheeling-plus
 set -e
 
+ROOT=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+
 # Locate the Android SDK: honor an explicit ANDROID_HOME/ANDROID_SDK_ROOT,
 # then fall back to the conventional per-platform install locations.
 if [ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME" ]; then
@@ -102,3 +104,7 @@ if [ -z "${CARGO_APK_RELEASE_KEYSTORE+x}" ] \
 fi
 
 cargo apk build --release --lib "$@"
+
+# cargo-apk alone cannot package SDL2's Java glue; wrap the cdylib in a
+# runnable APK (SDLActivity + classes.dex + data assets).
+"$ROOT/scripts/package-android-apk.sh"

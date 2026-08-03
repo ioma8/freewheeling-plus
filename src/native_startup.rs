@@ -80,6 +80,16 @@ impl NativePaths {
 }
 
 pub fn stream_recordings_path(home: &Path) -> PathBuf {
+    #[cfg(target_os = "android")]
+    {
+        // App-internal storage: there is no Documents directory on Android.
+        let _ = home;
+        application_support_path(Path::new("/"))
+            .parent()
+            .expect("android support path has a parent")
+            .join("stream-recordings")
+    }
+    #[cfg(not(target_os = "android"))]
     home.join("Documents").join(STREAM_RECORDINGS_DIR)
 }
 
@@ -93,19 +103,36 @@ pub fn application_support_path(home: &Path) -> PathBuf {
     #[cfg(target_os = "android")]
     {
         // Android internal storage: /data/data/<package>/
-        // Matches Cargo.toml [package.metadata.bundle].identifier on Android.
-        // SDL2's SDL_GetPrefPath is also available after init.
+        // Matches Cargo.toml [package.metadata.android].package.
         let _ = home;
-        Path::new("/data/data/org.freewheeling.freewheeling-plus/files/.fweelin").to_path_buf()
+        Path::new("/data/data/org.freewheeling.freewheeling_plus/files/.fweelin").to_path_buf()
     }
     #[cfg(not(any(target_os = "macos", target_os = "android")))]
     home.join(".fweelin")
+}
+
+/// Where the Android runtime extracts the bundled `data/` assets so the
+/// filesystem-based resource discovery can find them.
+#[cfg(target_os = "android")]
+pub fn android_runtime_data_dir() -> PathBuf {
+    application_support_path(Path::new("/"))
+        .parent()
+        .expect("android support path has a parent")
+        .join("data")
 }
 
 /// Locate bundle resources first, then an explicit data directory, then
 /// development/install layouts adjacent to the executable.
 pub fn discover_resources(executable: &Path) -> Result<PathBuf, String> {
     let mut candidates = Vec::new();
+    #[cfg(target_os = "android")]
+    {
+        // APK assets are not mounted on the filesystem. The Android runtime
+        // extracts the bundled data/ tree into the app's internal storage
+        // (beside the .fweelin support root) before the production app
+        // starts, so look there first.
+        candidates.push(android_runtime_data_dir());
+    }
     if let Some(mac_os) = executable.parent() {
         candidates.push(mac_os.join("../Resources/data"));
         candidates.push(mac_os.join("../Resources"));

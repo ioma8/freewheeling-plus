@@ -68,6 +68,7 @@ pub mod videoio_platform;
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 pub extern "C" fn SDL_main(_argc: i32, _argv: *const *const i8) -> i32 {
+    android_init_ndk_context();
     let args: Vec<_> = std::env::args_os().collect();
     let program = args
         .first()
@@ -88,12 +89,58 @@ pub extern "C" fn SDL_main(_argc: i32, _argv: *const *const i8) -> i32 {
             Ok(()) => 0,
             Err(error) => {
                 eprintln!("Error running FreeWheeling: {error}");
+                android_log_error(&format!("run: {error}"));
                 1
             }
         },
         Err(error) => {
             eprintln!("Error starting FreeWheeling: {error}");
+            android_log_error(&format!("start: {error}"));
             1
         }
     }
 }
+
+/// Registers the JavaVM and activity with the `ndk-context` crate, which
+/// midir's Android MIDI backend requires (it panics when the context was
+/// never initialized). SDL exposes both pointers after its Java glue calls
+/// `nativeSetupJNI`, which happens before `SDL_main` runs.
+#[cfg(target_os = "android")]
+fn android_init_ndk_context() {
+    use jni_sys::{JNIEnv, JavaVM, JNINativeInterface_, jint};
+    use std::ffi::c_void;
+    unsafe extern "C" {
+        fn SDL_AndroidGetJNIEnv() -> *mut c_void;
+        fn SDL_AndroidGetActivity() -> *mut c_void;
+    }
+    // SAFETY: SDL's Java glue has already been set up by the time SDL_main
+    // runs, so the JNI env and activity handles are valid, and
+    // initialize_android_context is called exactly once.
+    unsafe {
+        let env: *const JNIEnv = SDL_AndroidGetJNIEnv().cast();
+        let activity = SDL_AndroidGetActivity();
+        let get_vm: Option<unsafe extern "system" fn(*mut JNIEnv, *mut *mut JavaVM) -> jint> = env
+            .as_ref()
+            .and_then(|env_ref| (*env_ref).as_ref())
+            .and_then(|f: &JNINativeInterface_| Some(f.v1_1.GetJavaVM));
+        if let (Some(get_vm), false) = (get_vm, activity.is_null()) {
+            let mut vm: *mut JavaVM = std::ptr::null_mut();
+            get_vm(env.cast_mut(), &mut vm);
+            ndk_context::initialize_android_context(vm.cast(), activity);
+        } else {
+            eprintln!("FreeWheeling: SDL JNI context unavailable; MIDI will be disabled");
+        }
+    }
+}
+
+/// Android has no visible console; persist startup failures where the user
+/// (or a debugging session) can read them back.
+#[cfg(target_os = "android")]
+fn android_log_error(message: &str) {
+    let path =
+        std::path::Path::new("/data/data/org.freewheeling.freewheeling_plus/files/startup-error.log");
+    let _ = std::fs::write(path, format!("{message}\n"));
+}
+
+#[cfg(not(target_os = "android"))]
+fn android_log_error(_message: &str) {}

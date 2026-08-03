@@ -2997,7 +2997,7 @@ impl NativeRuntime {
             StartupPhase::MemoryManager => r.memory_manager = None,
             StartupPhase::RtThreads => r.rcu_registry = AtomicUsize::new(0),
             StartupPhase::LockMemory => {
-                #[cfg(all(unix, not(target_os = "macos")))]
+                #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
                 unsafe {
                     libc::munlockall();
                 }
@@ -3016,7 +3016,9 @@ impl NativeStartupAdapter for NativeRuntime {
                 // macOS has `mlock`, but no implemented `mlockall`. Callback
                 // memory is wired by owning fully-sized DSP, synth, CPAL and
                 // transfer-pool buffers before SignalProcessing activation.
-                #[cfg(all(unix, not(target_os = "macos")))]
+                // Android apps cannot lock memory without CAP_IPC_LOCK, so
+                // the lock is skipped there.
+                #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
                 if unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) } != 0 {
                     return Err(format!(
                         "lock process memory: {}",
@@ -3963,6 +3965,7 @@ fn test_beep() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(target_os = "android"))]
 fn home_directory(
     home: Option<std::ffi::OsString>,
     user_profile: Option<std::ffi::OsString>,
@@ -3970,6 +3973,17 @@ fn home_directory(
     let _ = user_profile;
     let path = home;
     path.map(std::path::PathBuf::from)
+}
+
+/// Android has no `HOME`/`USERPROFILE`; the support root is derived from the
+/// package name in [`application_support_path`], so any placeholder works.
+#[cfg(target_os = "android")]
+fn home_directory(
+    home: Option<std::ffi::OsString>,
+    user_profile: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    let _ = (home, user_profile);
+    Some(std::path::PathBuf::from("/"))
 }
 
 #[cfg(test)]

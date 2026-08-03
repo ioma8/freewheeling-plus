@@ -14,6 +14,18 @@ use std::path::{Path, PathBuf};
 /// Maximum config path length
 pub const CFG_PATH_MAX: usize = 2048;
 pub const FWEELIN_CONFIG_DIR: &str = ".fweelin";
+
+/// Home directory used for user configuration when `HOME` is unset (Android
+/// never sets it; keep user files in app-internal storage there).
+fn default_home_dir() -> String {
+    std::env::var("HOME").unwrap_or_else(|_| {
+        if cfg!(target_os = "android") {
+            "/data/data/org.freewheeling.freewheeling_plus/files".to_string()
+        } else {
+            "/tmp".to_string()
+        }
+    })
+}
 pub const FWEELIN_CONFIG_FILE: &str = "fweelin.xml";
 pub const FWEELIN_CONFIG_EXT: &str = ".xml";
 /// Upper bound for one renderer-facing variable snapshot.
@@ -374,7 +386,7 @@ impl FloConfig {
     pub const AUDIO_MEMORY_LEN: f32 = 10.0;
 
     pub fn new() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let home = default_home_dir();
         FloConfig {
             variables: HashMap::new(),
             is_macos: cfg!(target_os = "macos"),
@@ -564,7 +576,7 @@ impl FloConfig {
         basecfg: bool,
         quiet: bool,
     ) -> Result<PathBuf, String> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let home = default_home_dir();
         self.prepare_load_config_file_in_paths(
             cfgname,
             basecfg,
@@ -773,8 +785,20 @@ impl FloConfig {
                             positive_i32(attr.value(), 1)?,
                         ),
                         "librarypath" => {
-                            self.library_dir =
-                                expand_home(attr.value())?.trim_end_matches('/').to_owned()
+                            // The C++ configuration ships a relative
+                            // `librarypath="fw-lib/"`; the original resolved
+                            // it against the user's home directory. Make
+                            // relative library paths absolute the same way.
+                            let expanded = expand_home(attr.value())?;
+                            let path = PathBuf::from(&expanded);
+                            self.library_dir = if path.is_absolute() {
+                                expanded.trim_end_matches('/').to_owned()
+                            } else {
+                                PathBuf::from(default_home_dir())
+                                    .join(path)
+                                    .to_string_lossy()
+                                    .into_owned()
+                            }
                         }
                         "externalaudioinputs" => {
                             self.external_audio_input_stereo = attr
