@@ -1,8 +1,8 @@
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 fn root() -> PathBuf {
@@ -19,16 +19,18 @@ fn kv(path: &Path) -> BTreeMap<String, String> {
 }
 
 fn verify_manifest(directory: &Path) {
-    let output = Command::new("shasum")
-        .args(["-a", "256", "-c", "MANIFEST.sha256"])
-        .current_dir(directory)
-        .output()
-        .expect("shasum is required to verify historical fixtures");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let manifest = fs::read_to_string(directory.join("MANIFEST.sha256"))
+        .unwrap_or_else(|error| panic!("{}: {error}", directory.join("MANIFEST.sha256").display()));
+    for line in manifest.lines().filter(|line| !line.is_empty()) {
+        let (expected, name) = line.split_once("  ").unwrap_or_else(|| {
+            panic!("manifest line must be '<hex>  <file>': {line:?}")
+        });
+        let path = directory.join(name);
+        let data = fs::read(&path)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let digest = format!("{:x}", Sha256::digest(&data));
+        assert_eq!(digest, expected, "checksum mismatch for {name}");
+    }
 }
 
 #[test]
