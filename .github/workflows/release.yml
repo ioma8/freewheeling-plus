@@ -76,7 +76,7 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake ninja-build pkg-config libasound2-dev openjdk-17-jdk-headless
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
       - name: Install Android NDK
         run: sdkmanager --install "ndk;28.2.13676358" --sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
       - name: Install cargo-apk
