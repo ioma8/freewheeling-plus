@@ -1,8 +1,8 @@
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 fn root() -> PathBuf {
@@ -54,14 +54,11 @@ fn historical_cpp_screenshots_have_exact_dimensions_and_provenance() {
 
 #[test]
 fn screenshot_manifest_verifies() {
-    let output = Command::new("shasum")
-        .args(["-a", "256", "-c", "MANIFEST.sha256"])
-        .current_dir(root())
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let manifest = fs::read_to_string(root().join("MANIFEST.sha256")).unwrap();
+    for line in manifest.lines().filter(|line| !line.is_empty()) {
+        let (expected, name) = line.split_once("  ").expect("manifest row format");
+        let data = fs::read(root().join(name)).unwrap();
+        let digest = format!("{:x}", Sha256::digest(&data));
+        assert_eq!(digest, expected, "checksum mismatch for {name}");
+    }
 }

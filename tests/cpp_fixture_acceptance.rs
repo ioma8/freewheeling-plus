@@ -1,8 +1,8 @@
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 fn root() -> PathBuf {
@@ -153,16 +153,31 @@ fn manifest_names_every_available_artifact() {
         "completed capture must remove UNAVAILABLE"
     );
 
-    let verified = Command::new("shasum")
-        .args(["-a", "256", "-c", "MANIFEST.sha256"])
-        .current_dir(&root)
-        .output()
-        .expect("shasum is required to verify C++ fixture provenance");
+    let verified = verify_manifest(&root);
     assert!(
-        verified.status.success(),
+        verified.is_ok(),
         "fixture hash verification failed:\n{}",
-        String::from_utf8_lossy(&verified.stderr)
+        verified.unwrap_err()
     );
+}
+
+/// Verify every row of `MANIFEST.sha256` in-process so the fixture
+/// provenance checks run on platforms without the `shasum` utility.
+fn verify_manifest(directory: &Path) -> Result<(), String> {
+    let manifest = fs::read_to_string(directory.join("MANIFEST.sha256"))
+        .map_err(|e| format!("{}: {e}", directory.join("MANIFEST.sha256").display()))?;
+    for line in manifest.lines().filter(|line| !line.is_empty()) {
+        let (expected, name) = line
+            .split_once("  ")
+            .ok_or_else(|| format!("manifest line must be '<hex>  <file>': {line:?}"))?;
+        let path = directory.join(name);
+        let data = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let digest = format!("{:x}", Sha256::digest(&data));
+        if digest != expected {
+            return Err(format!("checksum mismatch for {name}"));
+        }
+    }
+    Ok(())
 }
 
 #[test]
