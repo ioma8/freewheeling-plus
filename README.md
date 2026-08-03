@@ -6,14 +6,26 @@ This is an in-progress migration from the original C++ codebase. The architectur
 
 ## Status
 
-Daily-driver quality on macOS. Linux and Windows should work but get less testing.
-Android: entry point, path handling, and audio tuning implemented; needs
-`cargo-apk` + Android NDK toolchain and touch input mapping.
+Daily-driver quality on macOS. Linux, Windows, and Android are built and
+verified in CI on every push and pull request:
 
+- **macOS** — `cargo test` and `clippy -D warnings`; release packaging builds
+a universal (arm64 + x86_64) app bundle and DMG with relocatable dependencies.
+- **Linux** — `cargo check`/`test`/`clippy -D warnings` (with and without the
+JACK feature), reproducible binary-plus-data archive packaging, and a virtual
+JACK acceptance run (dummy driver: ports, transport, allocation/xrun/RSS
+attestation).
+- **Windows** — `cargo check`/`test`/`clippy -D warnings` and a zipped release
+archive; a mingw cross-build script is included for local verification.
+- **Android** — a signed release APK (`cargo apk`) is built and verified in CI
+and attached to GitHub releases. Touch input mapping for the mouse-driven UI
+is still in progress and needs on-device testing.
 
 ### Android
 
-Requires the Android SDK, NDK, and `cargo-apk`:
+Requires the Android SDK, NDK, and `cargo-apk`. The script locates the SDK
+via `ANDROID_HOME`/`ANDROID_SDK_ROOT` or the conventional per-platform install
+paths, and picks the NDK by `ANDROID_NDK_VERSION` (default 28.2.13676358):
 
 ```sh
 # 1. Install Android SDK + NDK (via Android Studio)

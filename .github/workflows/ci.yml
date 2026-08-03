@@ -39,9 +39,84 @@ jobs:
       - name: cargo test
         run: cargo test
 
+  linux-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Validate Linux packaging scripts
+        run: scripts/linux/validate.sh
+      - name: Build reproducible Linux release archive
+        run: |
+          FWP_VERSION=0.1.0 FWP_DIST_DIR="$PWD/dist" scripts/linux/package-release.sh
+          ls -l dist/
+      - name: Verify archive layout and checksum
+        run: |
+          ARCHIVE=$(ls dist/freewheeling-plus-0.1.0-*.tar.gz | head -1)
+          sha256sum -c "${ARCHIVE}.sha256"
+          tar -tzf "$ARCHIVE" | grep -E 'bin/freewheeling-plus$'
+          tar -tzf "$ARCHIVE" | grep -q 'share/freewheeling/data/fweelin.xml'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: freewheeling-plus-linux-ci
+          path: dist/*.tar.gz*
+
+  linux-virtual:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libjack-jackd2-dev jackd2 jack-tools
+      - name: Run virtual JACK acceptance workflow
+        run: FWP_REALTIME_ACCEPTANCE_SECONDS=3 scripts/linux/run-virtual-workflow.sh
+      - name: Show acceptance attestation
+        run: cat acceptance-evidence/linux-virtual/attestation.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-virtual-acceptance
+          path: acceptance-evidence/
+
   macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
       - name: cargo test
         run: cargo test
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: cargo check
+        run: cargo check --all-targets
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build pkg-config libasound2-dev openjdk-17-jdk-headless
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android NDK
+        run: sdkmanager --install "ndk;28.2.13676358" --sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --locked
+      - name: Add Android Rust target
+        run: rustup target add aarch64-linux-android
+      - name: Build Android APK
+        run: ./android-build.sh
+      - name: Verify APK artifact
+        run: test -s target/release/apk/freewheeling-plus.apk
+      - uses: actions/upload-artifact@v7
+        with:
+          name: freewheeling-plus-android-arm64
+          path: target/release/apk/freewheeling-plus.apk
+          if-no-files-found: error

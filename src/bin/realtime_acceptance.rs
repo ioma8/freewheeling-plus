@@ -1,6 +1,8 @@
 //! Real-hardware realtime acceptance runner.
 
-use freewheeling_plus::audioio::{AudioBackend, AudioCallback, AudioCallbackFn, BackendInfo};
+use freewheeling_plus::audioio::{AudioBackend, AudioCallback};
+#[cfg(target_os = "macos")]
+use freewheeling_plus::audioio::{AudioCallbackFn, BackendInfo};
 use freewheeling_plus::realtime_guard::{
     CallbackCountingAllocator, RealtimeMetrics, reset_violation_counters,
 };

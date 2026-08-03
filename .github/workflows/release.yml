@@ -69,8 +69,30 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
 
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build pkg-config libasound2-dev openjdk-17-jdk-headless
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android NDK
+        run: sdkmanager --install "ndk;28.2.13676358" --sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --locked
+      - name: Add Android Rust target
+        run: rustup target add aarch64-linux-android
+      - name: Build Android APK
+        run: ./android-build.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: freewheeling-plus-android-arm64
+          path: target/release/apk/freewheeling-plus.apk
+          if-no-files-found: error
+
   release:
-    needs: [linux, macos, windows]
+    needs: [linux, macos, windows, android]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:

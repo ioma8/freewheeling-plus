@@ -20,6 +20,13 @@ jack = ["dep:jack"]
 [profile.dev]
 opt-level = 1
 
+# The release DSP path spans core_dsp, the native graph, and the audio
+# adapters. Thin LTO lets the optimizer inline across those crate boundaries
+# without the link-time cost of full LTO, which keeps the realtime callback
+# hot while release CI stays fast.
+[profile.release]
+lto = "thin"
+
 [dependencies]
 libc = "0.2"
 roxmltree = "0.20"

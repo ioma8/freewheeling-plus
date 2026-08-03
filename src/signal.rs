@@ -14,10 +14,15 @@ static TEST_WRITER: AtomicUsize = AtomicUsize::new(0);
 static TEST_EXITER: AtomicUsize = AtomicUsize::new(0);
 static TEST_CTX: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
-#[cfg(unix)]
+// The fatal/info text maps are compiled on every platform: the formatting
+// entry points are part of the public API (used by the stack-trace writer and
+// tests), while actual handler registration stays Unix-only. On Windows the
+// msvcrt runtime only defines SIGINT/SIGILL/SIGFPE/SIGSEGV/SIGTERM/SIGABRT,
+// so the BSD signal names are gated out there.
 fn fatal_name(sig: c_int) -> &'static [u8] {
     match sig {
         libc::SIGSEGV => b"SIGSEGV",
+        #[cfg(unix)]
         libc::SIGBUS => b"SIGBUS",
         libc::SIGILL => b"SIGILL",
         libc::SIGFPE => b"SIGFPE",
@@ -25,10 +30,10 @@ fn fatal_name(sig: c_int) -> &'static [u8] {
     }
 }
 
-#[cfg(unix)]
 fn fatal_text(sig: c_int) -> &'static [u8] {
     match sig {
         libc::SIGSEGV => b"Segmentation fault",
+        #[cfg(unix)]
         libc::SIGBUS => b"Access to undefined memory object",
         libc::SIGILL => b"Illegal instruction",
         libc::SIGFPE => b"Erroneous arithmetic operation",
@@ -36,10 +41,11 @@ fn fatal_text(sig: c_int) -> &'static [u8] {
     }
 }
 
-#[cfg(unix)]
 fn info_text(sig: c_int) -> &'static [u8] {
     match sig {
+        #[cfg(unix)]
         libc::SIGUSR1 => b">>> User defined signal 1 (SIGUSR1) received <<<\n",
+        #[cfg(unix)]
         libc::SIGUSR2 => b">>> User defined signal 2 (SIGUSR2) received <<<\n",
         _ => b">>> Signal received <<<\n",
     }
@@ -204,6 +210,36 @@ pub fn register_info_signal_handlers() {
 }
 
 #[cfg(unix)]
+pub fn register_shutdown_signal_handlers() {
+    register(shutdown_trampoline, &[libc::SIGINT, libc::SIGTERM]);
+}
+
+// Windows: faults are delivered through SEH rather than POSIX signals, so
+// there is nothing to register for fatal/info signals; the CRT signal()
+// function can still catch console interrupts (Ctrl+C) for clean shutdown.
+#[cfg(not(unix))]
+extern "C" fn shutdown_trampoline(sig: c_int) {
+    request_shutdown_signal_handler(sig);
+}
+
+#[cfg(not(unix))]
+fn register(handler: extern "C" fn(c_int), signals: &[c_int]) {
+    for &sig in signals {
+        // SAFETY: handler is a plain extern "C" fn; the CRT signal()
+        // contract allows calling it from the interrupted context.
+        unsafe {
+            libc::signal(sig, handler as libc::sighandler_t);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub fn register_fatal_signal_handlers() {}
+
+#[cfg(not(unix))]
+pub fn register_info_signal_handlers() {}
+
+#[cfg(not(unix))]
 pub fn register_shutdown_signal_handlers() {
     register(shutdown_trampoline, &[libc::SIGINT, libc::SIGTERM]);
 }
