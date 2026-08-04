@@ -42,7 +42,15 @@ const MIN_RING_PERIODS: usize = 2;
 // enough bounded headroom for the host to arm playback after capture has
 // started. Playback trims this safety backlog to one callback period before
 // invoking DSP, so the larger capacity is not extra steady-state latency.
+#[cfg(not(target_os = "android"))]
 const DEFAULT_RING_PERIODS: usize = 32;
+// Android's AAudio input (Legacy mode) delivers capture in large bursts --
+// the input thread drains HAL-sized chunks (observed ~3700 frames at once) --
+// while playback consumes steadily. The ring must hold a full burst plus a
+// drain buffer so playback is never starved, because the Android playback
+// path does not trim the backlog (see playback_callback).
+#[cfg(target_os = "android")]
+const DEFAULT_RING_PERIODS: usize = 64;
 const MAX_CALLBACK_FRAMES: usize = 16_384;
 const ROUTE_POLL_INTERVAL_MS: u64 = 250;
 
@@ -460,7 +468,7 @@ impl AudioBackend for CpalAudioBackend {
         let input_metrics = Arc::clone(&self.metrics);
         let input_realtime_metrics = self.realtime_metrics.clone();
         let input_channels = opened.input_config.channels as usize;
-        let input_stream = opened
+        let input_stream = match opened
             .input
             .build_input_stream(
                 opened.input_config,
@@ -479,8 +487,25 @@ impl AudioBackend for CpalAudioBackend {
                 },
                 stream_error_callback(Arc::clone(&self.metrics), self.realtime_metrics.clone()),
                 None,
-            )
-            .map_err(|error| format!("cannot build audio capture stream: {error}"))?;
+            ) {
+            Ok(stream) => Some(stream),
+            Err(error) => {
+                // On Android the capture stream commonly cannot be built at
+                // all: the user denied RECORD_AUDIO, or the device has no
+                // microphone. Failing the whole app over the microphone makes
+                // the looper unusable for playback-only use, so degrade to
+                // output-only (the ring stays empty and the DSP sees silence).
+                #[cfg(target_os = "android")]
+                {
+                    eprintln!(
+                        "FreeWheeling: audio capture unavailable ({error}); continuing without input"
+                    );
+                    None
+                }
+                #[cfg(not(target_os = "android"))]
+                return Err(format!("cannot build audio capture stream: {error}"));
+            }
+        };
 
         let output_channels = opened.output_config.channels as usize;
         let output_metrics = Arc::clone(&self.metrics);
@@ -517,25 +542,43 @@ impl AudioBackend for CpalAudioBackend {
         // several empty periods before CoreAudio schedules the input
         // callback, which shows up as a permanent startup underrun in
         // diagnostics and loses the first live input frames. Give capture a
-        // short non-realtime startup
-        // window to publish at least one frame before arming playback. This
-        // does not add steady-state latency: playback still trims the queue
-        // to at most one callback period below.
-        let capture_callbacks_before_start = self.metrics.capture_callbacks.load(Ordering::Acquire);
-        if let Err(error) = input_stream.play() {
-            self.reclaim_callback();
-            return Err(format!("cannot start audio capture stream: {error}"));
+        // short non-realtime startup window to publish at least one frame
+        // before arming playback. This does not add steady-state latency:
+        // playback still trims the queue to at most one callback period
+        // below.
+        if let Some(stream) = input_stream {
+            match stream.play() {
+                Ok(()) => self.input_stream = Some(stream),
+                Err(error) => {
+                    #[cfg(target_os = "android")]
+                    {
+                        eprintln!(
+                            "FreeWheeling: cannot start audio capture stream ({error}); continuing without input"
+                        );
+                    }
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        self.reclaim_callback();
+                        return Err(format!("cannot start audio capture stream: {error}"));
+                    }
+                }
+            }
         }
-        let capture_deadline = Instant::now() + Duration::from_millis(100);
-        while self.metrics.capture_callbacks.load(Ordering::Acquire)
-            == capture_callbacks_before_start
-            && Instant::now() < capture_deadline
-        {
-            thread::sleep(Duration::from_millis(1));
+        let capture_callbacks_before_start = self.metrics.capture_callbacks.load(Ordering::Acquire);
+        if self.input_stream.is_some() {
+            let capture_deadline = Instant::now() + Duration::from_millis(100);
+            while self.metrics.capture_callbacks.load(Ordering::Acquire)
+                == capture_callbacks_before_start
+                && Instant::now() < capture_deadline
+            {
+                thread::sleep(Duration::from_millis(1));
+            }
         }
         let playback_callbacks_before_start = self.metrics.callbacks.load(Ordering::Acquire);
         if let Err(error) = output_stream.play() {
-            let _ = input_stream.pause();
+            if let Some(stream) = self.input_stream.take() {
+                let _ = stream.pause();
+            }
             drop(output_stream);
             self.reclaim_callback();
             return Err(format!("cannot start audio playback stream: {error}"));
@@ -552,7 +595,6 @@ impl AudioBackend for CpalAudioBackend {
         {
             thread::sleep(Duration::from_millis(1));
         }
-        self.input_stream = Some(input_stream);
         self.output_stream = Some(output_stream);
         self.retained_callback = None;
         Ok(())
@@ -909,6 +951,15 @@ fn playback_callback(
         metrics
             .max_queue_frames
             .fetch_max(queued as u64, Ordering::Relaxed);
+        // Desktop: capture and playback run on independent clocks; trimming
+        // the backlog to one callback period keeps monitor latency bounded.
+        // Android: the AAudio input (Legacy mode) delivers capture in large
+        // bursts while playback drains steadily; trimming to one period
+        // discards almost the whole burst and starves playback. Keep the
+        // backlog and let the (larger) Android ring capacity bound it.
+        #[cfg(target_os = "android")]
+        let max_queued = usize::MAX;
+        #[cfg(not(target_os = "android"))]
         let max_queued = frame_count;
         let trimmed = queued.saturating_sub(max_queued);
         for _ in 0..trimmed {

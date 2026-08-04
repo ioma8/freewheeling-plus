@@ -605,6 +605,7 @@ dependencies = [
  "libc",
  "md-5",
  "midir",
+ "ndk",
  "ndk-context",
  "objc2",
  "objc2-app-kit",

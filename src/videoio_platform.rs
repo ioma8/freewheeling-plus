@@ -13,6 +13,7 @@ use crate::videoio_displays::{Display, DrawOp, Renderer};
 use fontdue::{Font, FontSettings};
 use sdl2::pixels::PixelFormatEnum;
 use sdl2::render::{BlendMode, Canvas};
+#[cfg_attr(target_os = "android", allow(unused_imports))]
 use sdl2::video::{FullscreenType, Window};
 use std::collections::HashMap;
 
@@ -567,15 +568,37 @@ impl Sdl2VideoBackend {
         }
     }
 
+    /// Read the current SDL window and drawable sizes without the metrics
+    /// diagnostics. Used by the per-frame Android surface sync.
+    pub(crate) fn surface_sizes(&self) -> Result<((u32, u32), (u32, u32)), String> {
+        let canvas = self
+            .canvas
+            .as_ref()
+            .ok_or_else(|| "SDL video backend is closed".to_string())?;
+        Ok((canvas.window().size(), canvas.output_size()?))
+    }
+
     fn metrics(&self) -> Result<crate::videoio::RenderMetrics, String> {
         let canvas = self
             .canvas
             .as_ref()
             .ok_or_else(|| "SDL video backend is closed".to_string())?;
-        Ok(crate::videoio::RenderMetrics::from_sizes(
+        let metrics = crate::videoio::RenderMetrics::from_sizes(
             canvas.window().size(),
             canvas.output_size()?,
-        ))
+        );
+        crate::android_diag_log(&format!(
+            "[video] metrics: window={:?} drawable={:?} -> logical={}x{} drawable={}x{} scale={}x{}",
+            canvas.window().size(),
+            canvas.output_size().unwrap_or((0, 0)),
+            metrics.logical_width,
+            metrics.logical_height,
+            metrics.drawable_width,
+            metrics.drawable_height,
+            metrics.scale_x,
+            metrics.scale_y,
+        ));
+        Ok(metrics)
     }
 }
 
@@ -685,18 +708,33 @@ impl VideoBackend for Sdl2VideoBackend {
             .canvas
             .as_mut()
             .ok_or_else(|| "SDL video backend is closed".to_string())?;
-        canvas.window_mut().set_fullscreen(if mode.fullscreen {
-            FullscreenType::Desktop
-        } else {
-            FullscreenType::Off
-        })?;
-        if !mode.fullscreen {
-            canvas
-                .window_mut()
-                .set_size(mode.windowed_size.0.max(1), mode.windowed_size.1.max(1))
-                .map_err(|error| error.to_string())?;
+        #[cfg(target_os = "android")]
+        {
+            // On phones the SDL window always covers the full device surface.
+            // SDL_SetWindowSize would set the *logical* window size to the
+            // requested windowed size (640x480) even though the real surface
+            // is much larger, leaving the render viewport in the lower-left
+            // corner of the framebuffer. Leave the window at the surface size
+            // and only report the metrics.
+            let _ = mode;
+            let _ = canvas;
+            return self.metrics();
         }
-        self.metrics()
+        #[cfg(not(target_os = "android"))]
+        {
+            canvas.window_mut().set_fullscreen(if mode.fullscreen {
+                FullscreenType::Desktop
+            } else {
+                FullscreenType::Off
+            })?;
+            if !mode.fullscreen {
+                canvas
+                    .window_mut()
+                    .set_size(mode.windowed_size.0.max(1), mode.windowed_size.1.max(1))
+                    .map_err(|error| error.to_string())?;
+            }
+            self.metrics()
+        }
     }
 
     fn present(&mut self, frame: &VideoFrame) -> Result<(), String> {

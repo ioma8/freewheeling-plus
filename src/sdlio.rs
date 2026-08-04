@@ -74,6 +74,11 @@ pub trait SdlBackend {
     fn start_text_input(&mut self) {}
     fn stop_text_input(&mut self) {}
     fn shutdown(&mut self) {}
+    /// Keep the touch-to-window-pixel mapping in sync with the real SDL
+    /// window size. The size is owned by the video backend (which may adopt
+    /// the real surface size asynchronously on Android); the input backend
+    /// only caches it for the normalized touch coordinate conversion.
+    fn set_window_size(&mut self, _width: u32, _height: u32) {}
 }
 
 /// Production SDL2 event backend. Joystick handles remain alive for the
@@ -162,6 +167,10 @@ impl SdlBackend for Sdl2InputBackend {
                     ..
                 } => {
                     self.window_size = (width.max(0) as u32, height.max(0) as u32);
+                    crate::android_diag_log(&format!(
+                        "[input] SizeChanged -> window_size={}x{}",
+                        self.window_size.0, self.window_size.1
+                    ));
                     None
                 }
                 Event::Quit { .. } => Some(SdlEvent::Quit),
@@ -310,6 +319,9 @@ impl SdlBackend for Sdl2InputBackend {
             }
         }
     }
+    fn set_window_size(&mut self, width: u32, height: u32) {
+        self.window_size = (width, height);
+    }
     fn start_text_input(&mut self) {
         self.video.text_input().start();
     }
@@ -407,6 +419,9 @@ impl<B: SdlBackend> SdlIo<B> {
     }
     pub fn is_active(&self) -> bool {
         self.active
+    }
+    pub fn set_window_size(&mut self, width: u32, height: u32) {
+        self.backend.set_window_size(width, height);
     }
     pub fn keys_held(&self) -> &[bool; SDLK_LAST] {
         &self.held

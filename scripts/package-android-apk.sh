@@ -63,10 +63,17 @@ d8 --release --lib "$PLATFORM/android.jar" --output "$STAGE/dex" \
     $(find "$STAGE/classes" -name '*.class')
 
 # 3. Link the base APK: manifest, resources, and assets (bundled data/).
+# aapt2 -A adds a directory's *contents* at the asset root, so passing
+# data/ directly would flatten it (assets/fweelin.xml instead of
+# assets/data/fweelin.xml). Stage the tree under a data/ prefix so the
+# activity can extract assets/data/ -> files/data at first launch.
+ASSET_ROOT="$STAGE/assets-root"
+mkdir -p "$ASSET_ROOT/data"
+cp -R "$ROOT/data/." "$ASSET_ROOT/data/"
 aapt2 link -o "$STAGE/base.apk" \
     --manifest "$ROOT/android/AndroidManifest.xml" \
     -I "$PLATFORM/android.jar" \
-    -A "$ROOT/data"
+    -A "$ASSET_ROOT"
 
 # 4. Add the dex and the native library (16 KiB-aligned on repack).
 mkdir -p "$STAGE/payload/lib/arm64-v8a"

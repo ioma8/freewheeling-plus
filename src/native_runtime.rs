@@ -394,7 +394,43 @@ impl MainThreadVideo {
         })
     }
 
+    /// Android reports the real window/surface size asynchronously (surface
+    /// recreation on resume, sometimes even after the initial open). Poll it
+    /// every frame so the frame buffer, render metrics, and the input-window
+    /// size used for mouse/touch mapping all track the actual surface.
+    #[cfg(target_os = "android")]
+    fn sync_android_surface(&mut self) -> Result<(), String> {
+        let (window, drawable) = self.backend.surface_sizes()?;
+        let frame_size = (drawable.0.max(1), drawable.1.max(1));
+        if frame_size != (self.frame.width, self.frame.height) {
+            crate::android_diag_log(&format!(
+                "[video] surface sync: frame {}x{} -> {}x{} (window {}x{})",
+                self.frame.width,
+                self.frame.height,
+                frame_size.0,
+                frame_size.1,
+                window.0,
+                window.1
+            ));
+            self.frame.width = frame_size.0;
+            self.frame.height = frame_size.1;
+            self.frame.stride = frame_size.0 as usize * 4;
+            self.frame
+                .pixels
+                .resize(self.frame.stride * frame_size.1 as usize, 0);
+            // Keep the XML logical coordinate system; only the drawable
+            // dimensions follow the surface (FrameRenderer re-derives its
+            // per-frame metrics from the frame size, so this is enough).
+        }
+        // SDL mouse events use window pixels; hit-testing and bindings use
+        // the XML logical space. This is the size map_mouse_to_logical needs.
+        self.input_window_size = (window.0.max(1), window.1.max(1));
+        Ok(())
+    }
+
     fn update(&mut self, now: Instant, mut state: UiSceneState) -> Result<(), String> {
+        #[cfg(target_os = "android")]
+        self.sync_android_surface()?;
         if self.active && now >= self.next_frame {
             let mut existing = self.scene_state.write().unwrap_or_else(std::sync::PoisonError::into_inner);
             state.layouts = std::mem::take(&mut existing.layouts);
@@ -1052,16 +1088,21 @@ impl NativeRuntime {
     }
 
     fn report_diagnostics(r: &mut RuntimeResources, now: Instant) {
-        if (!r.debug_info && std::env::var_os("FWEELIN_DIAGNOSTICS").is_none())
-            || now.duration_since(r.last_diagnostic_report) < Duration::from_secs(1)
+        // Android has no console and no way to set FWEELIN_DIAGNOSTICS, so
+        // always emit the one-second heartbeat there (to the diagnostics file
+        // via android_diag_log) instead of gating it behind the env var.
+        let diagnostics_enabled = cfg!(target_os = "android")
+            || r.debug_info
+            || std::env::var_os("FWEELIN_DIAGNOSTICS").is_some();
+        if !diagnostics_enabled || now.duration_since(r.last_diagnostic_report) < Duration::from_secs(1)
         {
             return;
         }
         r.last_diagnostic_report = now;
-        if let Some(audio) = r.audio.as_ref() {
+        let line = if let Some(audio) = r.audio.as_ref() {
             if let Some(status) = audio.backend().status() {
-                eprintln!(
-                    "FreeWheeling audio: active={} input={:?} output={:?} format={:?} latency={:?} capture_callbacks={} playback_callbacks={} metrics={:?}",
+                format!(
+                    "FreeWheeling audio: active={} input={:?} output={:?} format={:?} latency={:?} capture_callbacks={} playback_callbacks={} metrics={:?} stream={:?}",
                     status.active,
                     status.input.as_ref().map(|device| &device.name),
                     status.output.as_ref().map(|device| &device.name),
@@ -1070,17 +1111,24 @@ impl NativeRuntime {
                     status.capture_callbacks,
                     status.playback_callbacks,
                     status.metrics,
-                );
+                    status.stream,
+                )
             } else {
                 let metrics = audio.metrics();
-                eprintln!(
+                format!(
                     "FreeWheeling audio (JACK): callbacks={} frames={} peak_ns={} xruns={}",
                     metrics.callbacks,
                     metrics.callback_frames,
                     metrics.callback_peak_nanos,
                     metrics.xruns,
-                );
+                )
             }
+        } else {
+            String::new()
+        };
+        if !line.is_empty() {
+            eprintln!("{line}");
+            crate::android_diag_log(&line);
         }
     }
 
@@ -3320,6 +3368,12 @@ impl NativeStartupAdapter for NativeRuntime {
                     let state = Self::ui_scene_state(&r);
                     if let Some(video) = r.video.as_mut() {
                         video.update(Instant::now(), state)?;
+                        // Android sizes its window asynchronously with surface
+                        // recreation; keep the touch mapping in sync.
+                        let size = video.input_window_size;
+                        if let Some(input) = r.input.as_mut() {
+                            input.set_window_size(size.0, size.1);
+                        }
                     }
                     if let Some(input) = r.input.as_mut() {
                         let _ = input.poll();
@@ -3353,6 +3407,10 @@ impl NativeStartupAdapter for NativeRuntime {
                     let state = Self::ui_scene_state(&r);
                     if let Some(video) = r.video.as_mut() {
                         video.update(Instant::now(), state)?;
+                        let size = video.input_window_size;
+                        if let Some(input) = r.input.as_mut() {
+                            input.set_window_size(size.0, size.1);
+                        }
                     }
                     if let Some(input) = r.input.as_mut() {
                         let _ = input.poll();
@@ -3661,6 +3719,15 @@ impl NativeComponentAdapter for NativeRuntime {
                 .as_mut()
                 .ok_or("video is closed")?
                 .update(Instant::now(), state)?;
+            // Keep the touch mapping in sync with the window size the video
+            // backend reports (Android sizes change asynchronously).
+            let input_window_size = {
+                let video = r.video.as_mut().ok_or("video is closed")?;
+                video.input_window_size
+            };
+            if let Some(input) = r.input.as_mut() {
+                input.set_window_size(input_window_size.0, input_window_size.1);
+            }
             let (input_event, pulse_subdivide) = {
                 let input = r.input.as_mut().ok_or("input is closed")?;
                 let event = input.poll();

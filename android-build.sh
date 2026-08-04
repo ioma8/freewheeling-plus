@@ -82,6 +82,45 @@ if [ -f "$SDL2_BUILD_RS" ] && ! grep -q 'cargo:rustc-link-lib=c++abi' "$SDL2_BUI
     echo "Patched sdl2-sys Android C++ ABI link directive"
 fi
 
+# cpal 0.18.1 opens Android capture streams without setting an AAudio input
+# preset, so AAudio applies its default VOICE_RECOGNITION preset. On real
+# devices that routes the microphone through the voice-processing pipeline
+# (AGC, noise suppression, band-limiting), which makes recorded loops sound
+# like a telephone call. Open the capture stream as UNPROCESSED so the looper
+# records the raw microphone.
+CPAL_AAUDIO="$HOME/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.18.1/src/host/aaudio/mod.rs"
+if [ -f "$CPAL_AAUDIO" ] && ! grep -q 'input_preset(ndk::audio::AudioInputPreset::Unprocessed)' "$CPAL_AAUDIO" 2>/dev/null; then
+    portable_sed '/fn build_input_stream<D, E>(/,/let builder = configure_for_device(builder, device, config);/ {
+        s/let builder = configure_for_device(builder, device, config);/let builder = configure_for_device(builder, device, config);\
+    let builder = builder.input_preset(ndk::audio::AudioInputPreset::Unprocessed);/
+    }' "$CPAL_AAUDIO"
+    echo "Patched cpal AAudio input preset to UNPROCESSED"
+fi
+
+# cpal requests AAUDIO_PERFORMANCE_MODE_NONE without its "realtime" feature,
+# which on Android falls back to the Legacy (AudioFlinger-mixed) path. The
+# Legacy input thread delivers capture in large bursts, which starves the
+# app's steady 128-frame playback. Request LowLatency (MMAP) on Android so
+# the streams get regular low-latency delivery where the device supports it.
+# Only the configure_for_device block is changed: the data-callback realtime
+# guards (stream.performance_mode() != LowLatency) would otherwise emit
+# RealtimeDenied errors on Android, so they must keep their original cfg.
+if [ -f "$CPAL_AAUDIO" ] && ! grep -q 'any(feature = "realtime", target_os = "android")' "$CPAL_AAUDIO" 2>/dev/null; then
+    awk '
+        {
+            if ($0 ~ /builder = builder.performance_mode\(ndk::audio::AudioPerformanceMode::LowLatency\);/) {
+                if (NR >= 3 && lines[NR-1] ~ /^    \{$/ && lines[NR-2] ~ /#\[cfg\(feature = "realtime"\)\]/) {
+                    gsub(/cfg\(feature = "realtime"\)/, "cfg(any(feature = \"realtime\", target_os = \"android\"))", lines[NR-2]);
+                }
+            }
+            lines[NR] = $0;
+        }
+        END { for (i = 1; i <= NR; i++) print lines[i]; }
+    ' "$CPAL_AAUDIO" > "$CPAL_AAUDIO.tmp"
+    mv "$CPAL_AAUDIO.tmp" "$CPAL_AAUDIO"
+    echo "Patched cpal AAudio low-latency (MMAP) performance mode on Android"
+fi
+
 # cargo-apk requires a release signing key even for local builds. Use the
 # Android debug key when no release key was configured explicitly; callers can
 # still provide CARGO_APK_RELEASE_KEYSTORE[_PASSWORD] or manifest metadata.

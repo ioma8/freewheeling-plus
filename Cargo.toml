@@ -65,6 +65,12 @@ alsa = "0.11.0"
 [target.'cfg(target_os = "android")'.dependencies]
 ndk-context = "0.1"
 jni-sys = "0.4"
+# Enable ndk's API-28 audio bindings (AAudio input preset). cpal only enables
+# api-level-26, which leaves AudioInputPreset cfg'd out; feature unification
+# makes the AAudio UNPROCESSED input preset available to the cpal registry
+# patch in android-build.sh so the looper records the raw microphone instead
+# of the VOICE_RECOGNITION voice-processing path.
+ndk = { version = "0.9", default-features = false, features = ["api-level-28"] }
 
 [package.metadata.bundle]
 name = "FreeWheeling"
