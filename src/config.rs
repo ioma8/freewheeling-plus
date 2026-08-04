@@ -2887,8 +2887,8 @@ mod authoritative_xml_tests {
         assert!(cfg.is_stereo_input(2));
         assert!(!cfg.is_stereo_input(0));
         assert!(cfg.is_stereo_master());
-        assert_eq!(cfg.interfaces.len(), 8);
-        assert_eq!(cfg.interfaces.iter().filter(|i| i.switchable).count(), 4);
+        assert_eq!(cfg.interfaces.len(), 9);
+        assert_eq!(cfg.interfaces.iter().filter(|i| i.switchable).count(), 5);
         assert!(cfg.get_variable("VAR_overdubfeedback").is_some());
         assert!(!cfg.binding_registry.tables.is_empty());
         assert!(cfg.fluidsynth.stereo);

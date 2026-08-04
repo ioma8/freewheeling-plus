@@ -143,17 +143,12 @@ fn android_init_ndk_context() {
     }
 }
 
-/// Blocks until FreeWheelingActivity has resolved the RECORD_AUDIO runtime
-/// permission (or 30 s elapse), then reports whether it was granted. AAudio
-/// cannot open the capture stream while the permission is pending or denied,
-/// so SDL_main waits for the user's dialog decision before starting audio.
-/// Returns `true` on any JNI problem so a broken glue never hangs startup.
+/// Read a public static `int` field from `FreeWheelingActivity` via JNI.
+/// Returns `None` when the JNI glue is unavailable or the field is missing.
 #[cfg(target_os = "android")]
-fn android_wait_for_record_permission() -> bool {
+fn android_read_static_int_field(field_name: &str) -> Option<i32> {
     use jni_sys::{jfieldID, jint, JNIEnv};
     use std::ffi::CString;
-    use std::time::{Duration, Instant};
-
     unsafe extern "C" {
         fn SDL_AndroidGetJNIEnv() -> *mut std::ffi::c_void;
         fn SDL_AndroidGetActivity() -> *mut std::ffi::c_void;
@@ -161,39 +156,59 @@ fn android_wait_for_record_permission() -> bool {
     unsafe {
         let env: *const JNIEnv = SDL_AndroidGetJNIEnv().cast();
         let activity = SDL_AndroidGetActivity();
-        let Some(env_ref) = env.as_ref().and_then(|env| env.as_ref()) else {
-            return true;
-        };
+        let env_ref = env.as_ref().and_then(|env| env.as_ref())?;
         let get_object_class = (*env_ref).v1_1.GetObjectClass;
         let class = get_object_class(env.cast_mut(), activity.cast::<jni_sys::_jobject>());
         if class.is_null() {
-            return true;
+            return None;
         }
-        let name = CString::new("sRecordAudioResult").unwrap_or_default();
-        let sig = CString::new("I").unwrap_or_default();
+        let name = CString::new(field_name).ok()?;
+        let sig = CString::new("I").ok()?;
         let get_static_field_id = (*env_ref).v1_1.GetStaticFieldID;
-        let field: jfieldID = get_static_field_id(
-            env.cast_mut(),
-            class,
-            name.as_ptr(),
-            sig.as_ptr(),
-        );
+        let field: jfieldID =
+            get_static_field_id(env.cast_mut(), class, name.as_ptr(), sig.as_ptr());
         if field.is_null() {
-            return true;
+            return None;
         }
         let get_static_int_field = (*env_ref).v1_1.GetStaticIntField;
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            let value: jint = get_static_int_field(env.cast_mut(), class, field);
-            if value != 0 {
-                return value == 1;
-            }
-            if Instant::now() >= deadline {
-                eprintln!("FreeWheeling: timed out waiting for RECORD_AUDIO permission");
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(100));
+        Some(get_static_int_field(env.cast_mut(), class, field) as i32)
+    }
+}
+
+/// Whether the activity holds Android's special "all files access" grant
+/// (MANAGE_EXTERNAL_STORAGE), which lets stream recordings be written to the
+/// shared Documents folder. Falls back to app-internal storage otherwise.
+#[cfg(target_os = "android")]
+pub fn android_external_storage_granted() -> bool {
+    android_read_static_int_field("sExternalStorageGranted") == Some(1)
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn android_external_storage_granted() -> bool {
+    false
+}
+
+/// Blocks until FreeWheelingActivity has resolved the RECORD_AUDIO runtime
+/// permission (or 30 s elapse), then reports whether it was granted. AAudio
+/// cannot open the capture stream while the permission is pending or denied,
+/// so SDL_main waits for the user's dialog decision before starting audio.
+/// Returns `true` on any JNI problem so a broken glue never hangs startup.
+#[cfg(target_os = "android")]
+fn android_wait_for_record_permission() -> bool {
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match android_read_static_int_field("sRecordAudioResult") {
+            Some(value) if value != 0 => return value == 1,
+            Some(_) => {}
+            None => return true, // JNI unavailable: do not block startup
         }
+        if Instant::now() >= deadline {
+            eprintln!("FreeWheeling: timed out waiting for RECORD_AUDIO permission");
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 

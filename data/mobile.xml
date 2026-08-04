@@ -1,0 +1,114 @@
+<interface>
+  <!-- Mobile (Android touch) layout: a 6x3 loop grid in the upper screen and
+       four function buttons beneath it, above the input/output meters. The
+       layout is the default on Android (see native_runtime start_session);
+       on desktop it is available as an extra switchable interface.
+
+       Loop grid: 18 cells, elements 'a'..'r' (ids 97..114). Tapping a cell
+       triggers the loop (coreinterface's plain loop-clicked binding).
+
+       Buttons (ids 130..133; the slot system only accepts loop ids below
+       256, so the F-key keycodes 282/285/288 cannot be used as element ids):
+         PULSE (130): create/select the pulse. While CLEAR is armed, deletes
+           the pulse instead.
+         CLEAR (131): latches erase mode (VAR_mobile_clear). While armed,
+           tapping a grid loop erases it or tapping PULSE deletes the pulse;
+           both actions disarm afterwards. Tapping CLEAR again toggles erase
+           mode off.
+         REC (132): start/stop stream recording to disk.
+         SAVE (133): save the current scene.
+
+       The button bindings live in coreinterface.xml before the generic
+       loop-clicked trigger so they take precedence; they are inert on
+       desktop, where no layout element carries these ids. -->
+
+  <bindings>
+    <declare var="VAR_mobile_clear" type="char" init="0"/>
+    <!-- Loops are shown from base 0, so a layout element's id IS its loop
+         id: cells 97..114 map to loops 97..114 (the same ids the PC keyboard
+         interface uses), and the buttons use 130..133. -->
+    <declare var="VAR_mobilerange" type="range" init="0>322"/>
+
+    <!-- Startup: show loops on the mobile grid. -->
+    <binding input="start-interface"
+     output1="video-show-loop"
+     parameters1="layoutid=0 and loopid=VAR_mobilerange"/>
+  </bindings>
+
+  <graphics>
+    <layout id="0" name="Mobile Loops" scale="1.0,1.0" pos="0.00,0.00"
+     label="0" elabel="1" show="0">
+      <!-- 6 x 3 loop grid. Each cell is 1/6 of the width and one third of
+           the upper 48% of the screen. -->
+      <element id="97" name="A" base="0.0000,0.0000" looppos="0.0133,0.0100" loopsize="0.14" namepos="0.008,0.005">
+        <box outline="TBLR" pos="0.00,0.00, 0.1667,0.16"/>
+      </element>
+      <element id="98" name="B" base="0.1667,0.0000" looppos="0.0133,0.0100" loopsize="0.14" namepos="0.008,0.005">
+        <box outline="TBLR" pos="0.00,0.00, 0.1667,0.16"/>
+      </element>
+      <element id="99" name="C" base="0.3333,0.0000" looppos="0.0133,0.0100" loopsize="0.14" namepos="0.008,0.005">
+        <box outline="TBLR" pos="0.00,0.00, 0.1667,0.16"/>
+      </element>
+      <element id="100" name="D" base="0.5000,0.0000" looppos="0.0133,0.0100" loopsize="0.14" namepos="0.008,0.005">
+        <box outline="TBLR" pos="0.00,0.00, 0.1667,0.16"/>
+      </element>
+      <element id="101" name="E" base="0.6667,0.0000" looppos="0.0133,0.0100" loopsize="0.14" namepos="0.008,0.005">
+        <box outline="TBLR" pos="0.00,0.00, 0.1667,0.16"/>
+      </element>
+      <element id="102" name="F" base="0.8333,0.0000" looppos="0.0133,0.0100" loopsize="0.14" namepos="0.008,0.005">
+        <box outline="TBLR" pos="0.00,0.00, 0.1667,0.16"/>
+      </element>
+      <element id="103" name="G" base="0.0000,0.1600" looppos="0.0133,0.0100" loopsize="0.14" namepos="0.008,0.005">
+        <box outline="TBLR" pos="0.00,0.00, 0.1667,0.16"/>
+      </element>
+      <element id="104" name="H" base="0.1667,0.1600" looppos="0.0133,0.0100" loopsize="0.14" namepos="0.008,0.005">
+        <box outline="TBLR" pos="0.00,0.00, 0.1667,0.16"/>
+      </element>
+      <element id="105" name="I" base="0.3333,0.1600" looppos="0.0133,0.0100" loopsize="0.14" namepos="0.008,0.005">
+        <box outline="TBLR" pos="0.00,0.00, 0.1667,0.16"/>
+      </element>
+      <element id="106" name="J" base="0.5000,0.1600" looppos="0.0133,0.0100" loopsize="0.14" namepos="0.008,0.005">
+        <box outline="TBLR" pos="0.00,0.00, 0.1667,0.16"/>
+      </element>
+      <element id="107" name="K" base="0.6667,0.1600" looppos="0.0133,0.0100" loopsize="0.14" namepos="0.008,0.005">
+        <box outline="TBLR" pos="0.00,0.00, 0.1667,0.16"/>
+      </element>
+      <element id="108" name="L" base="0.8333,0.1600" looppos="0.0133,0.0100" loopsize="0.14" namepos="0.008,0.005">
+        <box outline="TBLR" pos="0.00,0.00, 0.1667,0.16"/>
+      </element>
+      <element id="109" name="M" base="0.0000,0.3200" looppos="0.0133,0.0100" loopsize="0.14" namepos="0.008,0.005">
+        <box outline="TBLR" pos="0.00,0.00, 0.1667,0.16"/>
+      </element>
+      <element id="110" name="N" base="0.1667,0.3200" looppos="0.0133,0.0100" loopsize="0.14" namepos="0.008,0.005">
+        <box outline="TBLR" pos="0.00,0.00, 0.1667,0.16"/>
+      </element>
+      <element id="111" name="O" base="0.3333,0.3200" looppos="0.0133,0.0100" loopsize="0.14" namepos="0.008,0.005">
+        <box outline="TBLR" pos="0.00,0.00, 0.1667,0.16"/>
+      </element>
+      <element id="112" name="P" base="0.5000,0.3200" looppos="0.0133,0.0100" loopsize="0.14" namepos="0.008,0.005">
+        <box outline="TBLR" pos="0.00,0.00, 0.1667,0.16"/>
+      </element>
+      <element id="113" name="Q" base="0.6667,0.3200" looppos="0.0133,0.0100" loopsize="0.14" namepos="0.008,0.005">
+        <box outline="TBLR" pos="0.00,0.00, 0.1667,0.16"/>
+      </element>
+      <element id="114" name="R" base="0.8333,0.3200" looppos="0.0133,0.0100" loopsize="0.14" namepos="0.008,0.005">
+        <box outline="TBLR" pos="0.00,0.00, 0.1667,0.16"/>
+      </element>
+
+      <!-- Function buttons, above the input/output meters (which occupy the
+           bottom 20% on Android). -->
+      <element id="130" name="PULSE" base="0.0000,0.52" namepos="0.03,0.03">
+        <box outline="TBLR" pos="0.00,0.00, 0.25,0.22"/>
+      </element>
+      <element id="131" name="CLEAR" base="0.2500,0.52" namepos="0.03,0.03">
+        <box outline="TBLR" pos="0.00,0.00, 0.25,0.22"/>
+      </element>
+      <element id="132" name="REC" base="0.5000,0.52" namepos="0.03,0.03">
+        <box outline="TBLR" pos="0.00,0.00, 0.25,0.22"/>
+      </element>
+      <element id="133" name="SAVE" base="0.7500,0.52" namepos="0.03,0.03">
+        <box outline="TBLR" pos="0.00,0.00, 0.25,0.22"/>
+      </element>
+    </layout>
+  </graphics>
+</interface>

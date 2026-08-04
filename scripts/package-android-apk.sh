@@ -70,6 +70,15 @@ d8 --release --lib "$PLATFORM/android.jar" --output "$STAGE/dex" \
 ASSET_ROOT="$STAGE/assets-root"
 mkdir -p "$ASSET_ROOT/data"
 cp -R "$ROOT/data/." "$ASSET_ROOT/data/"
+# On Android the mobile layout's action buttons occupy the band just above
+# the meters, so compact the coreinterface display cluster into the bottom
+# ~20% of the screen: smaller meters, and the right-edge status switches
+# moved down below the buttons.
+if [ -f "$ASSET_ROOT/data/coreinterface.xml" ]; then
+    sed 's/barscale="0\.3"/barscale="0.14"/g; s/pos="\([0-9.]*\),0\.8"/pos="\1,0.94"/g; s/0\.925,0\.6"/0.925,0.80"/g; s/0\.895,0\.64"/0.895,0.82"/g; s/0\.914,0\.68"/0.914,0.84"/g; s/0\.925,0\.72"/0.925,0.86"/g; s/0\.925,0\.76"/0.925,0.88"/g' "$ASSET_ROOT/data/coreinterface.xml" > "$ASSET_ROOT/data/coreinterface.xml.tmp"
+    mv "$ASSET_ROOT/data/coreinterface.xml.tmp" "$ASSET_ROOT/data/coreinterface.xml"
+    echo "Compacted coreinterface display cluster for Android"
+fi
 aapt2 link -o "$STAGE/base.apk" \
     --manifest "$ROOT/android/AndroidManifest.xml" \
     -I "$PLATFORM/android.jar" \

@@ -82,12 +82,20 @@ impl NativePaths {
 pub fn stream_recordings_path(home: &Path) -> PathBuf {
     #[cfg(target_os = "android")]
     {
-        // App-internal storage: there is no Documents directory on Android.
+        // Prefer the shared Documents folder for stream recordings when the
+        // special "all files access" grant (MANAGE_EXTERNAL_STORAGE) is
+        // present; otherwise fall back to app-internal storage.
         let _ = home;
-        application_support_path(Path::new("/"))
-            .parent()
-            .expect("android support path has a parent")
-            .join("stream-recordings")
+        let documents = std::path::Path::new("/storage/emulated/0/Documents")
+            .join(STREAM_RECORDINGS_DIR);
+        if crate::android_external_storage_granted() {
+            documents
+        } else {
+            application_support_path(Path::new("/"))
+                .parent()
+                .expect("android support path has a parent")
+                .join("stream-recordings")
+        }
     }
     #[cfg(not(target_os = "android"))]
     home.join("Documents").join(STREAM_RECORDINGS_DIR)

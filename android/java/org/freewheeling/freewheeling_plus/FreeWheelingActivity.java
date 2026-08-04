@@ -23,9 +23,14 @@
 package org.freewheeling.freewheeling_plus;
 
 import android.Manifest;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
+import android.provider.Settings;
 import android.util.Log;
 import org.libsdl.app.SDLActivity;
 
@@ -41,6 +46,9 @@ public class FreeWheelingActivity extends SDLActivity {
 
     /** 0 = decision pending, 1 = granted, 2 = denied. Read from native code. */
     public static volatile int sRecordAudioResult = 0;
+
+    /** 1 when "all files access" is granted, else 0. Read from native code. */
+    public static volatile int sExternalStorageGranted = 0;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -61,6 +69,47 @@ public class FreeWheelingActivity extends SDLActivity {
                     new String[] { Manifest.permission.RECORD_AUDIO },
                     REQUEST_RECORD_AUDIO);
         }
+
+        refreshExternalStorageAccess();
+
+        // Prompting immediately in onCreate would background the app before
+        // SDL has finished starting (the settings activity takes focus and
+        // SDL pauses the main thread). Ask a few seconds later instead.
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+            if (sExternalStorageGranted == 0) {
+                promptExternalStorageAccess();
+            }
+        }, 3000);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // The user may have granted "all files access" in Settings and
+        // returned to the app.
+        refreshExternalStorageAccess();
+    }
+
+    /** Update sExternalStorageGranted from the current system state. */
+    private void refreshExternalStorageAccess() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            sExternalStorageGranted = Environment.isExternalStorageManager() ? 1 : 0;
+        } else {
+            sExternalStorageGranted = 1;
+        }
+    }
+
+    /** Open Settings so the user can grant "all files access" for saving
+     *  stream recordings to the shared Documents folder. */
+    private void promptExternalStorageAccess() {
+        try {
+            Intent intent = new Intent(
+                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:" + getPackageName()));
+            startActivity(intent);
+        } catch (Exception error) {
+            Log.w(TAG, "cannot open all-files-access settings: " + error);
+        }
     }
 
     @Override
@@ -73,13 +122,35 @@ public class FreeWheelingActivity extends SDLActivity {
         }
     }
 
-    /** Copy the packaged assets/data tree to files/data if it is not there yet. */
+    /** Copy the packaged assets/data tree to files/data. Extracted once per
+     *  APK update: the marker file records the APK's lastUpdateTime, so a
+     *  reinstall (which keeps app data) re-extracts the new bundled files. */
     private void extractDataAssets() throws IOException {
         File target = new File(getFilesDir(), "data");
-        if (new File(target, "fweelin.xml").isFile()) {
-            return; // already extracted
+        File marker = new File(target, ".extracted-apk-mtime");
+        long apkTime = 0;
+        try {
+            apkTime = getPackageManager()
+                    .getPackageInfo(getPackageName(), 0).lastUpdateTime;
+        } catch (PackageManager.NameNotFoundException error) {
+            Log.w(TAG, "cannot read APK update time: " + error);
+        }
+        long extractedTime = -1;
+        if (marker.isFile()) {
+            try {
+                extractedTime = Long.parseLong(
+                        new String(java.nio.file.Files.readAllBytes(
+                                marker.toPath()), "UTF-8").trim());
+            } catch (Exception error) {
+                extractedTime = -1;
+            }
+        }
+        if (new File(target, "fweelin.xml").isFile() && extractedTime == apkTime) {
+            return; // already extracted for this APK
         }
         copyAssetTree(getAssets(), "data", target);
+        java.nio.file.Files.write(marker.toPath(),
+                Long.toString(apkTime).getBytes("UTF-8"));
         Log.i(TAG, "extracted bundled data/ assets to " + target);
     }
 

@@ -440,6 +440,36 @@
      parameters="overdub=1 and overdubfeedback=VAR_overdubfeedback and
                  loopid=loopid and vol=1.0"/>
 
+    <!-- Mobile layout buttons (Android touch layout; inert on desktop, where
+         no layout element carries these ids). These sit before the generic
+         loop-clicked trigger below so the specific ids take precedence. -->
+    <!-- Mobile CLEAR: latch erase mode. -->
+    <binding input="loop-clicked"
+     conditions="loopid=131 and button=1 and down=1"
+     output="toggle-variable" parameters="var=VAR_mobile_clear and maxvalue=1"/>
+    <!-- Armed: PULSE deletes the pulse, then disarms. -->
+    <binding input="loop-clicked"
+     conditions="loopid=130 and button=1 and down=1 and VAR_mobile_clear=1"
+     output1="delete-pulse" parameters1="pulse=0"
+     output2="set-variable" parameters2="var=VAR_mobile_clear and value=0"/>
+    <!-- Armed: tapping a mobile grid loop erases it, then disarms. -->
+    <binding input="loop-clicked"
+     conditions="loopid=97>114 and button=1 and down=1 and VAR_mobile_clear=1"
+     output1="erase-loop" parameters1="loopid=loopid"
+     output2="set-variable" parameters2="var=VAR_mobile_clear and value=0"/>
+    <!-- PULSE: create/select the pulse. -->
+    <binding input="loop-clicked"
+     conditions="loopid=130 and button=1 and down=1 and VAR_mobile_clear=0"
+     output="select-pulse" parameters="pulse=0"/>
+    <!-- REC: start/stop stream recording to disk. -->
+    <binding input="loop-clicked"
+     conditions="loopid=132 and button=1 and down=1"
+     output="toggle-disk-output"/>
+    <!-- SAVE: save the current scene of all loops. -->
+    <binding input="loop-clicked"
+     conditions="loopid=133 and button=1 and down=1"
+     output="save-current-scene"/>
+
     <!-- HELP: trigger/click: Toggle Record-Play-Off for loop -->
     <!-- Trigger Loops -->
     <binding input="loop-clicked" conditions="button=1 and down=1"

@@ -1303,6 +1303,10 @@ impl NativeRuntime {
                         format!("invalid layout {layout_id} in interface {interface_id}")
                     })?;
                 layout.loopids = (loop_ids.lo, loop_ids.hi);
+                crate::android_diag_log(&format!(
+                    "[video] show-loop interface={interface_id} layout={layout_id} loopids={}..{}",
+                    loop_ids.lo, loop_ids.hi
+                ));
             }
             ApplicationAction::VideoShowLayout {
                 interface_id,
@@ -1328,6 +1332,9 @@ impl NativeRuntime {
                 }
             }
             ApplicationAction::VideoSwitchInterface(interface_id) => {
+                crate::android_diag_log(&format!(
+                    "[video] switch-interface -> interface {interface_id}"
+                ));
                 r.current_interface = interface_id;
                 let video = r.video.as_mut().ok_or("video is closed")?;
                 let mut state = video.scene_state.write().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3451,7 +3458,35 @@ impl NativeComponentAdapter for NativeRuntime {
     fn start_session(&mut self) -> Result<(), String> {
         // `Fweelin::go` first broadcasts StartSession.  Its core XML binding
         // selects the configured initial switchable interface.
-        self.dispatch_one_runtime_event(&Event::StartSession)
+        self.dispatch_one_runtime_event(&Event::StartSession)?;
+        #[cfg(target_os = "android")]
+        {
+            // The bundled mobile touch layout is the Android default: switch
+            // to it after the generic start-up binding selects the shared
+            // desktop default (the PC keyboard interface).
+            let mobile_id = self
+                .resources
+                .borrow()
+                .config
+                .borrow()
+                .interfaces
+                .iter()
+                .find(|interface| {
+                    interface
+                        .setup
+                        .file_name()
+                        .is_some_and(|name| name == "mobile.xml")
+                })
+                .map(|interface| interface.id);
+            if let Some(id) = mobile_id {
+                let mut r = self.resources.borrow_mut();
+                Self::apply_application_action(
+                    &mut r,
+                    ApplicationAction::VideoSwitchInterface(id),
+                )?;
+            }
+        }
+        Ok(())
     }
     fn start_interfaces(&mut self) -> Result<(), String> {
         let interface_ids = {
