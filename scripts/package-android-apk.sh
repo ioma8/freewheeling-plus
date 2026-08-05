@@ -73,11 +73,24 @@ cp -R "$ROOT/data/." "$ASSET_ROOT/data/"
 # On Android the mobile layout's action buttons occupy the band just above
 # the meters, so compact the coreinterface display cluster into the bottom
 # ~20% of the screen: smaller meters, and the right-edge status switches
-# moved down below the buttons.
+# moved down below the buttons. Desktop-only displays (midi transpose text,
+# CPU/overdub bars, inputs 3-4, and the keyboard-mode switches) are hidden;
+# the phone keeps the IN/OUT/LMT meters plus the stereo input levels.
 if [ -f "$ASSET_ROOT/data/coreinterface.xml" ]; then
-    sed 's/barscale="0\.3"/barscale="0.14"/g; s/pos="\([0-9.]*\),0\.8"/pos="\1,0.94"/g; s/0\.925,0\.6"/0.925,0.80"/g; s/0\.895,0\.64"/0.895,0.82"/g; s/0\.914,0\.68"/0.914,0.84"/g; s/0\.925,0\.72"/0.925,0.86"/g; s/0\.925,0\.76"/0.925,0.88"/g' "$ASSET_ROOT/data/coreinterface.xml" > "$ASSET_ROOT/data/coreinterface.xml.tmp"
-    mv "$ASSET_ROOT/data/coreinterface.xml.tmp" "$ASSET_ROOT/data/coreinterface.xml"
+    # Hide pass runs first, on the original coordinates.
+    sed 's/title="Xp " pos="0\.0,0\.9"/title="Xp " pos="0.0,0.9" show="0"/; s/title="CPU" pos="0\.05,0\.8"/title="CPU" pos="0.05,0.8" show="0"/; s/pos="0\.26,0\.8"/pos="0.26,0.8" show="0"/g; s/pos="0\.29,0\.8"/pos="0.29,0.8" show="0"/g; s/title="FBK" pos="0\.75,0\.8"/title="FBK" pos="0.75,0.8" show="0"/; s/pos="0\.895,0\.64" title="SYNTH"/pos="0.895,0.64" title="SYNTH" show="0"/; s/pos="0\.914,0\.68" *$/pos="0.914,0.68" show="0"/; s/pos="0\.925,0\.6" *$/pos="0.925,0.6" show="0"/; s/pos="0\.925,0\.72" *$/pos="0.925,0.72" show="0"/; s/pos="0\.925,0\.76" *$/pos="0.925,0.76" show="0"/' "$ASSET_ROOT/data/coreinterface.xml" > "$ASSET_ROOT/data/coreinterface.xml.tmp"
+    # Compaction pass: smaller meters, switches below the buttons.
+    sed 's/barscale="0\.3"/barscale="0.14"/g; s/pos="\([0-9.]*\),0\.8"/pos="\1,0.94"/g; s/0\.925,0\.6"/0.925,0.80"/g; s/0\.895,0\.64"/0.895,0.82"/g; s/0\.914,0\.68"/0.914,0.84"/g; s/0\.925,0\.72"/0.925,0.86"/g; s/0\.925,0\.76"/0.925,0.88"/g' "$ASSET_ROOT/data/coreinterface.xml.tmp" > "$ASSET_ROOT/data/coreinterface.xml"
+    rm "$ASSET_ROOT/data/coreinterface.xml.tmp"
     echo "Compacted coreinterface display cluster for Android"
+fi
+# The patch browser and loop tray render at the very bottom of every
+# interface; on the phone the grid replaces them (and there is no keyboard
+# to switch browsers with). Hide them in the Android assets.
+if [ -f "$ASSET_ROOT/data/browsers.xml" ]; then
+    sed 's/show="1"/show="0"/g' "$ASSET_ROOT/data/browsers.xml" > "$ASSET_ROOT/data/browsers.xml.tmp"
+    mv "$ASSET_ROOT/data/browsers.xml.tmp" "$ASSET_ROOT/data/browsers.xml"
+    echo "Hidden desktop-only browsers for Android"
 fi
 aapt2 link -o "$STAGE/base.apk" \
     --manifest "$ROOT/android/AndroidManifest.xml" \
