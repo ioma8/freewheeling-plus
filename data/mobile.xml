@@ -1,36 +1,41 @@
 <interface>
-  <!-- Mobile (Android touch) layout: a 4x3 loop grid in the upper screen and
-       four function buttons beneath it, above the input/output meters.
+  <!-- Mobile (Android touch) layout set: a 4x3 loop grid in the upper screen,
+       five function buttons beneath it, and a saved-sessions panel.
        The layout is the default on Android (see native_runtime start_session);
        on desktop it is available as an extra switchable interface.
 
-       Loop grid: 12 large square cells, elements 'a'..'l' (ids 97..108).
-       Tapping a cell triggers the loop (coreinterface's plain loop-clicked
-       binding). Cells are square on a phone screen (0.25 of the width wide
-       and 0.1217 of the height tall, i.e. 270 px x 270 px on a 1080 x 2219
-       surface); the loop scope is centered in each cell at 0.20 of the
-       screen width.
+       Loop grid (layout 0): 12 large square cells, elements 'a'..'l'
+       (ids 97..108). Gestures per cell:
+         tap          -> record / play / stop (generic loop-clicked trigger)
+         long-press   -> overdub (hold starts, release stops)
+         double-tap   -> mute/unmute
+         drag up/down -> loop gain (like the desktop scrollwheel)
+       Cells are square on a phone screen (0.25 of the width wide and 0.1217
+       of the height tall); the loop scope is centered at 0.20 of the width.
 
-       Buttons (ids 130..133; the slot system only accepts loop ids below
+       Buttons (ids 130..134; the slot system only accepts loop ids below
        256, so the F-key keycodes 282/285/288 cannot be used as element ids):
          PULSE (130): create/select the pulse. While CLEAR is armed, deletes
            the pulse instead.
          CLEAR (131): latches erase mode (VAR_mobile_clear). While armed,
            tapping a grid loop erases it or tapping PULSE deletes the pulse;
-           both actions disarm afterwards. Tapping CLEAR again toggles erase
-           mode off.
+           both actions disarm afterwards.
          REC (132): start/stop stream recording to disk.
          SAVE (133): save the current scene.
+         LOAD (134): open the saved-sessions panel (layout 1).
 
-       The button bindings live in coreinterface.xml before the generic
-       loop-clicked trigger so they take precedence; they are inert on
-       desktop, where no layout element carries these ids. -->
+       Sessions panel (layout 1): the five most recent saved scenes (by
+       modification time) plus CLOSE. Tapping a row loads that session.
+
+       The button/gesture/session bindings live in coreinterface.xml before
+       the generic loop-clicked trigger so they take precedence; the gesture
+       button codes 2/6 are unreachable on desktop. -->
 
   <bindings>
     <declare var="VAR_mobile_clear" type="char" init="0"/>
     <!-- Loops are shown from base 0, so a layout element's id IS its loop
          id: cells 97..108 map to loops 97..108 (the same ids the PC keyboard
-         interface uses), and the buttons use 130..133. -->
+         interface uses), and the buttons use 130..134. -->
     <declare var="VAR_mobilerange" type="range" init="0>322"/>
 
     <!-- Startup: show loops on the mobile grid. -->
@@ -41,7 +46,7 @@
 
   <graphics>
     <layout id="0" name="Mobile Loops" scale="1.0,1.0" pos="0.00,0.00"
-     label="0" elabel="1" show="0">
+     label="0" elabel="1" show="0" emptyhint="tap a cell to record">
       <!-- 4 x 3 loop grid. Each cell is 1/4 of the width and 1/4 of the
            width in height (square on a phone screen): 0.25 x 0.1217. -->
       <element id="97" name="A" base="0.0000,0.0400" looppos="0.1250,0.0608" loopsize="0.20" namepos="0.008,0.005">
@@ -82,18 +87,49 @@
       </element>
 
       <!-- Function buttons, between the grid and the input/output meters
-           (which occupy the bottom 20% on Android). Square, 0.22 x 0.22. -->
-      <element id="130" name="PULSE" base="0.0300,0.5200" namepos="0.03,0.03" toggle="pulse-active">
-        <box outline="TBLR" pos="0.00,0.00, 0.22,0.22"/>
+           (which occupy the bottom 20% on Android). Square in screen pixels:
+           0.16 of the width wide and 0.16 * aspect tall (~173 px). -->
+      <element id="130" name="PULSE" base="0.0300,0.5200" toggle="pulse-active" labelcenter="1">
+        <box outline="TBLR" pos="0.00,0.00, 0.16,0.0790"/>
       </element>
-      <element id="131" name="CLEAR" base="0.2700,0.5200" namepos="0.03,0.03" toggle="VAR_mobile_clear">
-        <box outline="TBLR" pos="0.00,0.00, 0.22,0.22"/>
+      <element id="131" name="CLEAR" base="0.2100,0.5200" toggle="VAR_mobile_clear" labelcenter="1">
+        <box outline="TBLR" pos="0.00,0.00, 0.16,0.0790"/>
       </element>
-      <element id="132" name="REC" base="0.5100,0.5200" namepos="0.03,0.03" toggle="streaming">
-        <box outline="TBLR" pos="0.00,0.00, 0.22,0.22"/>
+      <element id="132" name="REC" base="0.3900,0.5200" toggle="streaming" labelcenter="1">
+        <box outline="TBLR" pos="0.00,0.00, 0.16,0.0790"/>
       </element>
-      <element id="133" name="SAVE" base="0.7500,0.5200" namepos="0.03,0.03" toggle="scene-save-age" togglemax="0.6">
-        <box outline="TBLR" pos="0.00,0.00, 0.22,0.22"/>
+      <element id="133" name="SAVE" base="0.5700,0.5200" toggle="scene-save-age" togglemax="0.6" labelcenter="1">
+        <box outline="TBLR" pos="0.00,0.00, 0.16,0.0790"/>
+      </element>
+      <element id="134" name="LOAD" base="0.7500,0.5200" labelcenter="1">
+        <box outline="TBLR" pos="0.00,0.00, 0.16,0.0790"/>
+      </element>
+    </layout>
+
+    <!-- Saved-sessions panel: shown by LOAD, each row loads the N-th most
+         recent scene (browser index N), CLOSE hides the panel. -->
+    <layout id="1" name="Sessions" scale="1.0,1.0" pos="0.00,0.00"
+     label="1" elabel="1" show="0" namepos="0.05,0.02">
+      <element id="199" name="" base="0.0000,0.0000">
+        <box outline="TBLR" pos="0.00,0.00, 1.00,0.65"/>
+      </element>
+      <element id="200" name="1" base="0.0500,0.0900" labelcenter="1">
+        <box outline="TBLR" pos="0.00,0.00, 0.90,0.07"/>
+      </element>
+      <element id="201" name="2" base="0.0500,0.1750" labelcenter="1">
+        <box outline="TBLR" pos="0.00,0.00, 0.90,0.07"/>
+      </element>
+      <element id="202" name="3" base="0.0500,0.2600" labelcenter="1">
+        <box outline="TBLR" pos="0.00,0.00, 0.90,0.07"/>
+      </element>
+      <element id="203" name="4" base="0.0500,0.3450" labelcenter="1">
+        <box outline="TBLR" pos="0.00,0.00, 0.90,0.07"/>
+      </element>
+      <element id="204" name="5" base="0.0500,0.4300" labelcenter="1">
+        <box outline="TBLR" pos="0.00,0.00, 0.90,0.07"/>
+      </element>
+      <element id="205" name="CLOSE" base="0.4000,0.5400" labelcenter="1">
+        <box outline="TBLR" pos="0.00,0.00, 0.20,0.07"/>
       </element>
     </layout>
   </graphics>

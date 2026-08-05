@@ -723,16 +723,41 @@ impl Display for LayoutContent {
             if self.layout.showelabel
                 && let Some(name) = &element.name
             {
-                renderer.draw(DrawOp::StyledText(
-                    name.clone(),
-                    "main".into(),
-                    20.0 * metrics.scale_y,
-                    metrics.x(self.layout.xpos + element.nxpos),
-                    metrics.y(self.layout.ypos + element.nypos),
-                    FG,
-                    0,
-                    0,
-                ));
+                let font_size = 20.0 * metrics.scale_y;
+                if element.labelcenter
+                    && let Some(bbox) = element.geometry.first()
+                {
+                    let (bl, bt, br, bb) = (
+                        metrics.x(self.layout.xpos + bbox.left),
+                        metrics.y(self.layout.ypos + bbox.top),
+                        metrics.x(self.layout.xpos + bbox.right),
+                        metrics.y(self.layout.ypos + bbox.bottom),
+                    );
+                    let approx_w = font_size * 0.62 * name.chars().count() as f32;
+                    let cx = (bl + br) as f32 / 2.0 - approx_w / 2.0;
+                    let cy = (bt + bb) as f32 / 2.0 - font_size * 0.55;
+                    renderer.draw(DrawOp::StyledText(
+                        name.clone(),
+                        "main".into(),
+                        font_size,
+                        cx as i32,
+                        cy as i32,
+                        FG,
+                        0,
+                        0,
+                    ));
+                } else {
+                    renderer.draw(DrawOp::StyledText(
+                        name.clone(),
+                        "main".into(),
+                        font_size,
+                        metrics.x(self.layout.xpos + element.nxpos),
+                        metrics.y(self.layout.ypos + element.nypos),
+                        FG,
+                        0,
+                        0,
+                    ));
+                }
             }
         }
         if self.layout.showlabel
@@ -745,6 +770,29 @@ impl Display for LayoutContent {
                 metrics.x(self.layout.xpos + self.layout.nxpos),
                 metrics.y(self.layout.ypos + self.layout.nypos),
                 FG,
+                0,
+                0,
+            ));
+        }
+        // Empty-state hint: while no loop on the grid has any audio, draw a
+        // short instruction centered over the layout (mobile first-run).
+        if let Some(hint) = self.layout.emptyhint.as_deref()
+            && state.loop_scopes.is_empty()
+        {
+            let font_size = 24.0 * metrics.scale_y;
+            let approx_w = font_size * 0.62 * hint.chars().count() as f32;
+            let cx = (metrics.x(self.layout.xpos)
+                + metrics.x(self.layout.xpos + metrics.logical_width as i32))
+                / 2
+                - approx_w as i32 / 2;
+            let cy = metrics.y(self.layout.ypos + metrics.logical_height as i32 / 2);
+            renderer.draw(DrawOp::StyledText(
+                hint.to_string(),
+                "main".into(),
+                font_size,
+                cx,
+                cy,
+                Color(200, 200, 200, 255),
                 0,
                 0,
             ));
@@ -1801,6 +1849,7 @@ fn parse_layout(node: Node<'_, '_>, iid: i32, size: (u32, u32)) -> Result<FloLay
     layout.show = node.attribute("show").unwrap_or("1") != "0";
     layout.showlabel = node.attribute("label").unwrap_or("1") != "0";
     layout.showelabel = node.attribute("elabel").unwrap_or("1") != "0";
+    layout.emptyhint = node.attribute("emptyhint").map(str::to_string);
     for en in node.children().filter(|n| n.has_tag_name("element")) {
         let base = parse_pair_f32(en.attribute("base").unwrap_or("0,0"), (0., 0.));
         let lp = parse_pair_f32(en.attribute("looppos").unwrap_or("0,0"), (0., 0.));
@@ -1826,6 +1875,7 @@ fn parse_layout(node: Node<'_, '_>, iid: i32, size: (u32, u32)) -> Result<FloLay
             togglemax: en
                 .attribute("togglemax")
                 .and_then(|value| value.parse::<f32>().ok()),
+            labelcenter: en.attribute("labelcenter").is_some(),
             geometry: Vec::new(),
         };
         if let Some(np) = en.attribute("namepos") {

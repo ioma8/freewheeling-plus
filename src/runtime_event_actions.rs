@@ -594,6 +594,10 @@ impl RuntimeEventDispatcher {
             EventType::EraseLoop => out.push(runtime(RuntimeCommand::Erase {
                 slot: loop_slot(int(p, "loopid")?)?,
             }))?,
+            EventType::MuteLoop => out.push(runtime(RuntimeCommand::Mute {
+                slot: loop_slot(int(p, "loopid")?)?,
+                muted: true,
+            }))?,
             EventType::EraseAllLoops => out.push(app(ApplicationAction::EraseAllLoops))?,
             EventType::EraseSelectedLoops => {
                 out.push(app(ApplicationAction::EraseSelectedLoops {

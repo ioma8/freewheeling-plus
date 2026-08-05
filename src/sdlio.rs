@@ -103,11 +103,11 @@ pub struct Sdl2InputBackend {
     /// Cached window pixel size, refreshed from `SizeChanged` events, used to
     /// translate normalized SDL touch coordinates into mouse coordinates.
     window_size: (u32, u32),
-    /// The touch finger currently acting as the mouse pointer. SDL2's Android
-    /// backend delivers only touch events (it never synthesizes mouse
-    /// events), so the first finger to touch drives the pointer; additional
-    /// fingers are ignored until it lifts.
-    touch_mouse_finger: Option<i64>,
+    /// The in-flight single-finger touch gesture (see `TouchGesture`).
+    /// Additional fingers are ignored until it lifts.
+    touch: Option<TouchGesture>,
+    /// When the previous tap ended and where, for double-tap detection.
+    last_tap: Option<(std::time::Instant, (i32, i32))>,
 }
 
 impl Sdl2InputBackend {
@@ -144,7 +144,8 @@ impl Sdl2InputBackend {
             event_pump,
             joysticks,
             window_size: (640, 480),
-            touch_mouse_finger: None,
+            touch: None,
+            last_tap: None,
         })
     }
     pub fn joystick_count(&self) -> usize {
@@ -155,6 +156,32 @@ impl Sdl2InputBackend {
     fn touch_pixel(&self, x: f32, y: f32) -> (i32, i32) {
         touch_to_pixels(x, y, self.window_size.0, self.window_size.1)
     }
+
+    /// Called when no SDL event was pending: promotes a still-held, unmoved
+    /// touch into a long-press (overdub, button 2).
+    fn touch_long_press_tick(&mut self) -> Option<SdlEvent> {
+        let Some(touch) = self.touch.as_mut() else {
+            return None;
+        };
+        if touch.dragging || touch.pending_tap {
+            return None;
+        }
+        if touch.down_button != 0 {
+            return None;
+        }
+        if touch.start.elapsed().as_millis() < LONG_PRESS_MS {
+            return None;
+        }
+        touch.down_button = 2;
+        touch.pending_tap = false;
+        let (x, y) = touch.last_pos;
+        Some(SdlEvent::MouseButton {
+            button: 2,
+            x,
+            y,
+            down: true,
+        })
+    }
 }
 
 /// Map a normalized SDL touch coordinate onto a window of `width` x `height`
@@ -163,6 +190,43 @@ fn touch_to_pixels(x: f32, y: f32, width: u32, height: u32) -> (i32, i32) {
     let px = (x.clamp(0.0, 1.0) * width as f32) as i32;
     let py = (y.clamp(0.0, 1.0) * height as f32) as i32;
     (px, py)
+}
+
+/// How long a touch must be held (without dragging) before it becomes a
+/// long-press (overdub).
+const LONG_PRESS_MS: u128 = 600;
+/// Maximum gap between the end of one tap and the start of the next for the
+/// pair to count as a double-tap (mute/unmute).
+const DOUBLE_TAP_MS: u128 = 300;
+/// Maximum Manhattan distance (window px) between the two taps of a double-tap.
+const DOUBLE_TAP_DIST: i32 = 60;
+/// Touch movement (window px) beyond which the gesture becomes a gain drag.
+const DRAG_THRESHOLD: i32 = 30;
+/// Vertical drag distance (window px) per loop-gain step (one wheel event).
+const DRAG_WHEEL_STEP: i32 = 22;
+
+/// In-flight single-finger touch gesture on the mobile UI.
+///
+/// The tap trigger (button 1, record/play) is deferred until the gesture
+/// resolves so that a gain drag never accidentally triggers the loop:
+/// - quick tap        -> button 1 down emitted on release (record/play),
+/// - hold >= LONG_PRESS_MS -> button 2 down (overdub), button 2 up on release,
+/// - double-tap       -> button 6 (mute/unmute), first tap suppressed,
+/// - vertical drag    -> repeated button 4/5 events (loop gain, like the
+///                        desktop scrollwheel), never a trigger.
+struct TouchGesture {
+    finger_id: i64,
+    start: std::time::Instant,
+    start_pos: (i32, i32),
+    last_pos: (i32, i32),
+    /// Vertical drag distance accumulated toward the next wheel event.
+    drag_accum: i32,
+    dragging: bool,
+    /// Which gesture button's down event has been emitted (1 tap, 2 overdub,
+    /// 6 double-tap, 0 none).
+    down_button: i32,
+    /// A deferred record/play tap is still pending (emitted on release).
+    pending_tap: bool,
 }
 
 impl SdlBackend for Sdl2InputBackend {
@@ -207,43 +271,138 @@ impl SdlBackend for Sdl2InputBackend {
                 Event::FingerDown {
                     finger_id, x, y, ..
                 } => {
-                    if self.touch_mouse_finger.is_none() {
-                        self.touch_mouse_finger = Some(finger_id);
-                        let (px, py) = self.touch_pixel(x, y);
-                        Some(SdlEvent::MouseButton {
-                            button: 1,
-                            x: px,
-                            y: py,
-                            down: true,
-                        })
-                    } else {
-                        None
+                    if self.touch.is_some() {
+                        return None; // multi-touch: ignore additional fingers
                     }
+                    let (px, py) = self.touch_pixel(x, y);
+                    let now = std::time::Instant::now();
+                    // Double-tap: a new touch lands shortly after the previous
+                    // tap ended, near the same spot -> mute/unmute (button 6).
+                    if let Some((tap_time, tap_pos)) = self.last_tap {
+                        if tap_time.elapsed().as_millis() <= DOUBLE_TAP_MS
+                            && (px - tap_pos.0).abs() + (py - tap_pos.1).abs()
+                                <= DOUBLE_TAP_DIST
+                        {
+                            self.last_tap = None;
+                            self.touch = Some(TouchGesture {
+                                finger_id,
+                                start: now,
+                                start_pos: (px, py),
+                                last_pos: (px, py),
+                                drag_accum: 0,
+                                dragging: false,
+                                down_button: 6,
+                                pending_tap: false,
+                            });
+                            return Some(SdlEvent::MouseButton {
+                                button: 6,
+                                x: px,
+                                y: py,
+                                down: true,
+                            });
+                        }
+                    }
+                    self.touch = Some(TouchGesture {
+                        finger_id,
+                        start: now,
+                        start_pos: (px, py),
+                        last_pos: (px, py),
+                        drag_accum: 0,
+                        dragging: false,
+                        down_button: 0,
+                        pending_tap: true,
+                    });
+                    // The tap trigger (button 1) is deferred until the gesture
+                    // resolves: a quick tap emits it on release, a long-press
+                    // becomes an overdub, and a drag never triggers the loop.
+                    None
                 }
                 Event::FingerMotion {
                     finger_id, x, y, ..
                 } => {
-                    if self.touch_mouse_finger == Some(finger_id) {
-                        let (px, py) = self.touch_pixel(x, y);
-                        Some(SdlEvent::MouseMotion { x: px, y: py })
+                    if !self.touch.as_ref().is_some_and(|t| t.finger_id == finger_id) {
+                        return None;
+                    }
+                    let (px, py) = self.touch_pixel(x, y);
+                    let touch = self.touch.as_mut()?;
+                    let dy = py - touch.last_pos.1;
+                    touch.last_pos = (px, py);
+                    if !touch.dragging {
+                        let moved = (px - touch.start_pos.0).abs()
+                            + (py - touch.start_pos.1).abs();
+                        if moved > DRAG_THRESHOLD {
+                            // This is a gain drag, not a tap or long-press.
+                            touch.dragging = true;
+                            touch.pending_tap = false;
+                            touch.down_button = 0;
+                        }
+                    }
+                    if touch.dragging {
+                        // Vertical drag adjusts the loop gain, exactly like
+                        // the mouse wheel over a loop on desktop.
+                        touch.drag_accum += dy;
+                        let mut step = None;
+                        while touch.drag_accum.abs() >= DRAG_WHEEL_STEP {
+                            let dir = if touch.drag_accum > 0 { 1 } else { -1 };
+                            touch.drag_accum -= dir * DRAG_WHEEL_STEP;
+                            // drag down -> wheel down (button 5, gain down);
+                            // drag up -> wheel up (button 4, gain up)
+                            step = Some(if dir > 0 { 5 } else { 4 });
+                        }
+                        if let Some(button) = step {
+                            Some(SdlEvent::MouseButton {
+                                button,
+                                x: px,
+                                y: py,
+                                down: true,
+                            })
+                        } else {
+                            None
+                        }
                     } else {
-                        None
+                        Some(SdlEvent::MouseMotion { x: px, y: py })
                     }
                 }
                 Event::FingerUp {
                     finger_id, x, y, ..
                 } => {
-                    if self.touch_mouse_finger == Some(finger_id) {
-                        self.touch_mouse_finger = None;
-                        let (px, py) = self.touch_pixel(x, y);
-                        Some(SdlEvent::MouseButton {
+                    let Some(touch) = self.touch.take() else {
+                        return None;
+                    };
+                    if touch.finger_id != finger_id {
+                        self.touch = Some(touch);
+                        return None;
+                    }
+                    let (px, py) = self.touch_pixel(x, y);
+                    if touch.dragging {
+                        return None; // gain events already emitted
+                    }
+                    if touch.pending_tap {
+                        // Quick tap: record/play trigger on release.
+                        self.last_tap = Some((std::time::Instant::now(), (px, py)));
+                        // Down first (the trigger binding fires on down).
+                        return Some(SdlEvent::MouseButton {
                             button: 1,
                             x: px,
                             y: py,
+                            down: true,
+                        });
+                    }
+                    self.last_tap = Some((std::time::Instant::now(), (px, py)));
+                    match touch.down_button {
+                        2 => Some(SdlEvent::MouseButton {
+                            button: 2,
+                            x: px,
+                            y: py,
                             down: false,
-                        })
-                    } else {
-                        None
+                        }),
+                        6 => Some(SdlEvent::MouseButton {
+                            button: 6,
+                            x: px,
+                            y: py,
+                            down: false,
+                        }),
+                        _ => None,
                     }
                 }
                 Event::MouseButtonDown {
@@ -329,6 +488,11 @@ impl SdlBackend for Sdl2InputBackend {
             if translated.is_some() {
                 return translated;
             }
+            // No translatable SDL event arrived: run gesture timers (e.g. a
+            // long-press that the finger is still holding without moving).
+            if let Some(event) = self.touch_long_press_tick() {
+                return Some(event);
+            }
         }
     }
     fn set_window_size(&mut self, width: u32, height: u32) {
@@ -343,7 +507,8 @@ impl SdlBackend for Sdl2InputBackend {
     fn shutdown(&mut self) {
         self.video.text_input().stop();
         self.joysticks.clear();
-        self.touch_mouse_finger = None;
+        self.touch = None;
+        self.last_tap = None;
     }
 }
 

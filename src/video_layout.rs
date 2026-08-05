@@ -90,6 +90,9 @@ pub struct FloLayoutElement {
     /// such as `scene-save-age`): the element is active while
     /// `0 < value < togglemax`. `None` means any nonzero value activates it.
     pub togglemax: Option<f32>,
+    /// Center the element label (name) inside its first box instead of
+    /// placing it at `namepos`.
+    pub labelcenter: bool,
     pub geometry: Vec<FloLayoutBox>,
 }
 impl FloLayoutElement {
@@ -118,6 +121,9 @@ pub struct FloLayout {
     pub show: bool,
     pub showlabel: bool,
     pub showelabel: bool,
+    /// Text drawn centered over the layout while no loop has any audio
+    /// (mobile first-run hint, e.g. "tap a cell to record").
+    pub emptyhint: Option<String>,
 }
 impl FloLayout {
     pub fn new() -> Self {

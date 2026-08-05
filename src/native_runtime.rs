@@ -3328,11 +3328,21 @@ impl NativeStartupAdapter for NativeRuntime {
             StartupPhase::Browsers => {
                 fs::create_dir_all(&r.library_dir)
                     .map_err(|e| format!("create library directory: {e}"))?;
-                r.browser_entries = fs::read_dir(&r.library_dir)
+                let mut entries: Vec<std::path::PathBuf> = fs::read_dir(&r.library_dir)
                     .map_err(|e| format!("scan library: {e}"))?
                     .filter_map(Result::ok)
                     .map(|e| e.path())
                     .collect();
+                // Newest first, so browser index 0 is the most recent saved
+                // session (the mobile sessions panel rows are numbered by
+                // recency).
+                entries.sort_by_key(|path| {
+                    std::fs::metadata(path)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                });
+                entries.reverse();
+                r.browser_entries = entries;
             }
             StartupPhase::InputAndMidi => {
                 let manager = Arc::clone(r.events.as_ref().ok_or("event manager missing")?);
