@@ -1113,7 +1113,7 @@ impl NativeRuntime {
         let line = if let Some(audio) = r.audio.as_ref() {
             if let Some(status) = audio.backend().status() {
                 format!(
-                    "FreeWheeling audio: active={} input={:?} output={:?} format={:?} latency={:?} capture_callbacks={} playback_callbacks={} metrics={:?} stream={:?}",
+                    "FreeWheeling audio: active={} input={:?} output={:?} format={:?} latency={:?} capture_callbacks={} playback_callbacks={} metrics={:?} stream={:?} input_peaks={:?}",
                     status.active,
                     status.input.as_ref().map(|device| &device.name),
                     status.output.as_ref().map(|device| &device.name),
@@ -1123,6 +1123,7 @@ impl NativeRuntime {
                     status.playback_callbacks,
                     status.metrics,
                     status.stream,
+                    r.latest_snapshot.input_peak,
                 )
             } else {
                 let metrics = audio.metrics();

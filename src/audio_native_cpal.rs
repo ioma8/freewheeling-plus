@@ -871,6 +871,12 @@ fn capture_callback(
     }
     let mut dropped = 0u64;
     for frame in data.chunks_exact(channels) {
+        #[cfg(target_os = "android")]
+        let stereo = [
+            android_input_gain(frame[0]),
+            android_input_gain(frame.get(1).copied().unwrap_or(frame[0])),
+        ];
+        #[cfg(not(target_os = "android"))]
         let stereo = [frame[0], frame.get(1).copied().unwrap_or(frame[0])];
         if producer.push(stereo).is_err() {
             dropped += 1;
@@ -881,6 +887,17 @@ fn capture_callback(
             .capture_overruns
             .fetch_add(dropped, Ordering::Relaxed);
     }
+}
+
+/// Android raw-mic capture uses AAUDIO_INPUT_PRESET_UNPROCESSED (no AGC or
+/// noise suppression, which is what keeps the recorded audio clean instead
+/// of "telephone" quality), and a phone's raw mic signal is consequently
+/// very quiet. Boost the input ~20 dB and soft-limit with tanh so loud
+/// material cannot hard-clip; the curve is linear for quiet signals, so
+/// normal speech gets a real level lift while shouting is compressed.
+#[cfg(target_os = "android")]
+fn android_input_gain(sample: f32) -> f32 {
+    (sample * 10.0).tanh()
 }
 
 #[allow(clippy::too_many_arguments)]

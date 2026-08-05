@@ -532,6 +532,30 @@ impl FloConfig {
         let config_dir = Self::user_config_dir_from_home(home);
         let user_cfg = Self::build_config_path(&config_dir, cfgname);
         if user_cfg.exists() {
+            // On Android the freshly extracted packaged assets are the
+            // authoritative config. The user-dir copies survive `adb install
+            // -r` upgrades, so sync every packaged XML into the user config
+            // dir when it differs; otherwise a stale first-install
+            // coreinterface.xml would keep the mobile button bindings (and
+            // any later layout/binding fixes) disabled forever.
+            #[cfg(target_os = "android")]
+            {
+                if let Ok(entries) = std::fs::read_dir(data_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) != Some("xml") {
+                            continue;
+                        }
+                        let Some(name) = path.file_name() else {
+                            continue;
+                        };
+                        let target = config_dir.join(name);
+                        if std::fs::read(&path).ok() != std::fs::read(&target).ok() {
+                            let _ = std::fs::copy(&path, &target);
+                        }
+                    }
+                }
+            }
             return Ok(user_cfg);
         }
 
