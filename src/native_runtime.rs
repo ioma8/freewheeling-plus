@@ -577,6 +577,8 @@ struct RuntimeResources {
     auto_loop_codec: Codec,
     current_scene: Option<std::path::PathBuf>,
     pending_scene_save: Option<PendingSceneSave>,
+    /// When the last scene save completed; used to flash the SAVE button.
+    last_scene_save: Option<std::time::Instant>,
     sample_rate: u32,
     max_callback_frames: usize,
     library_dir: std::path::PathBuf,
@@ -683,6 +685,14 @@ impl NativeRuntime {
         state.values.insert(
             "streaming".into(),
             (r.stream_state == StreamState::Writing) as u8 as f32,
+        );
+        // Seconds since the last scene save; drives the SAVE button flash
+        // (`toggle="scene-save-age" togglemax="0.6"`).
+        state.values.insert(
+            "scene-save-age".into(),
+            r.last_scene_save
+                .map(|saved| saved.elapsed().as_secs_f32())
+                .unwrap_or(f32::MAX),
         );
         state
             .values
@@ -1022,6 +1032,7 @@ impl NativeRuntime {
                 auto_loop_codec: Codec::Vorbis,
                 current_scene: None,
                 pending_scene_save: None,
+                last_scene_save: None,
                 sample_rate: 0,
                 max_callback_frames: 0,
                 library_dir,
@@ -2649,6 +2660,7 @@ impl NativeRuntime {
             return Err(format!("save scene '{}': {error}", path.display()));
         }
         r.current_scene = Some(path.clone());
+        r.last_scene_save = Some(std::time::Instant::now());
         if !r.browser_entries.contains(&path) {
             r.browser_entries.push(path);
         }

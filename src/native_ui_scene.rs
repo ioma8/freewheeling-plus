@@ -576,14 +576,17 @@ impl Display for LayoutContent {
                 .map_or(&LOOP_COLORS[loop_id.rem_euclid(4) as usize], |_| &SELECTED);
             // A `toggle="key"` element lights up (bright red fill) while the
             // named state value is nonzero: REC while streaming, CLEAR while
-            // erase mode is armed, PULSE while a pulse is selected.
-            let toggled = element
+            // erase mode is armed, PULSE while a pulse is selected. An
+            // optional `togglemax` bounds it (e.g. SAVE flashes for a short
+            // window after each scene save via `scene-save-age`).
+            let toggle_value = element
                 .toggle
                 .as_deref()
                 .and_then(|name| state.values.get(name))
                 .copied()
-                .unwrap_or(0.0)
-                != 0.0;
+                .unwrap_or(0.0);
+            let toggled = toggle_value > 0.0
+                && element.togglemax.map_or(true, |max| toggle_value < max);
             if let Some(toggle) = element.toggle.as_deref() {
                 let previous = self.toggle_states.entry(element.id).or_insert(false);
                 if *previous != toggled {
@@ -1820,6 +1823,9 @@ fn parse_layout(node: Node<'_, '_>, iid: i32, size: (u32, u32)) -> Result<FloLay
                 })
                 .unwrap_or(0),
             toggle: en.attribute("toggle").map(str::to_string),
+            togglemax: en
+                .attribute("togglemax")
+                .and_then(|value| value.parse::<f32>().ok()),
             geometry: Vec::new(),
         };
         if let Some(np) = en.attribute("namepos") {
@@ -2242,6 +2248,69 @@ mod tests {
         display.render(&mut renderer, &RenderMetrics::new(640, 480, 640, 480));
         assert!(
             renderer
+                .0
+                .iter()
+                .any(|op| matches!(op, DrawOp::Box(_, _, _, _, c) if *c == active_red))
+        );
+    }
+
+    #[test]
+    fn toggled_element_with_togglemax_flashes_only_within_bounds() {
+        let state = SharedUiSceneState::default();
+        state
+            .write()
+            .unwrap()
+            .values
+            .insert("scene-save-age".into(), 0.1);
+        let mut layout = FloLayout::new();
+        layout.loopids = (0, 0);
+        layout.showlabel = false;
+        layout.showelabel = false;
+        layout.elements.push(FloLayoutElement {
+            id: 133,
+            toggle: Some("scene-save-age".into()),
+            togglemax: Some(0.6),
+            ..Default::default()
+        });
+        layout
+            .elements
+            .last_mut()
+            .unwrap()
+            .add_box(FloLayoutBox {
+                left: 10,
+                top: 10,
+                right: 40,
+                bottom: 40,
+                ..Default::default()
+            });
+        let mut display = LayoutContent {
+            base: FloDisplay::new(0),
+            layout,
+            state,
+            current_peaks: HashMap::new(),
+            toggle_states: HashMap::new(),
+        };
+        let active_red = Color(0xff, 0x3b, 0x30, 255);
+        // Just after a save (age 0.1 < 0.6): active red.
+        let mut renderer = RecordingRenderer::default();
+        display.render(&mut renderer, &RenderMetrics::new(640, 480, 640, 480));
+        assert!(
+            renderer
+                .0
+                .iter()
+                .any(|op| matches!(op, DrawOp::Box(_, _, _, _, c) if *c == active_red))
+        );
+        // Long after a save (age 5.0 > 0.6): back to the idle color.
+        display
+            .state
+            .write()
+            .unwrap()
+            .values
+            .insert("scene-save-age".into(), 5.0);
+        renderer = RecordingRenderer::default();
+        display.render(&mut renderer, &RenderMetrics::new(640, 480, 640, 480));
+        assert!(
+            !renderer
                 .0
                 .iter()
                 .any(|op| matches!(op, DrawOp::Box(_, _, _, _, c) if *c == active_red))

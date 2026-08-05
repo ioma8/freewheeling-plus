@@ -80,7 +80,7 @@
       <element id="132" name="REC" base="0.5100,0.3900" namepos="0.03,0.03" toggle="streaming">
         <box outline="TBLR" pos="0.00,0.00, 0.22,0.22"/>
       </element>
-      <element id="133" name="SAVE" base="0.7500,0.3900" namepos="0.03,0.03">
+      <element id="133" name="SAVE" base="0.7500,0.3900" namepos="0.03,0.03" toggle="scene-save-age" togglemax="0.6">
         <box outline="TBLR" pos="0.00,0.00, 0.22,0.22"/>
       </element>
     </layout>

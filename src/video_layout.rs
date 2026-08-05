@@ -86,6 +86,10 @@ pub struct FloLayoutElement {
     /// rendered in the active color, giving touch buttons visible feedback
     /// for latched/recording states.
     pub toggle: Option<String>,
+    /// Upper bound for the `toggle` value (seconds for time-based feedback
+    /// such as `scene-save-age`): the element is active while
+    /// `0 < value < togglemax`. `None` means any nonzero value activates it.
+    pub togglemax: Option<f32>,
     pub geometry: Vec<FloLayoutBox>,
 }
 impl FloLayoutElement {
