@@ -163,10 +163,7 @@ impl Sdl2InputBackend {
         let Some(touch) = self.touch.as_mut() else {
             return None;
         };
-        if touch.dragging || touch.pending_tap {
-            return None;
-        }
-        if touch.down_button != 0 {
+        if touch.dragging || touch.down_button != 0 {
             return None;
         }
         if touch.start.elapsed().as_millis() < LONG_PRESS_MS {
@@ -233,7 +230,17 @@ impl SdlBackend for Sdl2InputBackend {
     fn poll_event(&mut self, timeout_ms: u32) -> Option<SdlEvent> {
         use sdl2::event::Event;
         loop {
-            let event = self.event_pump.wait_event_timeout(timeout_ms)?;
+            let event = match self.event_pump.wait_event_timeout(timeout_ms) {
+                Some(event) => event,
+                None => {
+                    // Wait timed out (a held finger produces no SDL events):
+                    // run gesture timers, e.g. the long-press overdub.
+                    if let Some(event) = self.touch_long_press_tick() {
+                        return Some(event);
+                    }
+                    return None;
+                }
+            };
             if std::env::var_os("FWEELIN_DIAGNOSTICS").is_some() {
                 eprintln!("FreeWheeling SDL event: {event:?}");
             }
@@ -486,6 +493,12 @@ impl SdlBackend for Sdl2InputBackend {
                 _ => None,
             };
             if translated.is_some() {
+                // A gesture deadline may have passed while SDL events were
+                // streaming in (e.g. a held finger): a long-press is due even
+                // though the last event was a motion, so let it win.
+                if let Some(event) = self.touch_long_press_tick() {
+                    return Some(event);
+                }
                 return translated;
             }
             // No translatable SDL event arrived: run gesture timers (e.g. a

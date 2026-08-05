@@ -95,7 +95,7 @@ fi
 # The footswitch interface is a fixed (non-switchable) overlay that renders
 # on every interface; there is no MIDI footswitch on a phone, so hide it.
 if [ -f "$ASSET_ROOT/data/midifootswitch.xml" ]; then
-    sed 's/name="Footswitch" scale="1\.0,1\.3" pos="0\.90,0\.85"/name="Footswitch" scale="1.0,1.3" pos="0.90,0.85" show="0"/' "$ASSET_ROOT/data/midifootswitch.xml" > "$ASSET_ROOT/data/midifootswitch.xml.tmp"
+    sed 's/namepos="0\.02,0\.02" show="1"/namepos="0.02,0.02" show="0"/' "$ASSET_ROOT/data/midifootswitch.xml" > "$ASSET_ROOT/data/midifootswitch.xml.tmp"
     mv "$ASSET_ROOT/data/midifootswitch.xml.tmp" "$ASSET_ROOT/data/midifootswitch.xml"
     echo "Hidden footswitch overlay for Android"
 fi

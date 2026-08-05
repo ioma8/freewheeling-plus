@@ -38,10 +38,12 @@
          interface uses), and the buttons use 130..134. -->
     <declare var="VAR_mobilerange" type="range" init="0>322"/>
 
-    <!-- Startup: show loops on the mobile grid. -->
+    <!-- Startup: show the mobile grid and its loops. -->
     <binding input="start-interface"
      output1="video-show-loop"
-     parameters1="layoutid=0 and loopid=VAR_mobilerange"/>
+     parameters1="layoutid=0 and loopid=VAR_mobilerange"
+     output2="video-show-layout"
+     parameters2="interfaceid=5 and layoutid=0 and show=1 and hideothers=0"/>
   </bindings>
 
   <graphics>

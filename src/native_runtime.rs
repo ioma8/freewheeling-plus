@@ -484,6 +484,7 @@ impl MainThreadVideo {
             .scene
             .layouts
             .iter()
+            .rev()
             .filter(|layout| {
                 state
                     .layouts
@@ -1350,14 +1351,24 @@ impl NativeRuntime {
                 r.current_interface = interface_id;
                 let video = r.video.as_mut().ok_or("video is closed")?;
                 let mut state = video.scene_state.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+                // Only hide the other interfaces' layouts. Never force-show
+                // the target interface's layouts: layouts authored with
+                // show="0" (e.g. the mobile sessions panel) must stay hidden
+                // until something explicitly shows them.
                 for ((layout_interface, _), layout) in &mut state.layouts {
-                    if *layout_interface != 0 && *layout_interface < 1000 {
-                        layout.show = *layout_interface == interface_id;
+                    if *layout_interface != 0
+                        && *layout_interface < 1000
+                        && *layout_interface != interface_id
+                    {
+                        layout.show = false;
                     }
                 }
                 for ((display_interface, _), display) in &mut state.displays {
-                    if *display_interface != 0 && *display_interface < 1000 {
-                        *display = *display_interface == interface_id;
+                    if *display_interface != 0
+                        && *display_interface < 1000
+                        && *display_interface != interface_id
+                    {
+                        *display = false;
                     }
                 }
             }

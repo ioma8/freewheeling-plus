@@ -138,7 +138,10 @@ impl FloLayout {
         self.elements.push(element);
     }
     pub fn element_at(&self, x: i32, y: i32) -> Option<&FloLayoutElement> {
-        self.elements.iter().find(|element| element.inside(x, y))
+        // Topmost first: elements render in order, so a later element draws
+        // over an earlier one and wins the hit test (e.g. the sessions panel
+        // background must not swallow its row buttons).
+        self.elements.iter().rev().find(|element| element.inside(x, y))
     }
     pub fn label_metrics<R: LayoutRenderer>(&self, r: &R, font: &FloFont) -> Option<TextMetrics> {
         self.name.as_deref().map(|name| r.text_metrics(font, name))
@@ -162,6 +165,42 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn element_at_prefers_topmost_element() {
+        // Elements render in order; a later element draws over an earlier one
+        // and must win the hit test (e.g. the sessions panel background must
+        // not swallow its row buttons).
+        let mut layout = FloLayout::new();
+        layout.add_element(FloLayoutElement {
+            id: 199,
+            geometry: vec![FloLayoutBox {
+                left: 0,
+                top: 0,
+                right: 100,
+                bottom: 100,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        layout.add_element(FloLayoutElement {
+            id: 200,
+            geometry: vec![FloLayoutBox {
+                left: 10,
+                top: 10,
+                right: 90,
+                bottom: 40,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        // The row (200) overlaps the background (199); the topmost row wins.
+        let hit = layout.element_at(50, 20).unwrap();
+        assert_eq!(hit.id, 200);
+        // Outside the row but inside the background, the background wins.
+        let hit = layout.element_at(50, 80).unwrap();
+        assert_eq!(hit.id, 199);
+    }
+
     #[test]
     fn box_edges_are_inside() {
         let b = FloLayoutBox {
