@@ -897,7 +897,7 @@ fn capture_callback(
 /// normal speech gets a real level lift while shouting is compressed.
 #[cfg(target_os = "android")]
 fn android_input_gain(sample: f32) -> f32 {
-    (sample * 10.0).tanh()
+    (sample * 14.0).tanh()
 }
 
 #[allow(clippy::too_many_arguments)]
