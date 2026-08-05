@@ -22,6 +22,18 @@ impl Sdl2Context {
         let context = Self {
             sdl: sdl2::init().map_err(|e| format!("SDL initialization failed: {e}"))?,
         };
+        // SDL2 synthesizes SDL_MOUSEBUTTONDOWN from every touch (touch-mouse
+        // events), delivering each tap twice to the bindings -- which made the
+        // mobile CLEAR latch toggle on AND off within a single tap. The touch
+        // path below already translates SDL_FINGER* into mouse events, so the
+        // duplicate synthesis is disabled; genuine mice are unaffected.
+        #[cfg(target_os = "android")]
+        unsafe {
+            sdl2::sys::SDL_SetHint(
+                b"SDL_TOUCH_MOUSE_EVENTS\0".as_ptr().cast(),
+                b"0\0".as_ptr().cast(),
+            );
+        }
         CONTEXT.with(|slot| *slot.borrow_mut() = Some(context.clone()));
         Ok(context)
     }

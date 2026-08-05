@@ -81,6 +81,11 @@ pub struct FloLayoutElement {
     pub loopx: i32,
     pub loopy: i32,
     pub loopsize: i32,
+    /// Name of a `state.values` key (e.g. a config variable or system value
+    /// such as `streaming`). While the value is nonzero the element is
+    /// rendered in the active color, giving touch buttons visible feedback
+    /// for latched/recording states.
+    pub toggle: Option<String>,
     pub geometry: Vec<FloLayoutBox>,
 }
 impl FloLayoutElement {

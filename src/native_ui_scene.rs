@@ -187,6 +187,8 @@ struct LayoutContent {
     layout: FloLayout,
     state: SharedUiSceneState,
     current_peaks: HashMap<i32, CurrentPeakHistory>,
+    /// Last rendered state of each `toggle` element, used to log flips.
+    toggle_states: HashMap<i32, bool>,
 }
 
 /// `VideoIO` owns `curpeakidx`, `lastpeakidx`, and `oldpeak` on the video
@@ -572,9 +574,36 @@ impl Display for LayoutContent {
             let palette = visual
                 .filter(|loop_state| loop_state.selected)
                 .map_or(&LOOP_COLORS[loop_id.rem_euclid(4) as usize], |_| &SELECTED);
-            let color = visual
+            // A `toggle="key"` element lights up (bright red fill) while the
+            // named state value is nonzero: REC while streaming, CLEAR while
+            // erase mode is armed, PULSE while a pulse is selected.
+            let toggled = element
+                .toggle
+                .as_deref()
+                .and_then(|name| state.values.get(name))
+                .copied()
+                .unwrap_or(0.0)
+                != 0.0;
+            if let Some(toggle) = element.toggle.as_deref() {
+                let previous = self.toggle_states.entry(element.id).or_insert(false);
+                if *previous != toggled {
+                    *previous = toggled;
+                    crate::android_diag_log(&format!(
+                        "[video] toggle element={} key={} -> {}",
+                        element.id, toggle, toggled
+                    ));
+                }
+            }
+            let color = if toggled {
+                Color(0xff, 0x3b, 0x30, 255)
+            } else if visual
                 .filter(|loop_state| loop_state.selected)
-                .map_or(scaled(palette[0], magnitude, 255), |_| SELECTED[0]);
+                .is_some()
+            {
+                SELECTED[0]
+            } else {
+                scaled(palette[0], magnitude, 255)
+            };
             for geometry in &element.geometry {
                 geometry.render(renderer, metrics, color);
             }
@@ -1423,6 +1452,7 @@ pub fn load_production_scene_at(
                         layout: layout.clone(),
                         state: Arc::clone(&state),
                         current_peaks: HashMap::new(),
+                        toggle_states: HashMap::new(),
                     }));
                     scene.layouts.push(layout);
                 } else if node.has_tag_name("display") {
@@ -1789,6 +1819,7 @@ fn parse_layout(node: Node<'_, '_>, iid: i32, size: (u32, u32)) -> Result<FloLay
                     (size.0.min(size.1) as f32 * scale.0.min(scale.1) * value).round() as i32
                 })
                 .unwrap_or(0),
+            toggle: en.attribute("toggle").map(str::to_string),
             geometry: Vec::new(),
         };
         if let Some(np) = en.attribute("namepos") {
@@ -2101,6 +2132,7 @@ mod tests {
             layout,
             state,
             current_peaks: HashMap::new(),
+            toggle_states: HashMap::new(),
         };
         let mut renderer = RecordingRenderer::default();
         display.render(&mut renderer, &RenderMetrics::new(640, 480, 640, 480));
@@ -2151,6 +2183,69 @@ mod tests {
                     .any(|op| matches!(op, DrawOp::StyledText(text, ..) if text == expected))
             );
         }
+    }
+
+    #[test]
+    fn toggled_element_renders_active_color() {
+        let state = SharedUiSceneState::default();
+        state
+            .write()
+            .unwrap()
+            .values
+            .insert("streaming".into(), 0.0);
+        let mut layout = FloLayout::new();
+        layout.loopids = (0, 0);
+        layout.showlabel = false;
+        layout.showelabel = false;
+        layout.elements.push(FloLayoutElement {
+            id: 132,
+            toggle: Some("streaming".into()),
+            ..Default::default()
+        });
+        layout
+            .elements
+            .last_mut()
+            .unwrap()
+            .add_box(FloLayoutBox {
+                left: 10,
+                top: 10,
+                right: 40,
+                bottom: 40,
+                ..Default::default()
+            });
+        let mut display = LayoutContent {
+            base: FloDisplay::new(0),
+            layout,
+            state,
+            current_peaks: HashMap::new(),
+            toggle_states: HashMap::new(),
+        };
+        let mut renderer = RecordingRenderer::default();
+        display.render(&mut renderer, &RenderMetrics::new(640, 480, 640, 480));
+        // While the toggle value is zero the element renders with its normal
+        // (dark) loop-palette color, never the active red.
+        let active_red = Color(0xff, 0x3b, 0x30, 255);
+        assert!(
+            !renderer
+                .0
+                .iter()
+                .any(|op| matches!(op, DrawOp::Box(_, _, _, _, c) if *c == active_red))
+        );
+        // With the value nonzero the element fill turns active red.
+        display
+            .state
+            .write()
+            .unwrap()
+            .values
+            .insert("streaming".into(), 1.0);
+        renderer = RecordingRenderer::default();
+        display.render(&mut renderer, &RenderMetrics::new(640, 480, 640, 480));
+        assert!(
+            renderer
+                .0
+                .iter()
+                .any(|op| matches!(op, DrawOp::Box(_, _, _, _, c) if *c == active_red))
+        );
     }
 
     #[test]
