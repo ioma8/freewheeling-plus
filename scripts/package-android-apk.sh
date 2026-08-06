@@ -92,6 +92,25 @@ if [ -f "$ASSET_ROOT/data/browsers.xml" ]; then
     mv "$ASSET_ROOT/data/browsers.xml.tmp" "$ASSET_ROOT/data/browsers.xml"
     echo "Hidden desktop-only browsers for Android"
 fi
+# The scene browser is the mobile saved-sessions list: give it a large box
+# above the action buttons instead of the desktop bottom strip.
+if [ -f "$ASSET_ROOT/data/browsers.xml" ]; then
+    python3 - "$ASSET_ROOT/data/browsers.xml" <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+# Match the whole DISPLAY_browser_scene display block and rewrite its
+# position/size; the other browsers keep their desktop geometry.
+text, n = re.subn(
+    r'(id="DISPLAY_browser_scene"[^>]*pos=")[^"]*("[\s\S]*?xbox=")[^"]*(")',
+    r'\g<1>0.0,0.0\g<2>0.05,0.08, 0.95,0.50\g<3>',
+    text,
+)
+assert n == 1, f"DISPLAY_browser_scene block not matched ({n})"
+open(path, "w").write(text)
+PY
+    echo "Resized the scene browser for the mobile sessions list"
+fi
 # The footswitch interface is a fixed (non-switchable) overlay that renders
 # on every interface; there is no MIDI footswitch on a phone, so hide it.
 if [ -f "$ASSET_ROOT/data/midifootswitch.xml" ]; then

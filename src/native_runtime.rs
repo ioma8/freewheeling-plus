@@ -88,6 +88,9 @@ const BROWSER_SCENE_TRAY: i32 = 2;
 const BROWSER_LOOP: i32 = 3;
 const BROWSER_SCENE: i32 = 4;
 const BROWSER_PATCH: i32 = 5;
+/// The XML display id of the scene browser (`DISPLAY_browser_scene`), the
+/// mobile saved-sessions list.
+const SCENE_BROWSER_DISPLAY_ID: i32 = 2;
 
 fn is_browser_entry(path: &std::path::Path, browser: i32) -> bool {
     match browser {
@@ -101,6 +104,44 @@ fn is_browser_entry(path: &std::path::Path, browser: i32) -> bool {
             .is_some_and(|name| name.starts_with("scene-") && name.ends_with(".xml")),
         _ => false,
     }
+}
+
+/// Format a saved scene's modification time as a short, scannable LOCAL
+/// label, e.g. "Aug 5 2026 23:54". Falls back to the file name when the
+/// time is unavailable.
+fn scene_display_name(path: &std::path::Path) -> String {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return path.display().to_string();
+    };
+    let Ok(time) = metadata.modified() else {
+        return path.display().to_string();
+    };
+    let Ok(secs) = time.duration_since(std::time::UNIX_EPOCH) else {
+        return path.display().to_string();
+    };
+    // `modified()` is an absolute UTC instant; `localtime_r` renders it in
+    // the device's local zone (bionic on Android), which is what the user
+    // expects for "when did I save this session".
+    let secs = secs.as_secs() as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+        return path.display().to_string();
+    }
+    let (year, month, day, hour, minute) = (
+        tm.tm_year as i64 + 1900,
+        tm.tm_mon as i32 + 1,
+        tm.tm_mday as i32,
+        tm.tm_hour as i32,
+        tm.tm_min as i32,
+    );
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let month = MONTHS
+        .get((month - 1).clamp(0, 11) as usize)
+        .copied()
+        .unwrap_or("?");
+    format!("{month} {day} {year} {hour:02}:{minute:02}")
 }
 
 /// Convert SDL window coordinates to the logical coordinates used by the
@@ -508,6 +549,27 @@ impl MainThreadVideo {
             self.active = false;
         }
     }
+
+    /// Whether the saved-sessions browser display is currently shown.
+    fn scene_browser_shown(&self, display_id: i32) -> bool {
+        self.scene_state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .displays
+            .get(&(0, display_id))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Hit-test a logical point against the shown browser displays (the
+    /// mobile saved-sessions list).
+    fn scene_browser_hit(&self, x: i32, y: i32) -> Option<crate::videoio_displays::BrowserHit> {
+        self.renderer
+            .scene
+            .displays
+            .iter()
+            .find_map(|display| display.browser_hit(x, y))
+    }
 }
 
 pub struct SharedFloConfig(Rc<RefCell<FloConfig>>);
@@ -815,20 +877,46 @@ impl NativeRuntime {
                 .iter()
                 .filter(|path| is_browser_entry(path, browser))
                 .map(|path| {
-                    Self::persisted_display_name(path).unwrap_or_else(|| path.display().to_string())
+                    if browser == BROWSER_SCENE {
+                        scene_display_name(path)
+                    } else {
+                        Self::persisted_display_name(path)
+                            .unwrap_or_else(|| path.display().to_string())
+                    }
                 })
                 .collect();
+            // On mobile the saved-sessions list is the scene browser shown
+            // by LOAD: keep it expanded (list, not bottom strip) while it is
+            // visible, regardless of how long it stays open.
+            let scene_browser_shown = browser == BROWSER_SCENE
+                && r.video.as_ref().is_some_and(|video| {
+                    let scene_state = video
+                        .scene_state
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let display_id = r
+                        .config
+                        .borrow()
+                        .get_int("DISPLAY_browser_scene")
+                        .unwrap_or(2);
+                    scene_state
+                        .displays
+                        .get(&(0, display_id))
+                        .copied()
+                        .unwrap_or(false)
+                });
             state.browsers.insert(
                 name.into(),
                 BrowserSceneState {
                     items,
                     selected: r.browser_cursors.get(&browser).copied().unwrap_or(0),
-                    expanded: r
-                        .browser_expanded
-                        .get(&browser)
-                        .is_some_and(|last_activity| {
-                            last_activity.elapsed() < BROWSER_EXPAND_DURATION
-                        }),
+                    expanded: scene_browser_shown
+                        || r
+                            .browser_expanded
+                            .get(&browser)
+                            .is_some_and(|last_activity| {
+                                last_activity.elapsed() < BROWSER_EXPAND_DURATION
+                            }),
                     ..Default::default()
                 },
             );
@@ -3871,6 +3959,94 @@ impl NativeComponentAdapter for NativeRuntime {
                     } else {
                         event
                     };
+                    // Mobile saved-sessions browser: while the scene browser
+                    // display is shown, taps select+load a session, vertical
+                    // drags (wheel button events) scroll the list, and a tap
+                    // outside the list dismisses it. These win over the grid
+                    // so the modal list never leaks a tap to a cell.
+                    if let InputEvent::MouseButton {
+                        button,
+                        x,
+                        y,
+                        down,
+                    } = event
+                        && let Some(video) = r.video.as_ref()
+                        && video.scene_browser_shown(SCENE_BROWSER_DISPLAY_ID)
+                    {
+                        let browser_id = SCENE_BROWSER_DISPLAY_ID;
+                        if let Some(hit) = video.scene_browser_hit(x, y) {
+                            match (button, down) {
+                                (1, true) => {
+                                    Self::apply_application_action(
+                                        &mut r,
+                                        ApplicationAction::MoveBrowserItemAbsolute {
+                                            browser: browser_id,
+                                            index: hit.row as i32,
+                                        },
+                                    )?;
+                                    // Selecting the scene browser row loads
+                                    // the session (the DISPLAY_browser_scene
+                                    // branch of browser-select-item) and
+                                    // closes the list. Call the load action
+                                    // directly: BrowserSelectItem is only
+                                    // mapped through binding *outputs*, so a
+                                    // bare event would be a no-op.
+                                    Self::apply_application_action(
+                                        &mut r,
+                                        ApplicationAction::LoadSelectedScene {
+                                            browser: browser_id,
+                                        },
+                                    )?;
+                                    Self::apply_application_action(
+                                        &mut r,
+                                        ApplicationAction::VideoShowDisplay {
+                                            interface_id: 0,
+                                            display_id: browser_id,
+                                            show: false,
+                                        },
+                                    )?;
+                                }
+                                (4, true) => {
+                                    // Finger drags up (wheel up): the list
+                                    // content follows the finger, so the
+                                    // cursor moves DOWN the list.
+                                    Self::apply_application_action(
+                                        &mut r,
+                                        ApplicationAction::MoveBrowserItem {
+                                            browser: browser_id,
+                                            adjust: 1,
+                                            jump_adjust: 0,
+                                        },
+                                    )?;
+                                }
+                                (5, true) => {
+                                    // Finger drags down (wheel down): content
+                                    // follows the finger, cursor moves UP.
+                                    Self::apply_application_action(
+                                        &mut r,
+                                        ApplicationAction::MoveBrowserItem {
+                                            browser: browser_id,
+                                            adjust: -1,
+                                            jump_adjust: 0,
+                                        },
+                                    )?;
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+                        if button == 1 && down {
+                            Self::apply_application_action(
+                                &mut r,
+                                ApplicationAction::VideoShowDisplay {
+                                    interface_id: 0,
+                                    display_id: browser_id,
+                                    show: false,
+                                },
+                            )?;
+                            continue;
+                        }
+                    }
                     let loop_click = match &event {
                         InputEvent::MouseButton { button, x, y, down } => r
                             .video
@@ -4127,6 +4303,29 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[test]
+    fn scene_display_name_formats_local_datetime() {
+        // Deterministic regardless of the host timezone.
+        unsafe extern "C" {
+            fn tzset();
+        }
+        unsafe {
+            std::env::set_var("TZ", "UTC");
+            tzset();
+        }
+        // 2026-08-05 23:54:00 UTC
+        let time = UNIX_EPOCH + std::time::Duration::from_secs(1_785_974_040);
+        let path = std::env::temp_dir().join("scene-TEST.xml");
+        std::fs::write(&path, "<scene/>").unwrap();
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(time)).unwrap();
+        let name = scene_display_name(&path);
+        std::fs::remove_file(&path).ok();
+        assert_eq!(name, "Aug 5 2026 23:54", "got {name}");
+    }
     #[test]
     fn home_directory_uses_the_platform_profile_variable() {
         let home = std::ffi::OsString::from("home");

@@ -71,6 +71,20 @@ pub trait Display {
     fn base(&self) -> &FloDisplay;
     fn base_mut(&mut self) -> &mut FloDisplay;
     fn render(&mut self, r: &mut dyn Renderer, m: &RenderMetrics);
+    /// Mobile touch hit-test for browser-style displays: returns the browser
+    /// row under a logical-space point when the display is shown. Other
+    /// display kinds return None.
+    fn browser_hit(&self, x: i32, y: i32) -> Option<BrowserHit> {
+        let _ = (x, y);
+        None
+    }
+}
+
+/// A tap/drag hit on a browser display: which browser and which row.
+#[derive(Clone, Debug)]
+pub struct BrowserHit {
+    pub browse_type: String,
+    pub row: usize,
 }
 
 pub struct FloDisplayPanel {

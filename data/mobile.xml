@@ -108,31 +108,5 @@
       </element>
     </layout>
 
-    <!-- Saved-sessions panel: shown by LOAD, each row loads the N-th most
-         recent scene (browser index N), CLOSE hides the panel. -->
-    <layout id="1" name="Sessions" scale="1.0,1.0" pos="0.00,0.00"
-     label="1" elabel="1" show="0" namepos="0.05,0.02">
-      <element id="199" name="" base="0.0000,0.0000">
-        <box outline="TBLR" pos="0.00,0.00, 1.00,0.65"/>
-      </element>
-      <element id="200" name="1" base="0.0500,0.0900" labelcenter="1" efontsize="14">
-        <box outline="TBLR" pos="0.00,0.00, 0.90,0.07"/>
-      </element>
-      <element id="201" name="2" base="0.0500,0.1750" labelcenter="1" efontsize="14">
-        <box outline="TBLR" pos="0.00,0.00, 0.90,0.07"/>
-      </element>
-      <element id="202" name="3" base="0.0500,0.2600" labelcenter="1" efontsize="14">
-        <box outline="TBLR" pos="0.00,0.00, 0.90,0.07"/>
-      </element>
-      <element id="203" name="4" base="0.0500,0.3450" labelcenter="1" efontsize="14">
-        <box outline="TBLR" pos="0.00,0.00, 0.90,0.07"/>
-      </element>
-      <element id="204" name="5" base="0.0500,0.4300" labelcenter="1" efontsize="14">
-        <box outline="TBLR" pos="0.00,0.00, 0.90,0.07"/>
-      </element>
-      <element id="205" name="CLOSE" base="0.4000,0.5400" labelcenter="1" efontsize="10">
-        <box outline="TBLR" pos="0.00,0.00, 0.20,0.07"/>
-      </element>
-    </layout>
   </graphics>
 </interface>

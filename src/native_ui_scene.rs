@@ -7,7 +7,7 @@
 use super::{DisplayScene, FrameRenderer, PlatformRenderer, SoftwareRgbaRenderer};
 use crate::video_layout::{FloLayout, FloLayoutBox, FloLayoutElement};
 use crate::videoio_displays::{
-    Color, Display, DrawOp, FloDisplay, Orientation, RenderMetrics, Renderer,
+    BrowserHit, Color, Display, DrawOp, FloDisplay, Orientation, RenderMetrics, Renderer,
 };
 use fontdue::{Font, FontSettings};
 use roxmltree::{Document, Node};
@@ -1393,6 +1393,46 @@ impl Display for XmlDisplay {
     }
     fn render(&mut self, r: &mut dyn Renderer, m: &RenderMetrics) {
         self.render_at(r, m, (0, 0));
+    }
+    fn browser_hit(&self, x: i32, y: i32) -> Option<BrowserHit> {
+        let WidgetKind::Browser {
+            browse_type,
+            expand,
+            ..
+        } = &self.kind
+        else {
+            return None;
+        };
+        if browse_type == "BROWSE_loop_tray" {
+            return None;
+        }
+        let guard = self.state.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Only hit-test a display the user can actually see.
+        if !guard
+            .displays
+            .get(&(self.base.iid, self.base.id))
+            .copied()
+            .unwrap_or(self.base.show)
+        {
+            return None;
+        }
+        let browser = guard.browsers.get(browse_type)?;
+        if x < expand.0 || x > expand.2 || y < expand.1 || y > expand.3 {
+            return None;
+        }
+        // Mirrors `Browser::Draw`: the selected item is centered, one line
+        // per `font_size * 1.2` rows above/below it.
+        let line_height = (self.font_size * 1.2).round().max(1.0) as i32;
+        let center = (expand.1 + expand.3) / 2;
+        let offset = (y - center) / line_height;
+        let row = i64::from(browser.selected as u32) + i64::from(offset);
+        if row < 0 || row >= browser.items.len() as i64 {
+            return None;
+        }
+        Some(BrowserHit {
+            browse_type: browse_type.clone(),
+            row: row as usize,
+        })
     }
 }
 

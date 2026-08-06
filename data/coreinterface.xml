@@ -469,11 +469,12 @@
     <binding input="loop-clicked"
      conditions="loopid=133 and button=1 and down=1"
      output="save-current-scene"/>
-    <!-- LOAD: show the saved-sessions panel (mobile layout id 1). -->
+    <!-- LOAD: open the saved-sessions list (the scene browser display).
+         Tapping a row loads that session; tapping outside dismisses it. -->
     <binding input="loop-clicked"
      conditions="loopid=134 and button=1 and down=1"
-     output="video-show-layout"
-     parameters="interfaceid=5 and layoutid=1 and show=1 and hideothers=0"/>
+     output="video-show-display"
+     parameters="interfaceid=0 and displayid=DISPLAY_browser_scene and show=1"/>
 
     <!-- Mobile touch gestures (button codes 2/6 are unreachable on desktop).
          Long-press on a cell = overdub (hold starts it, release stops it).
@@ -489,19 +490,6 @@
     <binding input="loop-clicked"
      conditions="button=6 and down=1"
      output="mute-loop" parameters="loopid=loopid"/>
-
-    <!-- Sessions panel rows (mobile layout 1): load the N-th most recent
-         saved scene, then hide the panel. -->
-    <binding input="loop-clicked"
-     conditions="loopid=200>204 and button=1 and down=1"
-     output1="browser-move-to-item-absolute"
-     parameters1="browserid=DISPLAY_browser_scene and idx=loopid-200"
-     output2="browser-select-item" parameters2="browserid=DISPLAY_browser_scene"
-     output3="video-show-layout" parameters3="interfaceid=5 and layoutid=1 and show=0 and hideothers=0"/>
-    <!-- CLOSE: hide the sessions panel. -->
-    <binding input="loop-clicked"
-     conditions="loopid=205 and button=1 and down=1"
-     output="video-show-layout" parameters="interfaceid=5 and layoutid=1 and show=0 and hideothers=0"/>
 
     <!-- HELP: trigger/click: Toggle Record-Play-Off for loop -->
     <!-- Trigger Loops -->
