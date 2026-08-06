@@ -509,9 +509,21 @@ impl MainThreadVideo {
                 let (x, y) = self.map_mouse_position(x, y);
                 InputEvent::MouseMotion { x, y }
             }
-            InputEvent::MouseButton { button, x, y, down } => {
+            InputEvent::MouseButton {
+                button,
+                x,
+                y,
+                down,
+                presslen,
+            } => {
                 let (x, y) = self.map_mouse_position(x, y);
-                InputEvent::MouseButton { button, x, y, down }
+                InputEvent::MouseButton {
+                    button,
+                    x,
+                    y,
+                    down,
+                    presslen,
+                }
             }
             other => other,
         }
@@ -1251,7 +1263,7 @@ impl NativeRuntime {
         for output in batch.iter().cloned() {
             match output {
                 DispatchOutput::Runtime(command) => {
-                    if let RuntimeCommand::Record { slot } = command {
+                    if let RuntimeCommand::Record { slot, .. } = command {
                         // C++ updates lastrecidx when recording starts, so the
                         // L1..L8 visual labels change immediately.
                         r.last_recorded_loop = Some(slot);
@@ -3969,6 +3981,7 @@ impl NativeComponentAdapter for NativeRuntime {
                         x,
                         y,
                         down,
+                        ..
                     } = event
                         && let Some(video) = r.video.as_ref()
                         && video.scene_browser_shown(SCENE_BROWSER_DISPLAY_ID)
@@ -4048,11 +4061,17 @@ impl NativeComponentAdapter for NativeRuntime {
                         }
                     }
                     let loop_click = match &event {
-                        InputEvent::MouseButton { button, x, y, down } => r
+                        InputEvent::MouseButton {
+                            button,
+                            x,
+                            y,
+                            down,
+                            presslen,
+                        } => r
                             .video
                             .as_ref()
                             .and_then(|video| video.loop_at(*x, *y))
-                            .map(|loopid| (*down, *button, loopid)),
+                            .map(|loopid| (*down, *button, *presslen, loopid)),
                         _ => None,
                     };
                     match input_events(event) {
@@ -4064,14 +4083,14 @@ impl NativeComponentAdapter for NativeRuntime {
                                     .try_post_event(event)
                                     .map_err(|_| "event queue is full".to_string())?;
                             }
-                            if let Some((down, button, loopid)) = loop_click {
+                            if let Some((down, button, presslen, loopid)) = loop_click {
                             manager
                                 .try_post_event(Event::LoopClicked {
                                     down,
                                     button,
                                     loopid,
                                     in_layout: true,
-                                    presslen: 0,
+                                    presslen,
                                 })
                                 .map_err(|_| "event queue is full".to_string())?;
                             }

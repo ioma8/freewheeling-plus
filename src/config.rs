@@ -1662,11 +1662,19 @@ impl FloConfig {
                 "param3" => value.set_float(*param3),
                 _ => {}
             },
-            Event::LoopClicked { down, button, loopid, in_layout, .. } => match param.name {
+            Event::LoopClicked {
+                down,
+                button,
+                loopid,
+                in_layout,
+                presslen,
+                ..
+            } => match param.name {
                 "down" => value.set_char(if *down { 1 } else { 0 }),
                 "button" => value.set_int(*button),
                 "loopid" => value.set_int(*loopid),
                 "in" => value.set_char(if *in_layout { 1 } else { 0 }),
+                "presslen" => value.set_int(*presslen as i32),
                 _ => {}
             },
             Event::JoystickButtonInput { down, button, joystick, .. } => match param.name {

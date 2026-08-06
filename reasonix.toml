@@ -1,0 +1,7 @@
+[permissions]
+allow = ["Bash=git -C /Users/jakubkolcar/projects/customs/freewheeling-ng/freewheeling-plus log --oneline -10 2>/dev/null; echo \"---\"; git -C /Users/jakubkolcar/projects/customs/freewheeling-ng/freewheeling-plus status 2>/dev/null | head -30", "Bash=export PATH=\"$PATH:$HOME/Library/Android/sdk/platform-tools\" 2>/dev/null; adb devices 2>/dev/null; adb shell getprop sys.boot_completed 2>/dev/null; echo \"---\"; adb shell pm list packages 2>/dev/null | grep -i freewheel"]
+
+
+[ui]
+show_reasoning = true
+

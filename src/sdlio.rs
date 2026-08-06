@@ -72,6 +72,10 @@ pub enum SdlEvent {
         x: i32,
         y: i32,
         down: bool,
+        /// How long a touch was held before the tap trigger fired (ms); the
+        /// recording pre-rolls by this amount so captured audio starts at the
+        /// moment of touch, not release.
+        presslen: u32,
     },
     Key {
         keycode: i32,
@@ -177,6 +181,7 @@ impl Sdl2InputBackend {
             x,
             y,
             down: true,
+            presslen: 0,
         })
     }
 }
@@ -306,6 +311,7 @@ impl SdlBackend for Sdl2InputBackend {
                                 x: px,
                                 y: py,
                                 down: true,
+                                presslen: 0,
                             });
                         }
                     }
@@ -362,6 +368,7 @@ impl SdlBackend for Sdl2InputBackend {
                                 x: px,
                                 y: py,
                                 down: true,
+                                presslen: 0,
                             })
                         } else {
                             None
@@ -386,13 +393,17 @@ impl SdlBackend for Sdl2InputBackend {
                     }
                     if touch.pending_tap {
                         // Quick tap: record/play trigger on release.
+                        let held = touch.start.elapsed().as_millis();
                         self.last_tap = Some((std::time::Instant::now(), (px, py)));
                         // Down first (the trigger binding fires on down).
+                        // Carry the measured press duration so the recording
+                        // can pre-roll to the moment of touch.
                         return Some(SdlEvent::MouseButton {
                             button: 1,
                             x: px,
                             y: py,
                             down: true,
+                            presslen: held as u32,
                         });
                     }
                     self.last_tap = Some((std::time::Instant::now(), (px, py)));
@@ -402,12 +413,14 @@ impl SdlBackend for Sdl2InputBackend {
                             x: px,
                             y: py,
                             down: false,
+                            presslen: 0,
                         }),
                         6 => Some(SdlEvent::MouseButton {
                             button: 6,
                             x: px,
                             y: py,
                             down: false,
+                            presslen: 0,
                         }),
                         _ => None,
                     }
@@ -419,6 +432,7 @@ impl SdlBackend for Sdl2InputBackend {
                     x,
                     y,
                     down: true,
+                    presslen: 0,
                 }),
                 Event::MouseButtonUp {
                     mouse_btn, x, y, ..
@@ -427,6 +441,7 @@ impl SdlBackend for Sdl2InputBackend {
                     x,
                     y,
                     down: false,
+                    presslen: 0,
                 }),
                 Event::MouseWheel {
                     y: scroll_y,
@@ -446,6 +461,7 @@ impl SdlBackend for Sdl2InputBackend {
                     x: mouse_x,
                     y: mouse_y,
                     down: true,
+                    presslen: 0,
                 }),
                 Event::KeyDown {
                     keycode: Some(keycode),
@@ -542,6 +558,7 @@ pub enum InputEvent {
         x: i32,
         y: i32,
         down: bool,
+        presslen: u32,
     },
     Key {
         down: bool,
@@ -656,9 +673,19 @@ impl<B: SdlBackend> SdlIo<B> {
                 down,
             }),
             SdlEvent::MouseMotion { x, y } => Some(InputEvent::MouseMotion { x, y }),
-            SdlEvent::MouseButton { button, x, y, down } => {
-                Some(InputEvent::MouseButton { button, x, y, down })
-            }
+            SdlEvent::MouseButton {
+                button,
+                x,
+                y,
+                down,
+                presslen,
+            } => Some(InputEvent::MouseButton {
+                button,
+                x,
+                y,
+                down,
+                presslen,
+            }),
             SdlEvent::Key {
                 keycode,
                 down,
@@ -1146,12 +1173,14 @@ mod tests {
                 x: 12,
                 y: 34,
                 down: true,
+                presslen: 0,
             },
             SdlEvent::MouseButton {
                 button: 5,
                 x: 12,
                 y: 34,
                 down: true,
+                presslen: 0,
             },
         ]));
         io.activate();
@@ -1162,6 +1191,7 @@ mod tests {
                 x: 12,
                 y: 34,
                 down: true,
+                presslen: 0,
             })
         );
         assert_eq!(
@@ -1171,6 +1201,7 @@ mod tests {
                 x: 12,
                 y: 34,
                 down: true,
+                presslen: 0,
             })
         );
     }

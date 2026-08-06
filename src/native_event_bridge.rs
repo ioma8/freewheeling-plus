@@ -27,12 +27,13 @@ pub fn input_event(event: InputEvent) -> Result<Event, CoreEvent> {
             x,
             y,
             down,
+            presslen,
         } => Ok(Event::MouseButtonInput {
             down,
             button,
             x,
             y,
-            presslen: 0,
+            presslen,
         }),
         InputEvent::Key {
             down,

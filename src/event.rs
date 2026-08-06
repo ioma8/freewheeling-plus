@@ -163,9 +163,10 @@ const SET_IN_VOLUME_PARAMS: [EventParameter; 3] = [
     EventParameter::new("fadervol", CoreDataType::Float),
 ];
 
-const TRIGGER_LOOP_PARAMS: [EventParameter; 2] = [
+const TRIGGER_LOOP_PARAMS: [EventParameter; 3] = [
     EventParameter::new("loopid", CoreDataType::Int),
     EventParameter::new("vol", CoreDataType::Float),
+    EventParameter::new("presslen", CoreDataType::Int),
 ];
 
 const SET_MASTER_VOLUME_PARAMS: [EventParameter; 2] = [
@@ -347,11 +348,12 @@ const GO_SUB_PARAMS: [EventParameter; 4] = [
     EventParameter::new("param3", CoreDataType::Float),
 ];
 
-const LOOP_CLICKED_PARAMS: [EventParameter; 4] = [
+const LOOP_CLICKED_PARAMS: [EventParameter; 5] = [
     EventParameter::new("down", CoreDataType::Char),
     EventParameter::new("button", CoreDataType::Int),
     EventParameter::new("loopid", CoreDataType::Int),
     EventParameter::new("in", CoreDataType::Char),
+    EventParameter::new("presslen", CoreDataType::Int),
 ];
 
 const PARAMSET_ABS_PARAM_IDX_PARAMS: [EventParameter; 4] = [

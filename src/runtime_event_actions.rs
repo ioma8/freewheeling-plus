@@ -583,7 +583,10 @@ impl RuntimeEventDispatcher {
                     }))?;
                 } else {
                     let command = match loops[slot as usize] {
-                        LoopMode::Empty => RuntimeCommand::Record { slot },
+                        LoopMode::Empty => RuntimeCommand::Record {
+                            slot,
+                            presslen_ms: int_or(p, "presslen", 0)?.max(0) as u32,
+                        },
                         LoopMode::Recording | LoopMode::Overdubbing => RuntimeCommand::StopRecord,
                         LoopMode::Playing => RuntimeCommand::Mute { slot, muted: true },
                         LoopMode::Muted => RuntimeCommand::Trigger { slot, gain },
@@ -1118,7 +1121,7 @@ mod tests {
 
         assert_eq!(
             outputs(&batch),
-            vec![DispatchOutput::Runtime(RuntimeCommand::Record { slot: 3 })]
+            vec![DispatchOutput::Runtime(RuntimeCommand::Record { slot: 3, presslen_ms: 0 })]
         );
     }
 
@@ -1178,7 +1181,8 @@ mod tests {
         assert_eq!(
             outputs(&batch),
             vec![DispatchOutput::Runtime(RuntimeCommand::Record {
-                slot: b'q'
+                slot: b'q',
+                presslen_ms: 0
             })]
         );
     }

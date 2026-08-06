@@ -346,6 +346,10 @@ impl TransferPool {
 pub enum RuntimeCommand {
     Record {
         slot: u8,
+        /// How long the initiating tap was held (ms). A free (non-synced)
+        /// recording pre-rolls by this amount from the input-history ring so
+        /// the captured audio starts at the moment of touch, not release.
+        presslen_ms: u32,
     },
     Overdub {
         slot: u8,
@@ -1961,7 +1965,10 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
             {
                 self.send_status(RuntimeStatus::CommandRejected(command));
             }
-            RuntimeCommand::Record { slot } => {
+            RuntimeCommand::Record {
+                slot,
+                presslen_ms,
+            } => {
                 self.stop_recording(true);
                 let index = slot as usize;
                 if index < self.loops.len() {
@@ -2034,6 +2041,19 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                             }
                             self.prefill_recording_from_history(index, requested);
                         }
+                    } else if presslen_ms > 0 {
+                        // Free (un-synced) tap: pre-roll the recording by the
+                        // measured press duration so the loop's attack starts
+                        // at the touch, compensating for the release-trigger.
+                        let requested =
+                            (presslen_ms as usize * self.sample_rate as usize) / 1000;
+                        let requested = requested.min(250 * self.sample_rate as usize / 1000);
+                        while self.loops[index].uses_blocks()
+                            && self.loops[index].capacity() < requested
+                            && self.loop_storage.add_block(&mut self.loops[index])
+                        {
+                        }
+                        self.prefill_recording_from_history(index, requested);
                     }
                 } else {
                     self.send_status(RuntimeStatus::CommandRejected(command));
@@ -2837,7 +2857,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
 impl RuntimeCommand {
     fn mutates_loop(self, slot: u8) -> bool {
         match self {
-            Self::Record { slot: target }
+            Self::Record { slot: target, presslen_ms: 0 }
             | Self::Overdub { slot: target, .. }
             | Self::Erase { slot: target }
             | Self::ImportLoop { slot: target, .. } => target == slot,
@@ -3754,7 +3774,7 @@ mod tests {
             .spawn(|| {
                         let (mut processor, mut controls) = processor(0.0);
                         controls
-                            .try_command(RuntimeCommand::Record { slot: 0 })
+                            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
                             .unwrap();
                         run(&mut processor, &[1.0, 0.5], &[0.25, -0.25]);
                         controls.try_command(RuntimeCommand::StopRecord).unwrap();
@@ -3827,7 +3847,7 @@ mod tests {
             .try_command(RuntimeCommand::ToggleInputRecord { input: 0 })
             .unwrap();
         controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
+            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
             .unwrap();
 
         run(&mut processor, &[1.0], &[2.0]);
@@ -3841,7 +3861,7 @@ mod tests {
     fn overdub_plays_old_audio_and_fades_the_final_recording_buffer() {
         let (mut processor, mut controls) = processor(0.0);
         controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
+            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
             .unwrap();
         run(&mut processor, &[1.0; 4], &[0.0; 4]);
         controls.try_command(RuntimeCommand::StopRecord).unwrap();
@@ -4013,7 +4033,7 @@ mod tests {
             earliest_strong_offset: None,
         });
         controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
+            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
             .unwrap();
         run(&mut processor, &[1.0; 4], &[0.0; 4]);
         // Probe audio must not enter a recording, not even through the
@@ -4022,13 +4042,14 @@ mod tests {
         assert!(matches!(
             controls.try_status(),
             Some(RuntimeStatus::CommandRejected(RuntimeCommand::Record {
-                slot: 0
+                slot: 0,
+                presslen_ms: 0
             }))
         ));
         // Once calibration is over the same gesture records normally.
         processor.latency_calibration = None;
         controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
+            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
             .unwrap();
         run(&mut processor, &[1.0; 4], &[0.0; 4]);
         assert_eq!(processor.recording, Some(0));
@@ -4043,7 +4064,7 @@ mod tests {
         // processor callback and require bit-exact storage.
         let (mut processor, mut controls) = processor(0.0);
         controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
+            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
             .unwrap();
         let frames = 32usize;
         let left: Vec<f32> = (0..frames).map(|i| (i as f32 * 0.001).sin()).collect();
@@ -4083,7 +4104,7 @@ mod tests {
             .spawn(|| {
                         let (mut processor, mut controls) = processor(0.0);
                         controls
-                            .try_command(RuntimeCommand::Record { slot: 0 })
+                            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
                             .unwrap();
                         run(&mut processor, &[1.0, 0.5, 0.25], &[0.0; 3]);
                         controls.try_command(RuntimeCommand::StopRecord).unwrap();
@@ -4113,7 +4134,7 @@ mod tests {
     fn reselecting_f1_keeps_the_existing_pulse_phase_for_later_loops() {
         let (mut processor, mut controls) = processor(0.0);
         controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
+            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
             .unwrap();
         run(&mut processor, &[1.0; 4], &[0.0; 4]);
         controls.try_command(RuntimeCommand::StopRecord).unwrap();
@@ -4143,7 +4164,7 @@ mod tests {
         // recordings started after the reselect.
         for slot in [1_u8, 2_u8] {
             controls
-                .try_command(RuntimeCommand::Record { slot })
+                .try_command(RuntimeCommand::Record { slot, presslen_ms: 0 })
                 .unwrap();
             run(&mut processor, &[0.5], &[0.0]);
             assert!(processor.loops[slot as usize].pulse_synced);
@@ -4156,7 +4177,7 @@ mod tests {
     fn delete_pulse_erases_every_synced_loop_unlike_clear_pulse() {
         let (mut processor, mut controls) = processor(0.0);
         controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
+            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
             .unwrap();
         run(&mut processor, &[1.0; 4], &[0.0; 4]);
         controls.try_command(RuntimeCommand::StopRecord).unwrap();
@@ -4167,7 +4188,7 @@ mod tests {
         run(&mut processor, &[], &[]);
 
         controls
-            .try_command(RuntimeCommand::Record { slot: 1 })
+            .try_command(RuntimeCommand::Record { slot: 1, presslen_ms: 0 })
             .unwrap();
         run(&mut processor, &[0.5; 4], &[0.0; 4]);
         controls.try_command(RuntimeCommand::StopRecord).unwrap();
@@ -4426,7 +4447,7 @@ mod tests {
             .try_command(RuntimeCommand::SetPulse { frames: 16 })
             .unwrap();
         controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
+            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
             .unwrap();
         run(&mut processor, &[1.0], &[0.0]);
 
@@ -4447,7 +4468,7 @@ mod tests {
             .spawn(|| {
                         let (mut processor, mut controls) = processor(0.0);
                         controls
-                            .try_command(RuntimeCommand::Record { slot: 0 })
+                            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
                             .unwrap();
                         run(&mut processor, &[1.0; 6], &[0.0; 6]);
                         controls.try_command(RuntimeCommand::StopRecord).unwrap();
@@ -4573,7 +4594,7 @@ mod tests {
             .spawn(|| {
                         let (mut processor, mut controls) = processor(0.0);
                         controls
-                            .try_command(RuntimeCommand::Record { slot: 0 })
+                            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
                             .unwrap();
                         run(&mut processor, &[1.0; 4], &[0.0; 4]);
                         controls.try_command(RuntimeCommand::StopRecord).unwrap();
@@ -4583,7 +4604,7 @@ mod tests {
                             .try_command(RuntimeCommand::SetPulseFromLoop { slot: 0 })
                             .unwrap();
                         controls
-                            .try_command(RuntimeCommand::Record { slot: 1 })
+                            .try_command(RuntimeCommand::Record { slot: 1, presslen_ms: 0 })
                             .unwrap();
                         run(&mut processor, &[0.5; 6], &[0.0; 6]);
                         controls.try_command(RuntimeCommand::StopRecord).unwrap();
@@ -4633,7 +4654,7 @@ mod tests {
         assert_eq!(processor.pulse_position, 3);
 
         controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
+            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
             .unwrap();
         // The command is consumed before the callback frame is written, so
         // the C++ subchain is followed by this current input sample.
@@ -4708,7 +4729,7 @@ mod tests {
         assert_eq!(processor.pulse_position, 3800);
 
         controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
+            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
             .unwrap();
         run(&mut processor, &[0.0], &[0.0]);
         assert!(processor.recording_waiting_start);
@@ -4789,7 +4810,7 @@ mod tests {
         assert_eq!(processor.pulse_position, 512);
 
         controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
+            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
             .unwrap();
         for _ in 0..128 {
             run(&mut processor, &[1.0; 32], &[0.0; 32]);
@@ -4827,7 +4848,7 @@ mod tests {
         assert_eq!(processor.pulse_position, 512);
 
         controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
+            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
             .unwrap();
         for _ in 0..128 {
             run(&mut processor, &[1.0; 32], &[0.0; 32]);
@@ -4998,7 +5019,7 @@ mod tests {
     fn unsynchronised_recording_keeps_all_captured_frames_after_crossfade() {
         let (mut processor, mut controls) = processor(0.0);
         controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
+            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
             .unwrap();
         for _ in 0..4 {
             run(&mut processor, &[1.0; 32], &[0.0; 32]);
@@ -5145,7 +5166,7 @@ mod tests {
     fn supports_high_u8_loop_ids_without_per_id_sample_buffers() {
         let (mut processor, mut controls) = processor(0.0);
         controls
-            .try_command(RuntimeCommand::Record { slot: 255 })
+            .try_command(RuntimeCommand::Record { slot: 255, presslen_ms: 0 })
             .unwrap();
         run(&mut processor, &[0.75], &[0.25]);
         controls.try_command(RuntimeCommand::StopRecord).unwrap();
@@ -5169,7 +5190,7 @@ mod tests {
         // is allowed to exhaust either implementation's ready list.
         for slot in 0..DEFAULT_AUDIO_BLOCKS as u8 {
             controls
-                .try_command(RuntimeCommand::Record { slot })
+                .try_command(RuntimeCommand::Record { slot, presslen_ms: 0 })
                 .unwrap();
             run(&mut processor, &[0.0], &[0.0]);
         }
@@ -5190,6 +5211,7 @@ mod tests {
         controls
             .try_command(RuntimeCommand::Record {
                 slot: DEFAULT_AUDIO_BLOCKS as u8,
+                presslen_ms: 0,
             })
             .unwrap();
         run(&mut processor, &[0.0], &[0.0]);
@@ -5220,7 +5242,7 @@ mod tests {
             AUDIO_BLOCK_FRAMES + 1,
         );
         controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
+            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
             .unwrap();
         run(
             &mut processor,
@@ -5245,7 +5267,7 @@ mod tests {
         );
         controls.service_loop_storage();
         controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
+            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
             .unwrap();
         let input = vec![0.25; AUDIO_BLOCK_FRAMES];
         for _ in 0..=DEFAULT_AUDIO_BLOCKS {
@@ -5345,7 +5367,7 @@ mod tests {
             PEAK_AVG_CHUNK_FRAMES,
         );
         controls
-            .try_command(RuntimeCommand::Record { slot: 0 })
+            .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
             .unwrap();
         run(
             &mut processor,
@@ -5357,5 +5379,42 @@ mod tests {
         assert_eq!(processor.loops[0].scope.column, 1);
         assert_eq!(processor.loops[0].scope.peaks[0], 1.0);
         assert_eq!(processor.loops[0].scope.averages[0], 0.5);
+    }
+
+    #[test]
+    fn free_record_prerolls_by_tap_press_length() {
+        // A loop capacity of one 20k-frame block and a 48 kHz rate keeps the
+        // input-history ring (min(10 s, max_loop_frames)) big enough to hold
+        // the pre-roll.
+        let (processor, controls) = runtime_audio_processor_with_backend(
+            FakeSynth {
+                render_value: 0.0,
+                ..FakeSynth::default()
+            },
+            48_000,
+            20_000,
+            32,
+        );
+        let (mut processor, mut controls) = (Box::new(processor), controls);
+        // Fill the input history with a recognizable signal (each callback is
+        // capped at max_callback_frames = 32).
+        for _ in 0..200 {
+            run(&mut processor, &[0.25; 32], &[-0.5; 32]);
+        }
+        // A tap held 100 ms triggers the record carrying the press length.
+        controls
+            .try_command(RuntimeCommand::Record {
+                slot: 0,
+                presslen_ms: 100,
+            })
+            .unwrap();
+        run(&mut processor, &[0.0; 32], &[0.0; 32]);
+        let recorded = &processor.loops[0];
+        // 100 ms at 48 kHz = 4800 pre-rolled frames, then one live block.
+        assert_eq!(recorded.len, 4800 + 32);
+        // The pre-rolled audio is the signal that was in the input history.
+        let (left, right) = recorded.sample_at(0);
+        assert!((left - 0.25).abs() < 0.01, "{left}");
+        assert!((right + 0.5).abs() < 0.01, "{right}");
     }
 }

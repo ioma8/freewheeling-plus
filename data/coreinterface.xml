@@ -495,7 +495,7 @@
     <!-- Trigger Loops -->
     <binding input="loop-clicked" conditions="button=1 and down=1"
      output="trigger-loop"
-     parameters="loopid=loopid and vol=1.0"/>
+     parameters="loopid=loopid and vol=1.0 and presslen=presslen"/>
 
     <!-- HELP: Keypad asterisk: Select playing loops -->
     <!-- HELP: (shift) Keypad asterisk: Select idle loops -->

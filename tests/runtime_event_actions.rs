@@ -42,7 +42,7 @@ fn actual_loop_click_binding_tracks_record_mute_trigger_and_overdub_state() {
     assert!(!batch.echo_input());
     assert_eq!(
         batch.iter().collect::<Vec<_>>(),
-        vec![&DispatchOutput::Runtime(RuntimeCommand::Record { slot: 7 })]
+        vec![&DispatchOutput::Runtime(RuntimeCommand::Record { slot: 7, presslen_ms: 0 })]
     );
 
     loops[7] = LoopMode::Playing;

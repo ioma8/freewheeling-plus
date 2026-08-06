@@ -202,7 +202,7 @@ fn dsp_workflow_records_overdubs_triggers_mutes_erases_and_routes_fluid_commands
     let synth_calls = Arc::new(Mutex::new(Vec::new()));
     let (mut dsp, mut controls) = boxed_dsp(synth_calls.clone(), 16);
     controls
-        .try_command(RuntimeCommand::Record { slot: 0 })
+        .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
         .unwrap();
     // A fresh C++ RecordProcessor writes PCM but clears its own output.
     // Input monitoring, when enabled, is a separate processor path.
@@ -285,7 +285,7 @@ fn dsp_workflow_records_overdubs_triggers_mutes_erases_and_routes_fluid_commands
 fn loop_gain_and_move_are_callback_safe_and_preserve_recording_identity() {
     let (mut dsp, mut controls) = boxed_dsp(Arc::new(Mutex::new(Vec::new())), 16);
     controls
-        .try_command(RuntimeCommand::Record { slot: 0 })
+        .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
         .unwrap();
     process(&mut dsp, &[0.25, 0.5], &[0.0, 0.0]);
     controls
@@ -318,7 +318,7 @@ fn loop_gain_and_move_are_callback_safe_and_preserve_recording_identity() {
 fn set_trigger_gain_scales_current_playback_without_retriggering() {
     let (mut dsp, mut controls) = boxed_dsp(Arc::new(Mutex::new(Vec::new())), 16);
     controls
-        .try_command(RuntimeCommand::Record { slot: 0 })
+        .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
         .unwrap();
     process(&mut dsp, &[0.25, 0.5, 0.75], &[0.0; 3]);
     controls.try_command(RuntimeCommand::StopRecord).unwrap();
@@ -346,7 +346,7 @@ fn set_trigger_gain_scales_current_playback_without_retriggering() {
 fn changing_selected_trigger_volume_preserves_the_active_playback_cursor() {
     let (mut dsp, mut controls) = boxed_dsp(Arc::new(Mutex::new(Vec::new())), 16);
     controls
-        .try_command(RuntimeCommand::Record { slot: 0 })
+        .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
         .unwrap();
     process(&mut dsp, &[0.1, 0.2, 0.3, 0.4], &[0.0; 4]);
     controls.try_command(RuntimeCommand::StopRecord).unwrap();
@@ -375,7 +375,7 @@ fn changing_selected_trigger_volume_preserves_the_active_playback_cursor() {
 fn export_rejects_mutation_of_source_or_move_destination() {
     let (mut dsp, mut controls) = boxed_dsp(Arc::new(Mutex::new(Vec::new())), 1);
     controls
-        .try_command(RuntimeCommand::Record { slot: 0 })
+        .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
         .unwrap();
     process(&mut dsp, &[0.25, 0.5], &[0.0, 0.0]);
     controls.try_command(RuntimeCommand::StopRecord).unwrap();
@@ -410,7 +410,7 @@ fn export_rejects_mutation_of_source_or_move_destination() {
 fn gain_and_move_commands_allocate_nothing_in_the_callback() {
     let (mut dsp, mut controls) = boxed_dsp(Arc::new(Mutex::new(Vec::new())), 4);
     controls
-        .try_command(RuntimeCommand::Record { slot: 0 })
+        .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
         .unwrap();
     process(&mut dsp, &[0.25], &[0.0]);
     controls
