@@ -93,6 +93,10 @@ pub struct FloLayoutElement {
     /// Center the element label (name) inside its first box instead of
     /// placing it at `namepos`.
     pub labelcenter: bool,
+    /// Label font size in logical pixels (default 20.0, matching the
+    /// hardcoded element-label size). Touch buttons use a smaller size so
+    /// the label fits its box.
+    pub efontsize: Option<f32>,
     pub geometry: Vec<FloLayoutBox>,
 }
 impl FloLayoutElement {

@@ -91,20 +91,20 @@
       <!-- Function buttons, between the grid and the input/output meters
            (which occupy the bottom 20% on Android). Square in screen pixels:
            0.16 of the width wide and 0.16 * aspect tall (~173 px). -->
-      <element id="130" name="PULSE" base="0.0300,0.5200" toggle="pulse-active" labelcenter="1">
-        <box outline="TBLR" pos="0.00,0.00, 0.16,0.0790"/>
+      <element id="130" name="PULSE" base="0.0100,0.5200" toggle="pulse-active" labelcenter="1" efontsize="8">
+        <box outline="TBLR" pos="0.00,0.00, 0.18,0.0888"/>
       </element>
-      <element id="131" name="CLEAR" base="0.2100,0.5200" toggle="VAR_mobile_clear" labelcenter="1">
-        <box outline="TBLR" pos="0.00,0.00, 0.16,0.0790"/>
+      <element id="131" name="CLEAR" base="0.2100,0.5200" toggle="VAR_mobile_clear" labelcenter="1" efontsize="8">
+        <box outline="TBLR" pos="0.00,0.00, 0.18,0.0888"/>
       </element>
-      <element id="132" name="REC" base="0.3900,0.5200" toggle="streaming" labelcenter="1">
-        <box outline="TBLR" pos="0.00,0.00, 0.16,0.0790"/>
+      <element id="132" name="REC" base="0.4100,0.5200" toggle="streaming" labelcenter="1" efontsize="8">
+        <box outline="TBLR" pos="0.00,0.00, 0.18,0.0888"/>
       </element>
-      <element id="133" name="SAVE" base="0.5700,0.5200" toggle="scene-save-age" togglemax="0.6" labelcenter="1">
-        <box outline="TBLR" pos="0.00,0.00, 0.16,0.0790"/>
+      <element id="133" name="SAVE" base="0.6100,0.5200" toggle="scene-save-age" togglemax="0.6" labelcenter="1" efontsize="8">
+        <box outline="TBLR" pos="0.00,0.00, 0.18,0.0888"/>
       </element>
-      <element id="134" name="LOAD" base="0.7500,0.5200" labelcenter="1">
-        <box outline="TBLR" pos="0.00,0.00, 0.16,0.0790"/>
+      <element id="134" name="LOAD" base="0.8100,0.5200" labelcenter="1" efontsize="8">
+        <box outline="TBLR" pos="0.00,0.00, 0.18,0.0888"/>
       </element>
     </layout>
 
@@ -115,22 +115,22 @@
       <element id="199" name="" base="0.0000,0.0000">
         <box outline="TBLR" pos="0.00,0.00, 1.00,0.65"/>
       </element>
-      <element id="200" name="1" base="0.0500,0.0900" labelcenter="1">
+      <element id="200" name="1" base="0.0500,0.0900" labelcenter="1" efontsize="14">
         <box outline="TBLR" pos="0.00,0.00, 0.90,0.07"/>
       </element>
-      <element id="201" name="2" base="0.0500,0.1750" labelcenter="1">
+      <element id="201" name="2" base="0.0500,0.1750" labelcenter="1" efontsize="14">
         <box outline="TBLR" pos="0.00,0.00, 0.90,0.07"/>
       </element>
-      <element id="202" name="3" base="0.0500,0.2600" labelcenter="1">
+      <element id="202" name="3" base="0.0500,0.2600" labelcenter="1" efontsize="14">
         <box outline="TBLR" pos="0.00,0.00, 0.90,0.07"/>
       </element>
-      <element id="203" name="4" base="0.0500,0.3450" labelcenter="1">
+      <element id="203" name="4" base="0.0500,0.3450" labelcenter="1" efontsize="14">
         <box outline="TBLR" pos="0.00,0.00, 0.90,0.07"/>
       </element>
-      <element id="204" name="5" base="0.0500,0.4300" labelcenter="1">
+      <element id="204" name="5" base="0.0500,0.4300" labelcenter="1" efontsize="14">
         <box outline="TBLR" pos="0.00,0.00, 0.90,0.07"/>
       </element>
-      <element id="205" name="CLOSE" base="0.4000,0.5400" labelcenter="1">
+      <element id="205" name="CLOSE" base="0.4000,0.5400" labelcenter="1" efontsize="10">
         <box outline="TBLR" pos="0.00,0.00, 0.20,0.07"/>
       </element>
     </layout>

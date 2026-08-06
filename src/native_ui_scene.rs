@@ -723,7 +723,7 @@ impl Display for LayoutContent {
             if self.layout.showelabel
                 && let Some(name) = &element.name
             {
-                let font_size = 20.0 * metrics.scale_y;
+                let font_size = element.efontsize.unwrap_or(20.0) * metrics.scale_y;
                 if element.labelcenter
                     && let Some(bbox) = element.geometry.first()
                 {
@@ -1876,6 +1876,9 @@ fn parse_layout(node: Node<'_, '_>, iid: i32, size: (u32, u32)) -> Result<FloLay
                 .attribute("togglemax")
                 .and_then(|value| value.parse::<f32>().ok()),
             labelcenter: en.attribute("labelcenter").is_some(),
+            efontsize: en
+                .attribute("efontsize")
+                .and_then(|value| value.parse::<f32>().ok()),
             geometry: Vec::new(),
         };
         if let Some(np) = en.attribute("namepos") {
