@@ -62,6 +62,11 @@ pub const EXPORT_COPY_FRAMES_PER_CALLBACK: usize = 4096;
 /// `AudioBlock::Smooth` and `Processor::DEFAULT_SMOOTH_LENGTH` in the C++
 /// engine both use this endpoint / restart crossfade length.
 const LOOP_SMOOTH_FRAMES: usize = 64;
+/// Upper bound (frames) for the input-delivery compensation applied to free
+/// recordings: the loop content never starts earlier than ~50 ms before the
+/// acoustic moment, so the compensation can only remove pre-touch ambient,
+/// never cut the performance.
+const MAX_INPUT_DELIVERY_FRAMES: usize = 2400;
 /// `RecordProcessor::REC_TAIL_LEN`: a synchronised recording that is ended
 /// in the second half of a beat continues this far past the next downbeat so
 /// PlayProcessor can crossfade its restart without truncating the tail.
@@ -1431,6 +1436,12 @@ pub struct RuntimeAudioProcessor<B: FluidSynthBackend = FluidLiteBackend> {
     recording_start_phase: u32,
     recording_elapsed_frames: u64,
     recording_stop_target_len: Option<usize>,
+    /// Frames of captured input to discard at the start of a free recording.
+    /// The Android capture path delivers input delayed (device latency plus
+    /// the input ring backlog), so the first samples of a new loop would be
+    /// pre-touch ambient; skipping them makes the loop content begin at the
+    /// recording moment while keeping the recorded length correct.
+    recording_skip_frames: usize,
     recording_end_justify: bool,
     /// C++ `RecordProcessor::nbeats`. This deliberately does not derive from
     /// PCM length: a sync recording retains `REC_TAIL_LEN` samples after its
@@ -1625,6 +1636,7 @@ pub fn runtime_audio_processor_with_backend_settings<B: FluidSynthBackend>(
             recording_start_phase: 0,
             recording_elapsed_frames: 0,
             recording_stop_target_len: None,
+            recording_skip_frames: 0,
             recording_end_justify: false,
             recording_pulse_beats: 0,
             recording_pulse_extension_applied: false,
@@ -1753,6 +1765,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
         self.recording_start_phase = 0;
         self.recording_elapsed_frames = 0;
         self.recording_stop_target_len = None;
+        self.recording_skip_frames = 0;
         if let Some(index) = self.recording.take() {
             let smooth_unsynchronised = {
                 let slot = &self.loops[index];
@@ -2030,6 +2043,24 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                     };
                     self.recording_elapsed_frames = 0;
                     self.recording_stop_target_len = None;
+                    // Free recordings compensate the input delivery delay:
+                    // discard the delivery-delayed pre-touch ambient so the
+                    // loop content starts at the recording moment (the
+                    // recorded length stays the performance span, minus the
+                    // skipped ambient). The measured alignment is the round
+                    // trip; half of it approximates the input side.
+                    self.recording_skip_frames = if self.pulse_sync_active {
+                        0
+                    } else {
+                        (self.recording_alignment_frames as usize / 2)
+                            .min(MAX_INPUT_DELIVERY_FRAMES)
+                    };
+                    if self.recording_skip_frames != 0 {
+                        crate::android_diag_log(&format!(
+                            "[dsp] free record skips {} frames of delivery-delayed input",
+                            self.recording_skip_frames
+                        ));
+                    }
                     if self.pulse_sync_active && !self.free_recordings {
                         // C++ compares `GetPct() >= 0.5`; use a widened
                         // integer comparison so odd-length pulses make the
@@ -3125,6 +3156,8 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                             let _ = self
                                 .statuses
                                 .try_send(RuntimeStatus::RecordingFull { slot: index as u8 });
+                        } else if self.recording_skip_frames > 0 {
+                            self.recording_skip_frames -= 1;
                         } else {
                             slot.set_sample(slot.len, input_l, input_r);
                             slot.record_scope_sample(input_l, input_r);
@@ -5415,6 +5448,48 @@ mod tests {
         // Stopped at the command time: no beat-aligned tail was appended.
         assert_eq!(recorded.len, 32);
         assert!(!recorded.pulse_synced);
+    }
+
+    #[test]
+    fn free_record_skips_delivery_delayed_ambient() {
+        // The Android capture path delivers input late; the recorded loop
+        // would otherwise begin with that pre-touch ambient. The measured
+        // alignment (64 frames) is the round trip; half approximates the
+        // input side, so the recording discards the first 32 frames.
+        let (processor, controls) = runtime_audio_processor_with_backend(
+            FakeSynth {
+                render_value: 0.0,
+                ..FakeSynth::default()
+            },
+            48_000,
+            20_000,
+            32,
+        );
+        let (mut processor, mut controls) = (Box::new(processor), controls);
+        controls
+            .try_command(RuntimeCommand::SetRecordingAlignmentFrames { frames: 64 })
+            .unwrap();
+        run(&mut processor, &[0.0; 32], &[0.0; 32]);
+        controls
+            .try_command(RuntimeCommand::Record {
+                slot: 0,
+                presslen_ms: 0,
+            })
+            .unwrap();
+        // Three live blocks of a recognizable signal: the first 32 frames
+        // are the delivery-delayed ambient and are discarded.
+        for _ in 0..3 {
+            run(&mut processor, &[0.25; 32], &[-0.25; 32]);
+        }
+        controls.try_command(RuntimeCommand::StopRecord).unwrap();
+        run(&mut processor, &[0.0; 32], &[0.0; 32]);
+        let recorded = &processor.loops[0];
+        // 96 frames captured minus 32 skipped = 64 recorded frames.
+        assert_eq!(recorded.len, 64);
+        // The loop begins with the post-ambient input, not the pre-touch gap.
+        let (left, right) = recorded.sample_at(0);
+        assert!((left - 0.25).abs() < 0.01, "{left}");
+        assert!((right + 0.25).abs() < 0.01, "{right}");
     }
 
     #[test]
