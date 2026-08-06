@@ -1449,6 +1449,15 @@ impl NativeRuntime {
                     "[video] switch-interface -> interface {interface_id}"
                 ));
                 r.current_interface = interface_id;
+                // The mobile interface is a tap-to-record/play looper: new
+                // recordings must stay free so stop and playback are instant,
+                // even when a pulse is running. Desktop interfaces keep the
+                // C++ beat-aligned record/playback behaviour.
+                if let Some(controls) = r.controls.as_mut() {
+                    let _ = controls.try_command(RuntimeCommand::SetFreeRecordingMode {
+                        free: interface_id == 5,
+                    });
+                }
                 let video = r.video.as_mut().ok_or("video is closed")?;
                 let mut state = video.scene_state.write().unwrap_or_else(std::sync::PoisonError::into_inner);
                 // Only hide the other interfaces' layouts. Never force-show

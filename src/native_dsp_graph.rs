@@ -413,6 +413,11 @@ pub enum RuntimeCommand {
     SetPulseSubdivide {
         beats: u32,
     },
+    /// When set, new recordings are never pulse-synced: stopping and
+    /// playback start immediately at the command time (mobile interface).
+    SetFreeRecordingMode {
+        free: bool,
+    },
     /// Output-to-microphone delay used to advance newly recorded synced loops
     /// back onto the pulse clock. It is measured in audio frames.
     SetRecordingAlignmentFrames {
@@ -1388,6 +1393,7 @@ pub struct RuntimeAudioProcessor<B: FluidSynthBackend = FluidLiteBackend> {
     sync_cnt: i32,
     sample_rate: u32,
     recording_alignment_frames: u32,
+    free_recordings: bool,
     latency_calibration: Option<LatencyCalibration>,
     calibration_monitor_gain: f32,
     metro_enabled: bool,
@@ -1587,6 +1593,7 @@ pub fn runtime_audio_processor_with_backend_settings<B: FluidSynthBackend>(
             sync_cnt: 0,
             sample_rate,
             recording_alignment_frames: 0,
+            free_recordings: false,
             latency_calibration: None,
             calibration_monitor_gain: 0.0,
             metro_enabled: false,
@@ -1787,7 +1794,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 // new loop early by `pulse_position` frames.
                 slot.position = if is_overdub {
                     slot.position
-                } else if self.pulse_sync_active && slot.len != 0 {
+                } else if self.pulse_sync_active && !self.free_recordings && slot.len != 0 {
                     pulse_synced_loop_position(
                         self.pulse_frames,
                         self.pulse_position,
@@ -1804,6 +1811,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 } else {
                     LoopMode::Playing
                 };
+
                 // Record the final captured frame count before the slot
                 // transitions to Playing. This preserves the user-visible
                 // recorded length independent of any crossfade tail that the
@@ -1879,7 +1887,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
             self.loops[index].overdub_fade_out = Some((0, 0));
             return;
         }
-        if !self.pulse_sync_active || self.recording.is_none() {
+        if !self.pulse_sync_active || self.free_recordings || self.recording.is_none() {
             self.stop_recording(notify);
             return;
         }
@@ -1994,13 +2002,14 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                     target.gain = 1.0;
                     target.trigger_gain = 1.0;
                     target.gain_delta = 1.0;
-                    target.pulse_synced = self.pulse_sync_active;
+                    target.pulse_synced = self.pulse_sync_active && !self.free_recordings;
                     target.pulse_beats = 0;
-                    target.capture_alignment_frames = if self.pulse_sync_active {
-                        self.recording_alignment_frames
-                    } else {
-                        0
-                    };
+                    target.capture_alignment_frames =
+                        if self.pulse_sync_active && !self.free_recordings {
+                            self.recording_alignment_frames
+                        } else {
+                            0
+                        };
                     target.boundary_fade_position = None;
                     target.recent_peak = 0.0;
                     target.overdub_jump.reset();
@@ -2021,7 +2030,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                     };
                     self.recording_elapsed_frames = 0;
                     self.recording_stop_target_len = None;
-                    if self.pulse_sync_active {
+                    if self.pulse_sync_active && !self.free_recordings {
                         // C++ compares `GetPct() >= 0.5`; use a widened
                         // integer comparison so odd-length pulses make the
                         // same boundary decision without floating-point
@@ -2257,6 +2266,9 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
             }
             RuntimeCommand::SetRecordingAlignmentFrames { frames } => {
                 self.recording_alignment_frames = frames;
+            }
+            RuntimeCommand::SetFreeRecordingMode { free } => {
+                self.free_recordings = free;
             }
             RuntimeCommand::CalibrateLatency => {
                 if self.latency_calibration.is_none() {
@@ -5369,6 +5381,40 @@ mod tests {
         assert_eq!(processor.loops[0].scope.column, 1);
         assert_eq!(processor.loops[0].scope.peaks[0], 1.0);
         assert_eq!(processor.loops[0].scope.averages[0], 0.5);
+    }
+
+    #[test]
+    fn free_recording_mode_keeps_stop_and_playback_instant() {
+        let (mut processor, mut controls) = processor(0.0);
+        // Start a pulse; by default new recordings would become pulse-synced.
+        controls
+            .try_command(RuntimeCommand::SetPulse { frames: 4800 })
+            .unwrap();
+        run(&mut processor, &[0.0; 32], &[0.0; 32]);
+        // Mobile mode: new recordings stay free.
+        controls
+            .try_command(RuntimeCommand::SetFreeRecordingMode { free: true })
+            .unwrap();
+        run(&mut processor, &[0.0; 32], &[0.0; 32]);
+        controls
+            .try_command(RuntimeCommand::Record {
+                slot: 0,
+                presslen_ms: 0,
+            })
+            .unwrap();
+        // Feed one live block, then stop immediately.
+        run(&mut processor, &[0.25; 32], &[-0.25; 32]);
+        controls.try_command(RuntimeCommand::StopRecord).unwrap();
+        run(&mut processor, &[0.0; 32], &[0.0; 32]);
+        let recorded = &processor.loops[0];
+        // Stopped exactly at the command time and plays back from the start,
+        // even though a pulse is running.
+        assert!(matches!(recorded.mode, LoopMode::Playing));
+        // Playback started at 0 and advanced exactly one 32-frame callback.
+        assert!(recorded.position <= 32, "pos {}", recorded.position);
+        // Stopped at the command time: no beat-aligned tail was appended.
+        assert_eq!(recorded.len, 32);
+        assert!(!recorded.pulse_synced);
     }
 
     #[test]
