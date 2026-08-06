@@ -775,17 +775,24 @@ impl Display for LayoutContent {
             ));
         }
         // Empty-state hint: while no loop on the grid has any audio, draw a
-        // short instruction centered over the layout (mobile first-run).
+        // short instruction centered over the grid area (mobile first-run).
+        // The size is a fixed logical font (14, like the "small" text) so it
+        // stays well inside the screen at any scale_y, unlike a proportionally
+        // scaled size which overflows the phone width.
         if let Some(hint) = self.layout.emptyhint.as_deref()
             && state.loop_scopes.is_empty()
         {
-            let font_size = 24.0 * metrics.scale_y;
+            let font_size = 14.0 * metrics.scale_y;
             let approx_w = font_size * 0.62 * hint.chars().count() as f32;
             let cx = (metrics.x(self.layout.xpos)
                 + metrics.x(self.layout.xpos + metrics.logical_width as i32))
                 / 2
                 - approx_w as i32 / 2;
-            let cy = metrics.y(self.layout.ypos + metrics.logical_height as i32 / 2);
+            // Center vertically within the loop grid, not the whole screen
+            // (the grid occupies the upper ~40% of the mobile layout).
+            let cy = metrics.y(
+                self.layout.ypos + (metrics.logical_height as f32 * 0.22) as i32,
+            );
             renderer.draw(DrawOp::StyledText(
                 hint.to_string(),
                 "main".into(),
