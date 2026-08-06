@@ -1965,10 +1965,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
             {
                 self.send_status(RuntimeStatus::CommandRejected(command));
             }
-            RuntimeCommand::Record {
-                slot,
-                presslen_ms,
-            } => {
+            RuntimeCommand::Record { slot, .. } => {
                 self.stop_recording(true);
                 let index = slot as usize;
                 if index < self.loops.len() {
@@ -2041,20 +2038,13 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                             }
                             self.prefill_recording_from_history(index, requested);
                         }
-                    } else if presslen_ms > 0 {
-                        // Free (un-synced) tap: pre-roll the recording by the
-                        // measured press duration so the loop's attack starts
-                        // at the touch, compensating for the release-trigger.
-                        let requested =
-                            (presslen_ms as usize * self.sample_rate as usize) / 1000;
-                        let requested = requested.min(250 * self.sample_rate as usize / 1000);
-                        while self.loops[index].uses_blocks()
-                            && self.loops[index].capacity() < requested
-                            && self.loop_storage.add_block(&mut self.loops[index])
-                        {
-                        }
-                        self.prefill_recording_from_history(index, requested);
                     }
+                    // NOTE: a free (un-synced) tap used to pre-roll the
+                    // recording by the measured press duration, but that
+                    // pulled in pre-touch audio (tap noise, ambient sound)
+                    // so recordings started "too early". Recording now begins
+                    // exactly at touch-up; the live capture picks up
+                    // everything the player does after the tap.
                 } else {
                     self.send_status(RuntimeStatus::CommandRejected(command));
                 }
@@ -5382,20 +5372,11 @@ mod tests {
     }
 
     #[test]
-    fn free_record_prerolls_by_tap_press_length() {
-        // A loop capacity of one 20k-frame block and a 48 kHz rate keeps the
-        // input-history ring (min(10 s, max_loop_frames)) big enough to hold
-        // the pre-roll.
-        let (processor, controls) = runtime_audio_processor_with_backend(
-            FakeSynth {
-                render_value: 0.0,
-                ..FakeSynth::default()
-            },
-            48_000,
-            20_000,
-            32,
-        );
-        let (mut processor, mut controls) = (Box::new(processor), controls);
+    fn free_record_starts_at_touch_up_without_preroll() {
+        // A free (un-synced) tap starts the recording exactly at touch-up:
+        // no pre-roll from the input history, which would pull in pre-touch
+        // audio (tap noise / ambient sound) and make the loop start early.
+        let (mut processor, mut controls) = processor(0.0);
         // Fill the input history with a recognizable signal (each callback is
         // capped at max_callback_frames = 32).
         for _ in 0..200 {
@@ -5408,13 +5389,13 @@ mod tests {
                 presslen_ms: 100,
             })
             .unwrap();
-        run(&mut processor, &[0.0; 32], &[0.0; 32]);
+        // One live block of a distinct signal.
+        run(&mut processor, &[0.125; 32], &[-0.25; 32]);
         let recorded = &processor.loops[0];
-        // 100 ms at 48 kHz = 4800 pre-rolled frames, then one live block.
-        assert_eq!(recorded.len, 4800 + 32);
-        // The pre-rolled audio is the signal that was in the input history.
+        // Only the live block is captured: nothing from before touch-up.
+        assert_eq!(recorded.len, 32);
         let (left, right) = recorded.sample_at(0);
-        assert!((left - 0.25).abs() < 0.01, "{left}");
-        assert!((right + 0.5).abs() < 0.01, "{right}");
+        assert!((left - 0.125).abs() < 0.01, "{left}");
+        assert!((right + 0.25).abs() < 0.01, "{right}");
     }
 }
