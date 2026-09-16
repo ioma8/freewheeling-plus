@@ -79,51 +79,76 @@ pub fn format_signal_message(sig: c_int, buf: &mut [u8]) -> usize {
 }
 
 fn dispatch_write(msg: &[u8]) {
-    // SAFETY: libc::write is async-signal-safe; the fence pairs with
-    // Release in set_signal_test_hooks for consistent hook pointer visibility.
-    unsafe {
-        std::sync::atomic::fence(Ordering::Acquire);
-        let writer = TEST_WRITER.load(Ordering::Relaxed);
-        if writer != 0 {
-            let writer: SignalWriteFn = std::mem::transmute(writer);
-            let ctx = TEST_CTX.load(Ordering::Relaxed);
-            writer(msg.as_ptr(), msg.len(), ctx);
+    // Acquire loads (not a fence before relaxed loads): they observe the
+    // Release stores in `set_signal_test_hooks`, so the hook pointer and the
+    // context it expects are always seen together.
+    //
+    // SAFETY (hook path): the pointer was published by
+    // `set_signal_test_hooks` from a `fn` item with the `SignalWriteFn`
+    // signature, so the transmute reconstructs exactly that function pointer.
+    // The context is validated as non-null before the call, and
+    // `clear_signal_test_hooks` clears the hooks before the context, so a
+    // torn (non-null hook, null context) pair cannot be handed to the hook.
+    let writer = TEST_WRITER.load(Ordering::Acquire);
+    if writer != 0 {
+        let ctx = TEST_CTX.load(Ordering::Acquire);
+        if ctx.is_null() {
             return;
         }
-        #[cfg(unix)]
-        {
-            let mut p = msg.as_ptr();
-            let mut n = msg.len();
-            while n != 0 {
-                let written = libc::write(libc::STDERR_FILENO, p.cast(), n);
-                if written <= 0 {
-                    break;
+        let writer: SignalWriteFn = unsafe { std::mem::transmute(writer) };
+        writer(msg.as_ptr(), msg.len(), ctx);
+        return;
+    }
+    #[cfg(unix)]
+    // SAFETY: libc::write is async-signal-safe and `msg` is a live slice.
+    unsafe {
+        let mut p = msg.as_ptr();
+        let mut n = msg.len();
+        while n != 0 {
+            let written = libc::write(libc::STDERR_FILENO, p.cast(), n);
+            if written < 0 {
+                // EINTR is a transient interruption: retry instead of
+                // truncating the message, and stop on any real error.
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    continue;
                 }
-                p = p.add(written as usize);
-                n -= written as usize;
+                break;
             }
+            if written == 0 {
+                break;
+            }
+            p = p.add(written as usize);
+            n -= written as usize;
         }
-        #[cfg(not(unix))]
-        {
-            let _ = msg;
-        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = msg;
     }
 }
 fn dispatch_exit(code: c_int) {
-    // SAFETY: libc::_exit is async-signal-safe; the fence pairs with
-    // Release in set_signal_test_hooks for consistent hook pointer visibility.
-    unsafe {
-        std::sync::atomic::fence(Ordering::Acquire);
-        let exiter = TEST_EXITER.load(Ordering::Relaxed);
-        if exiter != 0 {
-            let exiter: SignalExitFn = std::mem::transmute(exiter);
-            exiter(code, TEST_CTX.load(Ordering::Relaxed));
-        } else {
-            #[cfg(unix)]
-            libc::_exit(code);
-            #[cfg(not(unix))]
-            std::process::exit(code);
+    let exiter = TEST_EXITER.load(Ordering::Acquire);
+    if exiter != 0 {
+        let ctx = TEST_CTX.load(Ordering::Acquire);
+        if ctx.is_null() {
+            return;
         }
+        // SAFETY: the pointer was published by `set_signal_test_hooks` from a
+        // `fn` item with the `SignalExitFn` signature.
+        let exiter: SignalExitFn = unsafe { std::mem::transmute(exiter) };
+        exiter(code, ctx);
+        return;
+    }
+    // `libc::_exit` / `_exit` from the CRT: `std::process::exit` runs
+    // destructors and flushes stdio, neither of which is async-signal-safe.
+    #[cfg(unix)]
+    // SAFETY: _exit is async-signal-safe.
+    unsafe {
+        libc::_exit(code);
+    }
+    #[cfg(not(unix))]
+    unsafe {
+        libc::_exit(code);
     }
 }
 
@@ -180,19 +205,31 @@ extern "C" fn shutdown_trampoline(sig: c_int) {
 
 #[cfg(unix)]
 fn register(handler: extern "C" fn(c_int), signals: &[c_int]) {
-    // This is the same no-flags `sigaction` registration used in fweelin.cc.
-    // `signal(3)` may have implementation-dependent reset/restart semantics.
+    // Matching fweelin.cc's `sigaction` registration, with one deliberate
+    // divergence: `SA_RESETHAND` restores the default disposition after the
+    // handler runs, so a second fault inside the handler (e.g. SIGSEGV while
+    // handling SIGBUS on a corrupt stack) terminates instead of re-entering it
+    // forever. fweelin.cc passes no flags and relies on `signal(3)`'s
+    // implementation-defined reset/restart semantics.
     // SAFETY: zeroed sigaction is valid initialization; sigemptyset is
     // async-signal-safe and always succeeds on POSIX systems.
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = handler as usize;
     // SAFETY: sigemptyset is async-signal-safe.
     unsafe { libc::sigemptyset(&mut action.sa_mask) };
+    action.sa_flags = libc::SA_RESETHAND;
     for &sig in signals {
         // SAFETY: sigaction is async-signal-safe; handler is a function
         // pointer, not a closure, so it's safe to call from any thread.
-        unsafe {
-            libc::sigaction(sig, &action, std::ptr::null_mut());
+        let result = unsafe { libc::sigaction(sig, &action, std::ptr::null_mut()) };
+        if result != 0 {
+            // Registration runs outside signal context, so the failure can be
+            // reported; silently leaving the old disposition installed would
+            // make the caller believe the handler is in place.
+            eprintln!(
+                "FreeWheeling: cannot install the handler for signal {sig}: {}",
+                std::io::Error::last_os_error()
+            );
         }
     }
 }

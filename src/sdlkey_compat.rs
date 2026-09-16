@@ -2,7 +2,9 @@
 
 pub type SdlKey = i32;
 
-pub const FWL_SDLK_UNKNOWN: SdlKey = 0;
+/// Sentinel for "no key", shared with `sdlio` so the declared key range and
+/// the event path's bounds check cannot drift apart.
+pub const FWL_SDLK_UNKNOWN: SdlKey = crate::sdlio::FWL_SDLK_UNKNOWN;
 pub const FWL_SDLK_BACKSPACE: SdlKey = 8;
 pub const FWL_SDLK_TAB: SdlKey = 9;
 pub const FWL_SDLK_CLEAR: SdlKey = 12;
@@ -76,7 +78,8 @@ pub const FWL_SDLK_MENU: SdlKey = 319;
 pub const FWL_SDLK_POWER: SdlKey = 320;
 pub const FWL_SDLK_EURO: SdlKey = 321;
 pub const FWL_SDLK_UNDO: SdlKey = 322;
-pub const FWL_SDLK_LAST: SdlKey = 323;
+/// One past the last valid key index, shared with `sdlio`.
+pub const FWL_SDLK_LAST: SdlKey = crate::sdlio::SDLK_LAST as SdlKey;
 
 /// Translate an SDL2 `SDL_Keycode` exactly as the legacy C++ adapter does.
 pub fn translate_sdl_keycode(keycode: SdlKey) -> SdlKey {
@@ -90,7 +93,11 @@ pub fn translate_sdl_keycode(keycode: SdlKey) -> SdlKey {
         Some(K::RETURN) => FWL_SDLK_RETURN,
         Some(K::PAUSE) => FWL_SDLK_PAUSE,
         Some(K::ESCAPE) => FWL_SDLK_ESCAPE,
+        Some(K::CLEAR) => FWL_SDLK_CLEAR,
         Some(K::DELETE) => FWL_SDLK_DELETE,
+        // SDL2 has no keycode for the remaining SDL1 keys (COMPOSE, EURO,
+        // BREAK, LSUPER, RSUPER); the constants exist for binding parity and
+        // are therefore unreachable from a translated event.
         Some(K::KP_0) => FWL_SDLK_KP0,
         Some(K::KP_1) => FWL_SDLK_KP1,
         Some(K::KP_2) => FWL_SDLK_KP2,

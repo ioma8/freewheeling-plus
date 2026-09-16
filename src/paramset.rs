@@ -136,7 +136,14 @@ impl FloDisplayParamSet {
         let Some(bank) = self.current_bank_mut() else {
             return;
         };
-        let proposed = bank.firstparamidx as isize + page_size as isize * page;
+        // Caller-supplied `page` can be extreme: bail out instead of
+        // overflowing (which would panic in debug builds and wrap in release).
+        let Some(offset) = (page_size as isize).checked_mul(page) else {
+            return;
+        };
+        let Some(proposed) = (bank.firstparamidx as isize).checked_add(offset) else {
+            return;
+        };
         bank.firstparamidx = if proposed < 0 {
             0
         } else if proposed >= bank.numparams as isize {
@@ -151,9 +158,8 @@ impl FloDisplayParamSet {
         if bank.numparams == 0 {
             return None;
         }
-        Some(
-            (bank.firstparamidx as isize + relative).clamp(0, bank.numparams as isize - 1) as usize,
-        )
+        let index = (bank.firstparamidx as isize).checked_add(relative)?;
+        Some(index.clamp(0, bank.numparams as isize - 1) as usize)
     }
 
     pub fn set_param(&mut self, relative: isize, value: f32) -> bool {
@@ -163,12 +169,21 @@ impl FloDisplayParamSet {
         let Some(bank) = self.current_bank() else {
             return false;
         };
-        let idx = bank.firstparamidx as isize + relative;
+        // Checked like `show_page`/`get_param`: an extreme `relative` (the
+        // public API accepts any isize) must not overflow into a panic.
+        let Some(idx) = (bank.firstparamidx as isize).checked_add(relative) else {
+            return false;
+        };
         if idx < 0 || idx >= bank.numparams as isize {
             return false;
         }
-        let idx = idx as usize;
-        self.banks[self.curbank].params[idx].value = value;
+        // `numparams` is a separate public field, so it can disagree with the
+        // parameter vector; index through the vector and report the failure
+        // through the return value instead of panicking.
+        let Some(param) = self.banks[self.curbank].params.get_mut(idx as usize) else {
+            return false;
+        };
+        param.value = value;
         true
     }
 
@@ -178,11 +193,16 @@ impl FloDisplayParamSet {
         let Some(bank) = self.current_bank() else {
             return 0.0;
         };
-        let idx = bank.firstparamidx as isize + relative;
+        // Checked like `show_page`: an extreme `relative` must not overflow.
+        let Some(idx) = (bank.firstparamidx as isize).checked_add(relative) else {
+            return 0.0;
+        };
         if idx < 0 || idx >= bank.numparams as isize {
             0.0
         } else {
-            bank.params[idx as usize].value
+            bank.params
+                .get(idx as usize)
+                .map_or(0.0, |param| param.value)
         }
     }
 

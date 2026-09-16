@@ -6,12 +6,19 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release version
+        description: Version to build (dispatch runs build artifacts only; publishing needs a tag push)
         required: true
         type: string
 
+concurrency:
+  # One build set per tag: re-pushing a tag supersedes the previous run, and a
+  # dispatch of the same ref does not race the tag build.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
-  contents: write
+  # Only the publishing job below needs write access to the repository.
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,10 +27,12 @@ env:
 jobs:
   linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
-      - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - uses: ./.github/actions/setup-rust
+        with:
+          packages: libasound2-dev
       - name: Package Linux release
         run: FWP_VERSION="${RELEASE_VERSION#v}" scripts/linux/package-release.sh
       - uses: actions/upload-artifact@v7
@@ -34,6 +43,7 @@ jobs:
 
   macos:
     runs-on: macos-14
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
       - name: Install Rust targets and cargo-bundle
@@ -50,11 +60,15 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       - name: Package Windows x86_64 release
         shell: pwsh
         run: |
+          # RELEASE_VERSION feeds filesystem paths and the archive name: reject
+          # separators, `..` and wildcards before using it.
+          if ($env:RELEASE_VERSION -notmatch '^v?[0-9A-Za-z._+-]+$') { throw "invalid release version: $env:RELEASE_VERSION" }
           $version = $env:RELEASE_VERSION.TrimStart('v')
           $stage = "dist/freewheeling-plus-$version-x86_64-pc-windows-msvc"
           cargo build --release --locked
@@ -71,16 +85,19 @@ jobs:
 
   android:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake ninja-build pkg-config libasound2-dev openjdk-17-jdk-headless
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
+        # Pinned to a commit (v4.0.1): third-party actions must not run from a
+        # mutable tag with this job's token.
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699
       - name: Install Android NDK
         run: sdkmanager --install "ndk;28.2.13676358" --sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
       - name: Install cargo-apk
-        run: cargo install cargo-apk --locked
+        run: cargo install cargo-apk --version 0.9.6 --locked
       - name: Add Android Rust target
         run: rustup target add aarch64-linux-android
       - name: Build Android APK
@@ -95,6 +112,10 @@ jobs:
     needs: [linux, macos, windows, android]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # The only job that publishes.
+      contents: write
     steps:
       - uses: actions/download-artifact@v7
         with:
@@ -106,8 +127,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          # `merge-multiple: true` flattens each artifact directory, so two
+          # artifacts sharing a file name would silently drop one. Check that
+          # before anything is uploaded: failing afterwards would leave the
+          # release with a partial asset set.
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq \
+               "$(find release-assets -type f | wc -l)" || {
+            echo "error: duplicate asset names across artifacts" >&2; exit 1;
+          }
+          # Re-runs are deliberate replacements, not additions: the first run
+          # for a tag creates a draft, and every later run for the same tag
+          # replaces the assets of that release whether it is still a draft or
+          # already published. `./` keeps a file name starting with `-` from
+          # being parsed as a flag.
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" --clobber release-assets/*
+            echo "replacing the assets of the existing release $GITHUB_REF_NAME"
+            gh release upload "$GITHUB_REF_NAME" --clobber ./release-assets/*
           else
-            gh release create "$GITHUB_REF_NAME" --draft --generate-notes release-assets/*
+            gh release create "$GITHUB_REF_NAME" --draft --generate-notes ./release-assets/*
           fi

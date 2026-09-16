@@ -16,7 +16,10 @@ impl StartupConfig for Config {
 }
 struct Startup;
 impl StartupServices for Startup {
-    fn rollback_setup(&mut self) {}
+    fn rollback_setup(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+    fn commit_setup(&mut self) {}
     fn lock_memory(&mut self) -> Result<(), String> {
         Ok(())
     }

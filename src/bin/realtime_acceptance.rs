@@ -76,9 +76,13 @@ fn run() -> Result<(), String> {
     let started = Instant::now();
     while started.elapsed() < duration {
         thread::sleep(RSS_SAMPLE_INTERVAL.min(duration.saturating_sub(started.elapsed())));
-        metrics
-            .sample_rss()
-            .map_err(|error| format!("cannot sample resident memory: {error}"))?;
+        if let Err(error) = metrics.sample_rss() {
+            // Every return from here on must close the stream: leaving it
+            // running would keep the private aggregate device alive, which
+            // `verify_aggregate_cleanup` exists to prove cannot happen.
+            backend.close();
+            return Err(format!("cannot sample resident memory: {error}"));
+        }
     }
     // Opt-in macOS aggregate contract: capture and playback frame counts must
     // stay matched with zero dropped/fabricated input frames, and the private
@@ -88,7 +92,7 @@ fn run() -> Result<(), String> {
     backend.close();
     verify_aggregate_cleanup(aggregate_device, stream_diagnostics)?;
 
-    let result = metrics.snapshot(info.sample_rate, info.buffer_size);
+    let result = metrics.snapshot();
     if result.callback_count == 0 {
         return Err(
             "native backend produced no audio callbacks; refusing to write a result".into(),
@@ -132,7 +136,10 @@ fn attestation_json(
     duration: Duration,
     expected_callbacks: u64,
 ) -> Result<String, String> {
-    let mut document: serde_json::Value = serde_json::from_str(&result.to_json())
+    let result_json = result
+        .to_json()
+        .map_err(|error| format!("cannot serialize the performance report: {error}"))?;
+    let mut document: serde_json::Value = serde_json::from_str(&result_json)
         .map_err(|error| format!("internal performance JSON is invalid: {error}"))?;
     let fields = document
         .as_object_mut()
@@ -186,10 +193,6 @@ fn attestation_json(
         "expected_minimum_callbacks".into(),
         serde_json::json!(expected_callbacks),
     );
-    fields.insert(
-        "attestation_complete".into(),
-        serde_json::json!(total_duration + 0.001 >= elapsed + duration.as_secs_f64()),
-    );
     serde_json::to_string_pretty(&document)
         .map_err(|error| format!("cannot serialize performance result: {error}"))
 }
@@ -204,24 +207,65 @@ fn parse_elapsed_seconds(value: &str) -> Result<f64, String> {
         "FWP_REALTIME_ELAPSED_SECONDS must be a finite non-negative number".to_string()
     })?;
     if !elapsed.is_finite() || elapsed < 0.0 {
-        return Err("FWP_REALTIME_ELAPSED_SECONDS is outside the requested duration".into());
+        // `parse` accepts `inf`/`NaN`; name the condition actually rejected.
+        return Err("FWP_REALTIME_ELAPSED_SECONDS must be a finite non-negative number".into());
     }
     Ok(elapsed)
 }
 
 fn expected_callback_count(seconds: f64, sample_rate: u32, frames: u32) -> u64 {
+    // A backend that reports a zero buffer size would divide by zero here and
+    // saturate to `u64::MAX`, which then reads as "callback count too low".
+    if frames == 0 || sample_rate == 0 || !seconds.is_finite() || seconds <= 0.0 {
+        return 0;
+    }
     (seconds * f64::from(sample_rate) / f64::from(frames) * 0.95).floor() as u64
 }
 
+/// Write `contents` to `path` durably.
+///
+/// The temporary name is per-process so two concurrent runs cannot clobber
+/// each other, and the data is synced (file and directory) before the rename:
+/// an evidence artifact must never be observed truncated.
 fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, contents)?;
-    fs::rename(temporary, path)
+    use std::io::Write as _;
+
+    let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+    }
+    match fs::rename(&temporary, path) {
+        Ok(()) => {}
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+    }
+    if let Some(parent) = path.parent()
+        && let Ok(directory) = fs::File::open(parent)
+    {
+        // Best effort: some filesystems reject a directory sync.
+        let _ = directory.sync_all();
+    }
+    Ok(())
 }
 
+/// Copy input to output, tolerating a length mismatch.
+///
+/// This runs on the audio thread: `copy_from_slice` would panic (and abort the
+/// process) when a capture-underflow path hands the callback a trimmed input,
+/// so a mismatch degrades to silence instead.
 fn passthrough(callback: &mut AudioCallback<'_>) {
-    for channel in 0..callback.outputs.len() {
-        callback.outputs[channel].copy_from_slice(callback.inputs[channel]);
+    for (output, input) in callback
+        .outputs
+        .iter_mut()
+        .zip(callback.inputs.iter())
+    {
+        let frames = output.len().min(input.len());
+        output[..frames].copy_from_slice(&input[..frames]);
+        output[frames..].fill(0.0);
     }
 }
 
@@ -513,41 +557,70 @@ fn hal_device_ids() -> Result<Vec<u32>, String> {
         mScope: 0,
         mElement: 0,
     };
-    let mut size = 0u32;
-    // SAFETY: first call with a null data pointer only requests the size.
-    let status = unsafe {
-        AudioObjectGetPropertyDataSize(
-            K_AUDIO_OBJECT_SYSTEM_OBJECT,
-            &address,
-            0,
-            std::ptr::null(),
-            &mut size,
-        )
-    };
-    if status != 0 {
-        return Err(format!(
-            "cannot query CoreAudio device list size (OSStatus {status})"
-        ));
+    let id_size = std::mem::size_of::<AudioObjectID>();
+    // Another process creating or destroying an aggregate device changes this
+    // list between the size query and the data query, which makes the second
+    // call fail or return a short buffer. That is a HAL race, not a contract
+    // violation, so the pair is retried with a freshly queried size instead of
+    // failing the acceptance run on the first transient result.
+    const ATTEMPTS: usize = 4;
+    let mut last_error = String::new();
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            thread::sleep(Duration::from_millis(50));
+        }
+        let mut size = 0u32;
+        // SAFETY: a null data pointer only requests the size.
+        let status = unsafe {
+            AudioObjectGetPropertyDataSize(
+                K_AUDIO_OBJECT_SYSTEM_OBJECT,
+                &address,
+                0,
+                std::ptr::null(),
+                &mut size,
+            )
+        };
+        if status != 0 {
+            last_error = format!("cannot query CoreAudio device list size (OSStatus {status})");
+            continue;
+        }
+        if !(size as usize).is_multiple_of(id_size) {
+            // A partial entry means the HAL returned a size it cannot fill with
+            // whole device ids; reading it would silently drop the last device.
+            return Err(format!(
+                "CoreAudio device list size {size} is not a multiple of the device id size"
+            ));
+        }
+        let count = size as usize / id_size;
+        let mut ids = vec![0u32; count];
+        let mut written = size;
+        // SAFETY: the buffer matches the size CoreAudio reported.
+        let status = unsafe {
+            AudioObjectGetPropertyData(
+                K_AUDIO_OBJECT_SYSTEM_OBJECT,
+                &address,
+                0,
+                std::ptr::null(),
+                &mut written,
+                ids.as_mut_ptr().cast(),
+            )
+        };
+        if status != 0 {
+            last_error = format!("cannot query CoreAudio device list (OSStatus {status})");
+            continue;
+        }
+        if written as usize > count * id_size {
+            // The list grew between the calls: the trailing entries are missing
+            // from this buffer, so it cannot be used as a complete list.
+            last_error = "CoreAudio device list grew between queries".into();
+            continue;
+        }
+        ids.truncate(written as usize / id_size);
+        return Ok(ids);
     }
-    let count = size as usize / std::mem::size_of::<AudioObjectID>();
-    let mut ids = vec![0u32; count];
-    // SAFETY: the buffer matches the size CoreAudio reported.
-    let status = unsafe {
-        AudioObjectGetPropertyData(
-            K_AUDIO_OBJECT_SYSTEM_OBJECT,
-            &address,
-            0,
-            std::ptr::null(),
-            &mut size,
-            ids.as_mut_ptr().cast(),
-        )
-    };
-    if status != 0 {
-        return Err(format!(
-            "cannot query CoreAudio device list (OSStatus {status})"
-        ));
-    }
-    Ok(ids)
+    Err(format!(
+        "{last_error} (retried {ATTEMPTS} times); the device list kept changing"
+    ))
 }
 
 #[cfg(not(any(target_os = "macos", all(target_os = "linux", feature = "jack"))))]
@@ -702,7 +775,10 @@ mod tests {
         let object = value.as_object().unwrap();
         assert_eq!(object["git_revision"], "deadbeef");
         assert_eq!(object["evidence_mode"], "virtual-jack");
-        assert_eq!(object["attestation_complete"], true);
+        // The artifact carries only observations that can differ from an
+        // expectation; a boolean that is true by construction would add no
+        // evidence (the callback floor is already validated before writing).
+        assert!(object.get("attestation_complete").is_none());
         assert_eq!(object["expected_minimum_callbacks"], 500);
         assert_eq!(object["sample_rate_hz"], 48_000);
     }

@@ -34,12 +34,18 @@ pub enum ManagedChainType {
 pub enum ManagedChainStatus {
     Running,
     PendingDelete,
+    /// Slot released by [`BlockManager::collect`]; reused by the next
+    /// [`BlockManager::add`]. The slot keeps its index so previously handed out
+    /// handles stay valid.
+    Deleted,
 }
 
 pub struct ManagedChain {
     pub block: Option<SharedBlock>,
     pub cursor: usize,
     pub status: ManagedChainStatus,
+    /// Countdown shared with [`HiPriManagedChain::run_deferred`].
+    deferred_cycles: usize,
 }
 impl ManagedChain {
     pub fn new(block: Option<SharedBlock>) -> Self {
@@ -47,11 +53,17 @@ impl ManagedChain {
             block,
             cursor: 0,
             status: ManagedChainStatus::Running,
+            deferred_cycles: 0,
         }
     }
+    /// Base maintenance hook.
+    ///
+    /// `ManagedChain` owns no work state of its own, so this is inert; every
+    /// concrete manager performs its own maintenance in its own `manage`.
     pub fn manage(&mut self) -> bool {
         false
     }
+    /// Chain type of the bare handle. Concrete managers report their own type.
     pub fn kind(&self) -> ManagedChainType {
         ManagedChainType::None
     }
@@ -69,6 +81,7 @@ impl Preallocated for ManagedChain {
         self.block = None;
         self.cursor = 0;
         self.status = ManagedChainStatus::Running;
+        self.deferred_cycles = 0;
     }
 }
 
@@ -83,15 +96,27 @@ impl GrowChainManager {
             block_len,
         }
     }
+    pub fn kind(&self) -> ManagedChainType {
+        ManagedChainType::GrowChain
+    }
+    /// Append the next link when the chain has grown to its end.
+    ///
+    /// Returns `false` when there is nothing to do (also for a recycled or
+    /// poisoned chain, instead of panicking).
     pub fn manage(&mut self) -> bool {
-        let b = self.base.block.as_ref().unwrap();
-        let mut x = b.write().unwrap();
+        let Some(block) = self.base.block.as_ref() else {
+            return false;
+        };
+        let Ok(mut x) = block.write() else {
+            return false;
+        };
         if x.next.is_none() {
             x.next = Some(Box::new(AudioBlock::new(self.block_len)));
         }
         false
     }
 }
+
 impl Preallocated for GrowChainManager {
     fn recycle(&mut self) {
         self.base.recycle();
@@ -117,23 +142,48 @@ impl PeaksAvgsManager {
             grow,
         }
     }
+    pub fn kind(&self) -> ManagedChainType {
+        ManagedChainType::PeaksAvgs
+    }
+    /// Recompute the display peaks/averages for the whole chain.
+    ///
+    /// Layout per chunk matches `PeaksAvgsProcessor` (and the C++ manager):
+    /// two `peaks` samples (maximum, then minimum) and one `avgs` sample (mean
+    /// absolute amplitude). Lock order is chain first, then output; no other
+    /// path takes both.
     pub fn manage(&mut self) -> bool {
-        let b = self.base.block.as_ref().unwrap().read().unwrap();
+        let Some(block) = self.base.block.as_ref() else {
+            return false;
+        };
+        let Ok(b) = block.read() else {
+            return false;
+        };
+        let chunk_size = self.chunk_size.max(1);
         let n = b.total_len();
-        let mut o = self.output.write().unwrap();
+        let chunks = n.div_ceil(chunk_size);
+        let Ok(mut o) = self.output.write() else {
+            return false;
+        };
+        o.chunk_size = chunk_size;
         o.peaks.samples.clear();
+        o.peaks.samples.reserve(chunks * 2);
         o.avgs.samples.clear();
-        for p in (0..n).step_by(self.chunk_size) {
-            let e = (p + self.chunk_size).min(n);
-            let v = (p..e)
-                .map(|i| b.sample(i).unwrap_or(0.0))
-                .collect::<Vec<_>>();
-            let lo = v.iter().fold(f32::INFINITY, |a, &x| a.min(x));
-            let hi = v.iter().fold(f32::NEG_INFINITY, |a, &x| a.max(x));
-            o.peaks.samples.push(hi - lo);
-            o.avgs
-                .samples
-                .push(v.iter().map(|x| x.abs()).sum::<f32>() / v.len() as f32);
+        o.avgs.samples.reserve(chunks);
+        let mut samples = b.samples_iter();
+        let mut pos = 0;
+        while pos < n {
+            let end = (pos + chunk_size).min(n);
+            let (mut lo, mut hi, mut sum) = (f32::INFINITY, f32::NEG_INFINITY, 0.0);
+            for _ in pos..end {
+                let value = samples.next().unwrap_or(0.0);
+                lo = lo.min(value);
+                hi = hi.max(value);
+                sum += value.abs();
+            }
+            o.peaks.samples.push(hi);
+            o.peaks.samples.push(lo);
+            o.avgs.samples.push(sum / (end - pos) as f32);
+            pos = end;
         }
         false
     }
@@ -170,17 +220,29 @@ impl BlockReadManager {
             smooth_end: false,
         }
     }
+    pub fn kind(&self) -> ManagedChainType {
+        ManagedChainType::BlockRead
+    }
     pub fn start(&mut self, samples: Vec<f32>) {
         self.input = samples;
         self.done = false;
         self.smooth_end = false;
         self.base.cursor = 0
     }
+    /// Move the pending input into the chain.
+    ///
+    /// Returns `false` (instead of panicking) when the chain handle is missing
+    /// or its lock is poisoned; the input is moved rather than copied so the
+    /// audio path does not duplicate whole buffers.
     pub fn manage(&mut self) -> bool {
-        let b = self.base.block.as_ref().unwrap();
-        let mut x = b.write().unwrap();
+        let Some(block) = self.base.block.as_ref() else {
+            return false;
+        };
+        let Ok(mut x) = block.write() else {
+            return false;
+        };
         if !self.done {
-            x.samples = self.input.clone();
+            x.samples = std::mem::take(&mut self.input);
             self.done = true;
         }
         false
@@ -236,13 +298,26 @@ impl BlockWriteManager {
             write_len: None,
         }
     }
+    pub fn kind(&self) -> ManagedChainType {
+        ManagedChainType::BlockWrite
+    }
+    /// Copy the chain into `output`, honoring the requested length.
+    ///
+    /// `output` always has exactly `len` samples (a sample missing from an
+    /// inconsistent chain reads as silence) and keeps its capacity between
+    /// calls.
     pub fn manage(&mut self) -> bool {
-        let b = self.base.block.as_ref().unwrap().read().unwrap();
-        let len = self
-            .write_len
-            .unwrap_or_else(|| b.total_len())
-            .min(b.total_len());
-        self.output = (0..len).filter_map(|i| b.sample(i)).collect();
+        let Some(block) = self.base.block.as_ref() else {
+            return false;
+        };
+        let Ok(b) = block.read() else {
+            return false;
+        };
+        let total = b.total_len();
+        let len = self.write_len.unwrap_or(total).min(total);
+        self.output.clear();
+        self.output
+            .extend((0..len).map(|i| b.sample(i).unwrap_or(0.0)));
         self.done = true;
         false
     }
@@ -276,13 +351,18 @@ impl Preallocated for BlockWriteManager {
     fn recycle(&mut self) {
         self.base.recycle();
         self.output.clear();
-        self.done = false;
+        // A recycled instance must match `new_auto()`: no chain, nothing left
+        // to write, so `manage()` cannot act on a missing block.
+        self.done = true;
         self.write_len = None;
     }
 }
 
 pub struct HiPriManagedChain {
     pub base: ManagedChain,
+    /// Deferred-maintenance interval in cycles: [`Self::run_deferred`] runs the
+    /// maintenance when the countdown reaches this value, so `0` means every
+    /// call.
     pub trigger: usize,
 }
 impl HiPriManagedChain {
@@ -292,10 +372,29 @@ impl HiPriManagedChain {
             trigger,
         }
     }
-    pub fn trigger(&mut self) {
+    pub fn kind(&self) -> ManagedChainType {
+        ManagedChainType::HiPri
+    }
+    /// Run the deferred high-priority maintenance for this cycle.
+    ///
+    /// Returns `true` when the maintenance ran, so callers can tick this every
+    /// cycle without re-running it.
+    pub fn run_deferred(&mut self) -> bool {
+        if self.base.deferred_cycles < self.trigger {
+            self.base.deferred_cycles += 1;
+            return false;
+        }
+        self.base.deferred_cycles = 0;
         self.base.manage();
+        true
     }
 }
+
+/// Upper bound on recorded stripe boundaries: a striped loop never needs more
+/// boundaries than the block it marks, and the manager is pooled and reused for
+/// the lifetime of the session.
+pub const MAX_STRIPE_MARKERS: usize = 4096;
+
 pub struct StripeBlockManager {
     pub base: HiPriManagedChain,
     pub markers: Arc<Mutex<MarkerPoints>>,
@@ -307,15 +406,43 @@ impl StripeBlockManager {
             markers: Arc::new(Mutex::new(MarkerPoints::default())),
         }
     }
+    pub fn kind(&self) -> ManagedChainType {
+        ManagedChainType::StripeBlock
+    }
+    /// Record the stripe boundary at the current cursor and advance it.
+    ///
+    /// The marker list is bounded: managing the same offset again refreshes
+    /// that boundary, and once [`MAX_STRIPE_MARKERS`] boundaries exist the
+    /// oldest is dropped.
     pub fn manage(&mut self) {
-        let p = self.base.base.cursor;
-        let mut m = self.markers.lock().unwrap();
-        m.markers.push(TimeMarker { offset: p, data: 0 });
-        self.base.base.cursor = p + 1;
+        let cursor = self.base.base.cursor;
+        self.base.base.cursor = cursor + 1;
+        let mut markers = self
+            .markers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = markers
+            .markers
+            .iter_mut()
+            .find(|marker| marker.offset == cursor)
+        {
+            existing.data = 0;
+            return;
+        }
+        if markers.markers.len() >= MAX_STRIPE_MARKERS {
+            markers.markers.remove(0);
+        }
+        markers.markers.push(TimeMarker {
+            offset: cursor,
+            data: 0,
+        });
     }
 }
 
 pub struct BlockManager {
+    /// Slot table whose indices are stable handles: released slots are marked
+    /// [`ManagedChainStatus::Deleted`] and reused instead of shifting the
+    /// remaining entries.
     managers: Mutex<Vec<ManagedChainStatus>>,
 }
 impl Default for BlockManager {
@@ -329,21 +456,56 @@ impl BlockManager {
             managers: Mutex::new(Vec::new()),
         }
     }
+    /// Add a manager and return a stable handle to it.
     pub fn add(&self) -> usize {
-        let mut m = self.managers.lock().unwrap();
-        m.push(ManagedChainStatus::Running);
-        m.len() - 1
-    }
-    pub fn remove(&self, n: usize) {
-        if let Some(x) = self.managers.lock().unwrap().get_mut(n) {
-            *x = ManagedChainStatus::PendingDelete
+        let mut managers = self
+            .managers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match managers
+            .iter()
+            .position(|status| *status == ManagedChainStatus::Deleted)
+        {
+            Some(slot) => {
+                managers[slot] = ManagedChainStatus::Running;
+                slot
+            }
+            None => {
+                managers.push(ManagedChainStatus::Running);
+                managers.len() - 1
+            }
         }
     }
+    /// Mark the manager at `handle` for deletion.
+    pub fn remove(&self, handle: usize) {
+        if let Some(status) = self
+            .managers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_mut(handle)
+        {
+            *status = ManagedChainStatus::PendingDelete
+        }
+    }
+    /// Complete pending deletions. Handles stay valid across collection.
     pub fn collect(&self) {
+        let mut managers = self
+            .managers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for status in managers.iter_mut() {
+            if *status == ManagedChainStatus::PendingDelete {
+                *status = ManagedChainStatus::Deleted;
+            }
+        }
+    }
+    /// Status of the manager behind `handle`.
+    pub fn status(&self, handle: usize) -> Option<ManagedChainStatus> {
         self.managers
             .lock()
-            .unwrap()
-            .retain(|x| *x == ManagedChainStatus::Running)
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(handle)
+            .copied()
     }
 }
 

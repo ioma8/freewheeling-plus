@@ -5,12 +5,26 @@ use freewheeling_plus::macos_sdlmain::{LaunchArguments, run_macos};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+// Only the `smoke-test` build runs the packaged binary (see below).
+#[cfg(feature = "smoke-test")]
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+
+#[path = "support/scratch.rs"]
+mod scratch;
+
+use scratch::ScratchDir;
 
 fn strings(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
+
+/// Serializes the tests that change or depend on the process-global working
+/// directory.
+///
+/// `std::env::set_current_dir` affects the whole process, so a lock held by one
+/// test only helps if every cwd-sensitive test in this binary takes it.
+static CURRENT_DIR_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn cocoa_platform_has_headless_support_path_and_paired_lifecycle() {
@@ -42,17 +56,11 @@ fn sdlmain_filters_finder_launch_and_handles_bundle_parent() {
 
 #[test]
 fn sdlmain_changes_to_bundle_directory_before_handoff() {
-    static CURRENT_DIR_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     let _lock = CURRENT_DIR_LOCK
-        .get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap();
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let original = std::env::current_dir().unwrap();
-    let root = std::env::temp_dir().join(format!(
-        "freewheeling-plus-macos-{}-{}",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("test")
-    ));
+    let root = ScratchDir::new("macos-bundle-directory");
     let bundle = root.join("Fweelin.app/Contents/MacOS/Fweelin");
     fs::create_dir_all(bundle.parent().unwrap()).unwrap();
     let expected_directory = fs::canonicalize(bundle.parent().unwrap()).unwrap();
@@ -65,9 +73,11 @@ fn sdlmain_changes_to_bundle_directory_before_handoff() {
     .unwrap();
     assert_eq!(status, 23);
     std::env::set_current_dir(original).unwrap();
-    fs::remove_dir_all(root).unwrap();
 }
 
+// The harness only exists in a `smoke-test` build (Cargo.toml); CI runs the
+// test suite with that feature enabled.
+#[cfg(feature = "smoke-test")]
 #[test]
 fn compiled_binary_smoke_test_succeeds() {
     let binary = env!("CARGO_BIN_EXE_freewheeling-plus");

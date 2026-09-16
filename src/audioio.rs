@@ -5,7 +5,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
 
 pub type Sample = f32;
@@ -105,6 +105,15 @@ pub trait AudioBackend: Send {
     /// Transport state from the backend (JACK). Default impl returns not-rolling.
     fn transport_state(&self) -> TransportState {
         TransportState::default()
+    }
+
+    /// Whether this backend can be driven by an external transport at all.
+    ///
+    /// Backends without one (CPAL, CoreAudio) run on their internal clock and
+    /// are therefore the timebase master: `is_timebase_master` reports `true`
+    /// for them (docs/cpp-port-gap-analysis.md).
+    fn supports_transport(&self) -> bool {
+        false
     }
 
     /// Receive pending MIDI events from backends that integrate MIDI (JACK).
@@ -311,6 +320,19 @@ impl AudioBackend for AnyAudioBackend {
         }
     }
 
+    fn supports_transport(&self) -> bool {
+        match self {
+            AnyAudioBackend::Cpal(backend) => backend.supports_transport(),
+            #[cfg(all(
+                feature = "jack",
+                any(target_os = "linux", target_os = "macos", target_os = "windows")
+            ))]
+            AnyAudioBackend::Jack(backend) => backend.supports_transport(),
+            #[cfg(target_os = "macos")]
+            AnyAudioBackend::AudioUnit(backend) => backend.supports_transport(),
+        }
+    }
+
     fn receive_midi(&mut self) -> Option<crate::midiio::MidiPortMessage> {
         match self {
             AnyAudioBackend::Cpal(backend) => backend.receive_midi(),
@@ -359,6 +381,53 @@ impl AnyAudioBackend {
     }
 }
 
+/// Realtime-safe publication slot for the thread currently running the audio
+/// callback.
+///
+/// The audio thread never blocks here: it only performs a `try_lock` write
+/// until the id has been published.
+#[derive(Default)]
+struct CallbackThreadSlot {
+    published: AtomicBool,
+    thread: Mutex<Option<ThreadId>>,
+}
+
+impl CallbackThreadSlot {
+    /// Audio-thread side. Skips work once the id is published.
+    fn publish_from_callback(&self) {
+        if self.published.load(Ordering::Acquire) {
+            return;
+        }
+        if let Ok(mut thread) = self.thread.try_lock() {
+            *thread = Some(std::thread::current().id());
+            self.published.store(true, Ordering::Release);
+        }
+    }
+
+    /// Control-thread side, called once callbacks are quiesced.
+    fn clear(&self) {
+        self.published.store(false, Ordering::Release);
+        self.with_slot(|thread| *thread = None);
+    }
+
+    fn get(&self) -> Option<ThreadId> {
+        self.with_slot(|thread| *thread)
+    }
+
+    fn with_slot<R>(&self, update: impl FnOnce(&mut Option<ThreadId>) -> R) -> R {
+        match self.thread.lock() {
+            Ok(mut thread) => update(&mut thread),
+            Err(poisoned) => {
+                // The slot holds one `Copy` value, so a poisoned guard cannot
+                // publish torn state; clear the poison and carry on.
+                let mut thread = poisoned.into_inner();
+                self.thread.clear_poison();
+                update(&mut thread)
+            }
+        }
+    }
+}
+
 pub struct AudioIO<B: AudioBackend> {
     backend: B,
     sample_rate: AtomicU32,
@@ -367,7 +436,7 @@ pub struct AudioIO<B: AudioBackend> {
     sync_active: AtomicBool,
     timebase_master: AtomicBool,
     transport_roll: AtomicBool,
-    callback_thread: Arc<OnceLock<ThreadId>>,
+    callback_thread: Arc<CallbackThreadSlot>,
     active: bool,
 }
 
@@ -381,7 +450,7 @@ impl<B: AudioBackend> AudioIO<B> {
             sync_active: AtomicBool::new(false),
             timebase_master: AtomicBool::new(false),
             transport_roll: AtomicBool::new(false),
-            callback_thread: Arc::new(OnceLock::new()),
+            callback_thread: Arc::new(CallbackThreadSlot::default()),
             active: false,
         }
     }
@@ -405,14 +474,64 @@ impl<B: AudioBackend> AudioIO<B> {
     }
 
     fn activate_callback(&mut self, callback: AudioCallbackFn) -> Result<(), String> {
+        // A second activation would otherwise strand the running stream.
+        if self.active {
+            self.backend.close();
+            self.active = false;
+        }
+        self.callback_thread.clear();
         let callback_thread = Arc::clone(&self.callback_thread);
         let mut callback = callback;
-        self.backend.activate(Box::new(move |audio| {
-            let _ = callback_thread.set(std::thread::current().id());
-            callback(audio);
-        }))?;
+        // Publish the intended state before the call: a backend that starts
+        // its stream and then reports an error is still torn down.
         self.active = true;
+        if let Err(error) = self.backend.activate(Box::new(move |audio| {
+            callback_thread.publish_from_callback();
+            callback(audio);
+        })) {
+            self.backend.close();
+            self.active = false;
+            return Err(error);
+        }
+        self.refresh_transport();
         Ok(())
+    }
+
+    /// Refresh the cached transport diagnostics (`is_sync`,
+    /// `is_timebase_master`, `is_transport_rolling`, `get_position`) from the
+    /// backend. Call from the control thread, never from a callback.
+    pub fn refresh_transport(&mut self) {
+        let state = self.backend.transport_state();
+        let external_transport = self.backend.supports_transport();
+        self.transport_roll.store(state.rolling, Ordering::Release);
+        self.sync_active
+            .store(external_transport && state.rolling, Ordering::Release);
+        // Backends without an external transport clock the session themselves.
+        self.timebase_master
+            .store(!external_transport, Ordering::Release);
+        let mut position = self.position_guard();
+        position.frame = state.frame;
+        position.bar = state.bar;
+        position.beat = state.beat;
+        position.beats_per_minute = state.bpm;
+        position.beats_per_bar = state.beats_per_bar;
+        position.beat_type = state.beat_type;
+        position.frame_rate = self.get_srate();
+        position.valid = u32::from(state.rolling);
+    }
+
+    fn position_guard(&self) -> std::sync::MutexGuard<'_, JackPosition> {
+        match self.position.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                // A panicking writer may have left a torn snapshot. Publish an
+                // unknown position rather than partial frame/bar/beat data.
+                let mut guard = poisoned.into_inner();
+                *guard = JackPosition::default();
+                self.position.clear_poison();
+                guard
+            }
+        }
     }
 
     pub fn close(&mut self) {
@@ -420,6 +539,8 @@ impl<B: AudioBackend> AudioIO<B> {
             self.backend.close();
             self.active = false;
         }
+        self.callback_thread.clear();
+        self.refresh_transport();
     }
     pub fn getbufsz(&self) -> NFrames {
         self.buffer_size.load(Ordering::Acquire)
@@ -464,16 +585,29 @@ impl<B: AudioBackend> AudioIO<B> {
         if !self.active {
             return Err("audio backend is not active".to_string());
         }
-        let info = self.backend.recover()?;
+        let info = match self.backend.recover() {
+            Ok(info) => info,
+            Err(error) => {
+                // The backend may have torn the route down before failing, so
+                // callers must not keep believing the route is live.
+                self.backend.close();
+                self.active = false;
+                self.callback_thread.clear();
+                self.refresh_transport();
+                return Err(error);
+            }
+        };
         self.sample_rate.store(info.sample_rate, Ordering::Release);
         self.buffer_size.store(info.buffer_size, Ordering::Release);
+        self.callback_thread.clear();
+        self.refresh_transport();
         Ok(())
     }
     pub fn recovery_metrics(&self) -> AudioRecoveryMetrics {
         self.backend.recovery_metrics()
     }
     pub fn get_position(&self) -> JackPosition {
-        *self.position.lock().unwrap_or_else(|e| e.into_inner())
+        *self.position_guard()
     }
     pub fn is_sync(&self) -> bool {
         self.sync_active.load(Ordering::Acquire)
@@ -486,9 +620,12 @@ impl<B: AudioBackend> AudioIO<B> {
     }
     pub fn relocate_transport(&mut self, frame: NFrames) {
         self.backend.relocate(frame);
+        self.refresh_transport();
     }
+    /// Thread currently running the audio callback, or `None` when callbacks
+    /// are not running. Cleared by `close()` and `recover()`.
     pub fn callback_thread(&self) -> Option<ThreadId> {
-        self.callback_thread.get().copied()
+        self.callback_thread.get()
     }
 }
 
@@ -514,8 +651,12 @@ mod tests {
     struct Fake {
         info: BackendInfo,
         activated: bool,
+        closes: u32,
         relocated: Option<NFrames>,
         recoveries: u64,
+        fail_activate: bool,
+        transport: TransportState,
+        external_transport: bool,
     }
     impl AudioBackend for Fake {
         fn open(&mut self, _: &str) -> Result<BackendInfo, String> {
@@ -534,10 +675,16 @@ mod tests {
             };
             callback(&mut cb);
             assert_eq!(left, vec![2.0; 4]);
+            if self.fail_activate {
+                return Err("device unavailable".into());
+            }
             self.activated = true;
             Ok(())
         }
-        fn close(&mut self) {}
+        fn close(&mut self) {
+            self.closes += 1;
+            self.activated = false;
+        }
         fn relocate(&mut self, frame: NFrames) {
             self.relocated = Some(frame);
         }
@@ -554,6 +701,12 @@ mod tests {
                 failures: 0,
             }
         }
+        fn transport_state(&self) -> TransportState {
+            self.transport
+        }
+        fn supports_transport(&self) -> bool {
+            self.external_transport
+        }
     }
     struct Gain;
     impl AudioProcessor for Gain {
@@ -563,18 +716,24 @@ mod tests {
             }
         }
     }
-    #[test]
-    fn backend_owns_mutable_processor_without_a_mutex() {
-        let backend = Fake {
-            info: BackendInfo {
-                sample_rate: 48_000,
-                buffer_size: 4,
-            },
+    fn fake(info: BackendInfo) -> Fake {
+        Fake {
+            info,
             activated: false,
+            closes: 0,
             relocated: None,
             recoveries: 0,
-        };
-        let mut io = AudioIO::new(backend);
+            fail_activate: false,
+            transport: TransportState::default(),
+            external_transport: false,
+        }
+    }
+    #[test]
+    fn backend_owns_mutable_processor_without_a_mutex() {
+        let mut io = AudioIO::new(fake(BackendInfo {
+            sample_rate: 48_000,
+            buffer_size: 4,
+        }));
         io.open("test").unwrap();
         io.activate(Gain).unwrap();
         assert_eq!(io.get_srate(), 48_000);
@@ -584,5 +743,69 @@ mod tests {
         assert_eq!(io.get_srate(), 44_100);
         assert_eq!(io.getbufsz(), 8);
         assert_eq!(io.recovery_metrics().attempts, 1);
+    }
+    #[test]
+    fn failed_activation_and_close_release_the_stream() {
+        let mut io = AudioIO::new(fake(BackendInfo {
+            sample_rate: 48_000,
+            buffer_size: 4,
+        }));
+        io.open("test").unwrap();
+        io.activate(Gain).unwrap();
+        // A second activation must close the stream that is already running.
+        io.activate(Gain).unwrap();
+        assert_eq!(io.backend().closes, 1);
+        io.close();
+        assert_eq!(io.backend().closes, 2);
+        assert_eq!(io.callback_thread(), None);
+
+        let mut failing = fake(BackendInfo {
+            sample_rate: 48_000,
+            buffer_size: 4,
+        });
+        failing.fail_activate = true;
+        let mut io = AudioIO::new(failing);
+        io.open("test").unwrap();
+        assert_eq!(io.activate(Gain).unwrap_err(), "device unavailable");
+        // The backend started its stream before failing, so it must be closed.
+        assert_eq!(io.backend().closes, 1);
+        assert!(io.recover().is_err());
+    }
+    #[test]
+    fn transport_diagnostics_follow_the_backend() {
+        let mut backend = fake(BackendInfo {
+            sample_rate: 48_000,
+            buffer_size: 4,
+        });
+        backend.external_transport = true;
+        backend.transport = TransportState {
+            rolling: true,
+            frame: 9_600,
+            bar: 5,
+            beat: 2,
+            bpm: 128.0,
+            beats_per_bar: 4.0,
+            beat_type: 4,
+        };
+        let mut io = AudioIO::new(backend);
+        io.open("test").unwrap();
+        io.activate(Gain).unwrap();
+        assert!(io.is_transport_rolling());
+        assert!(io.is_sync());
+        assert!(!io.is_timebase_master());
+        let position = io.get_position();
+        assert_eq!((position.frame, position.bar, position.beat), (9_600, 5, 2));
+        assert_eq!(position.beats_per_minute, 128.0);
+
+        // A backend without an external transport clocks the session itself.
+        let mut io = AudioIO::new(fake(BackendInfo {
+            sample_rate: 48_000,
+            buffer_size: 4,
+        }));
+        io.open("test").unwrap();
+        io.activate(Gain).unwrap();
+        assert!(!io.is_transport_rolling());
+        assert!(!io.is_sync());
+        assert!(io.is_timebase_master());
     }
 }

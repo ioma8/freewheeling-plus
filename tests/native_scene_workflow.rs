@@ -10,20 +10,11 @@ use freewheeling_plus::native_dsp_graph::{
     LoopMode, RuntimeStatus, runtime_audio_processor_with_backend,
 };
 use std::fs;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-static NEXT: AtomicU64 = AtomicU64::new(0);
+#[path = "support/scratch.rs"]
+mod scratch;
 
-fn temp_root(name: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "freewheeling-native-scene-{name}-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir_all(&path).unwrap();
-    path
-}
+use scratch::ScratchDir;
 
 #[derive(Default)]
 struct Events {
@@ -83,8 +74,8 @@ fn scene() -> Scene {
 }
 
 #[test]
-fn native_scene_save_backup_import_queue_and_autosave_contract() {
-    let root = temp_root("persistence");
+fn native_scene_save_cycle_writes_file_and_autosaves_without_publishing_dsp_state() {
+    let root = ScratchDir::new("native-scene-persistence");
     let library = root.join("library");
     fs::create_dir_all(&library).unwrap();
     let path = library.join("scene-live.xml");
@@ -133,12 +124,16 @@ fn native_scene_save_backup_import_queue_and_autosave_contract() {
             .unwrap()
         ]
     );
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
+/// The save path must not overwrite an existing scene silently.
+///
+/// The backup copy and the DSP-visible effects of a save are covered by
+/// `native_scene_save_cycle_writes_file_and_autosaves_without_publishing_dsp_state`
+/// and `imported_scene_loop_transfer_reaches_dsp_and_publishes_state`.
 fn native_scene_save_is_create_new_and_preserves_existing_state() {
-    let root = temp_root("save");
+    let root = ScratchDir::new("native-scene-save");
     let path = root.join("scene.xml");
     let runtime = PersistenceRuntime::new(OsPersistenceFileSystem, Events::default());
     runtime.save_scene(&path, &scene()).unwrap();
@@ -146,7 +141,6 @@ fn native_scene_save_is_create_new_and_preserves_existing_state() {
     let error = runtime.save_scene(&path, &scene()).unwrap_err();
     assert!(error.contains("could not save scene"));
     assert_eq!(fs::read(&path).unwrap(), first);
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[derive(Default)]

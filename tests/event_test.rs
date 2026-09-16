@@ -375,7 +375,8 @@ fn test_event_parameter_metadata_for_core_events() {
         Some(EventParameter::with_max_index(
             "midichannel",
             freewheeling_plus::datatypes::CoreDataType::Int,
-            16
+            // MIDI channels are an index range (0..=15), not a count.
+            freewheeling_plus::event::MAX_MIDI_CHANNEL_INDEX
         ))
     );
     assert_eq!(midi_key.get_param(99), None);

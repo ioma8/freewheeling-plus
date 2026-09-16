@@ -1,0 +1,39 @@
+name: Set up Rust build environment
+description: >-
+  Install the system build dependencies a job needs and cache the cargo
+  registry and target trees against the lockfile, so a run reuses the
+  dependency build instead of recompiling the crate graph from scratch.
+
+inputs:
+  packages:
+    description: Packages to install with apt (space separated).
+    required: false
+    default: libasound2-dev libjack-jackd2-dev
+  cache-suffix:
+    description: >-
+      Extra cache-key component for jobs whose `target` tree is not
+      interchangeable with the default one (e.g. a different target triple).
+    required: false
+    default: default
+
+runs:
+  using: composite
+  steps:
+    - name: Install system dependencies
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y ${{ inputs.packages }}
+    - name: Cache cargo registry and target
+      uses: actions/cache@v6
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        # The lockfile and the toolchain decide the dependency builds; a stale
+        # entry is only ever a cache miss because cargo verifies fingerprints.
+        key: >-
+          ${{ runner.os }}-${{ inputs.cache-suffix }}-cargo-${{
+            hashFiles('Cargo.lock') }}-${{ hashFiles('rust-toolchain*') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ inputs.cache-suffix }}-cargo-${{ hashFiles('Cargo.lock') }}-
+          ${{ runner.os }}-${{ inputs.cache-suffix }}-cargo-

@@ -1,4 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <patchlist>
+<!-- NOTE: the combis below select programs on the channel a zone declares, so
+     a zone routed to channel 13 or 14 needs the instrument name to be
+     understood as "the same part played on another channel": the `<patch>`
+     declarations at the bottom of this file name the patches on channel 12,
+     and a program change is emitted on the zone's own channel. Match the
+     channel here to a declaration (or add one) when adding a combi.
+
+     (NO MOD): these patches and combis are the "no modulation" variants of the
+     horn/trumpet sounds. The synth's modulation wheel (CC1) must be at 0 before
+     one of them is selected: the patchlist cannot encode a controller value, so
+     this is a manual step and every `(NO MOD)` name below carries this marker
+     so the requirement is visible where the combi is chosen. -->
+<!-- (NO MOD): send CC1 = 0 before selecting this combi (see the note above). -->
 <combi name="Strings">
   <!-- Note overlap- several ranges map across -->
   <zone keyrange="12>55" channel="0"/>
@@ -51,39 +65,48 @@
 <patch channel="12" name="English Horn (NO MOD)" bank="0" program="69"/>
 <patch channel="12" name="Horn (NO MOD)" bank="32" program="9"/>
 
+<!-- (NO MOD) marker: see the file header; CC1 must be 0. -->
 <combi name="Brass (NO MOD)">
-<!-- Need to send CC1 value 0 -->
   <zone keyrange="33>55" channel="6"/>
   <zone keyrange="46>64" channel="4"/>
   <zone keyrange="55>76" channel="5"/>
   <zone keyrange="60>127" channel="7"/>
 </combi>
 
+<!-- (NO MOD) marker: see the file header; CC1 must be 0. -->
 <combi name="Trumpet/Trombone (NO MOD)">
   <zone keyrange="0>72" channel="12" bank="0" program="57"/>
   <zone keyrange="60>127" channel="13" bank="0" program="56"/>
 </combi>
 
+<!-- (NO MOD) marker: see the file header; CC1 must be 0. -->
 <combi name="Trumpet/Horns (NO MOD)">
   <zone keyrange="0>127" channel="12" bank="32" program="15"/>
   <zone keyrange="0>127" channel="13" bank="32" program="16"/>
 </combi>
 
+<!-- (NO MOD) marker: see the file header; CC1 must be 0. -->
 <combi name="Soft Bassoon/Horns (NO MOD)">
   <zone keyrange="0>127" channel="12" bank="32" program="17"/>
   <zone keyrange="0>127" channel="13" bank="32" program="16"/>
 </combi>
 
 <combi name="Strings/Piano Split">
-  <!-- Note overlap- several ranges map across -->
+  <!-- Note overlap- several ranges map across.
+       `midiport` is only spelled out for the LS piano zone: a zone without it
+       inherits the bank's configured port (1 by default), which is the same
+       destination, so the explicit value here is documentation rather than a
+       different route. Give the piano a distinct port if it should leave the
+       internal synth. -->
   <!-- Upper octaves- LS piano -->
   <zone keyrange="60>127" midiport="1" channel="0"/>
 
-  <!-- Lower octaves- strings -->
+  <!-- Lower octaves- strings. Every layer stays below the 60 split point:
+       keys 60-67 belong to the LS piano above, so a zone that reached past 59
+       would layer strings under the piano (the *Layer* combis do that). -->
   <zone keyrange="12>55" channel="0"/>
-  <zone keyrange="46>64" channel="1"/>
-  <zone keyrange="55>67" channel="2"/>
-  <!-- <zone keyrange="60>67" channel="3"/> -->
+  <zone keyrange="46>59" channel="1"/>
+  <zone keyrange="55>59" channel="2"/>
 </combi>
 
 <combi name="Strings/Sordino Split">

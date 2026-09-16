@@ -35,6 +35,11 @@ pub struct MidiPortMessage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Where a patch routes its program change.
+///
+/// `port` uses the same one-based convention as
+/// [`MidiIo::echo_port`]/`EchoRouting::midi_port`: `0` means the internal
+/// synth (no external output), `1` is the first physical MIDI output.
 pub struct PatchMidiRoute {
     pub port: u8,
     pub channel: u8,
@@ -163,8 +168,10 @@ pub fn encode(message: &MidiMessage) -> Vec<u8> {
         }
         MidiMessage::PitchBend { channel, value } => vec![
             0xe0 | (*channel).min(15),
-            (*value as u8).min(127),
-            ((*value >> 8) as u8).min(127),
+            // Mask rather than saturate: `decode` reconstructs
+            // `lsb | msb << 8`, so a saturated low byte would change the value.
+            (*value & 0x7f) as u8,
+            ((*value >> 8) & 0x7f) as u8,
         ],
         MidiMessage::TimeCodeQuarterFrame(v) => vec![0xf1, v & 127],
         MidiMessage::SongPosition(v) => vec![0xf2, (v & 127) as u8, ((v >> 7) & 127) as u8],
@@ -210,6 +217,9 @@ pub struct MidiIo<B: MidiBackend> {
     pub note_port: [Option<u8>; 128],
     pub note_patch: [Option<String>; 128],
     pub patch_routes: HashMap<String, PatchMidiRoute>,
+    /// Reason the worker stopped, set when the backend failed. `None` while
+    /// the worker is running or after a deliberate shutdown.
+    fatal_error: Arc<Mutex<Option<String>>>,
 }
 impl<B: MidiBackend> MidiIo<B> {
     pub fn new(backend: B) -> Self {
@@ -230,7 +240,28 @@ impl<B: MidiBackend> MidiIo<B> {
             note_port: [None; 128],
             note_patch: [const { None }; 128],
             patch_routes: HashMap::new(),
+            fatal_error: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Why the worker stopped, or `None` while it is running (or after a
+    /// deliberate shutdown).
+    ///
+    /// A failure here means every later `send`/`output_clock` call fails and
+    /// no input is delivered, so callers must surface it instead of assuming
+    /// the configured ports are live.
+    pub fn fatal_error(&self) -> Option<String> {
+        self.fatal_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Whether the worker is still running.
+    pub fn is_alive(&self) -> bool {
+        self.worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
     }
     pub fn set_sink(&mut self, sink: Arc<dyn MidiEventSink>) {
         self.sink = Some(sink);
@@ -245,26 +276,44 @@ impl<B: MidiBackend> MidiIo<B> {
             .open(inputs, outputs)?;
         self.inputs = inputs;
         self.outputs = outputs;
+        *self
+            .fatal_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         let (tx, rx) = mpsc::channel();
         let backend = Arc::clone(&self.backend);
         let sink = self.sink.clone();
+        let failure = Arc::clone(&self.fatal_error);
         self.stop = Some(tx);
         let worker = thread::Builder::new()
             .name("freewheeling-midi".into())
             .spawn(move || {
                 while rx.try_recv().is_err() {
-                    match backend
-                        .lock()
-                        .map_err(|_| ())
-                        .and_then(|mut b| b.receive().map_err(|_| ()))
-                    {
+                    // The guard is bound before the match: it must be released
+                    // before the sink callback (which may call back into
+                    // `MidiIo` and would self-deadlock on a non-reentrant
+                    // mutex) and before the poll sleep.
+                    let received = match backend.lock() {
+                        Ok(mut backend) => backend.receive().map_err(|error| error.to_string()),
+                        Err(_) => Err("MIDI backend lock poisoned".to_string()),
+                    };
+                    match received {
                         Ok(Some(event)) => {
                             if let Some(s) = &sink {
                                 s.midi_event(event)
                             }
                         }
                         Ok(None) => thread::park_timeout(std::time::Duration::from_millis(1)),
-                        Err(()) => break,
+                        Err(error) => {
+                            // The worker is stopping for good: record why so
+                            // `is_alive`/`fatal_error` cannot report a live
+                            // configuration that silently sends nothing.
+                            let mut slot = failure
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            *slot = Some(error);
+                            break;
+                        }
                     }
                 }
                 if let Ok(mut b) = backend.lock() {
@@ -442,6 +491,7 @@ impl<B: MidiBackend> MidiIo<B> {
         }
         self.send(port, routed)
     }
+    /// Stop the worker and release the configured ports.
     pub fn shutdown(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
@@ -451,7 +501,16 @@ impl<B: MidiBackend> MidiIo<B> {
         }
         self.inputs = 0;
         self.outputs = 0;
+        *self
+            .fatal_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
+    /// Poll the backend directly.
+    ///
+    /// Must not be used while the worker started by [`Self::activate`] is
+    /// running: both consumers drain the same backend, so messages would be
+    /// split between them nondeterministically. Use the sink callback instead.
     pub fn receive(&mut self) -> Option<MidiPortMessage> {
         let msg = {
             let mut backend = self.backend.lock().ok()?;
@@ -460,10 +519,16 @@ impl<B: MidiBackend> MidiIo<B> {
         match &msg.message {
             MidiMessage::NoteOn { channel, note, .. } => {
                 self.held_notes.push((*note, *channel));
-                self.note_port[*note as usize] = Some(msg.port as u8);
+                // A port beyond 255 cannot be represented in the legacy
+                // `note_port` table; it is reported as unknown instead of
+                // wrapping onto another port.
+                self.note_port[*note as usize] = u8::try_from(msg.port).ok();
             }
-            MidiMessage::NoteOff { note, .. } => {
-                self.held_notes.retain(|(n, _)| *n != *note);
+            MidiMessage::NoteOff { note, channel, .. } => {
+                // A note held on several channels needs one entry per channel:
+                // retaining by note alone would drop the other channels'
+                // entries and leave them sounding.
+                self.held_notes.retain(|(n, c)| *n != *note || *c != *channel);
                 self.note_port[*note as usize] = None;
             }
             _ => {}
@@ -516,8 +581,15 @@ impl<B: MidiBackend> MidiIo<B> {
     pub fn apply_patch_route(&mut self, patch_id: &str) -> Result<(), String> {
         let route = self.patch_routes.get(patch_id).cloned();
         if let Some(route) = route {
+            // Convert the one-based patch port to an output index; port 0 is
+            // the internal synth, which the caller has already programmed, so
+            // there is nothing to send (and it must never reach the first
+            // external output).
+            let Some(port) = route.port.checked_sub(1) else {
+                return Ok(());
+            };
             self.send_bank_program(
-                route.port as usize,
+                port as usize,
                 route.channel,
                 route.bank,
                 route.program,

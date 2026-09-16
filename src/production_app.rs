@@ -51,6 +51,12 @@ impl<A: NativeComponentAdapter> NativeComponents<A> {
     pub fn adapter(&self) -> &A {
         &self.adapter
     }
+    /// Mutable adapter access.
+    ///
+    /// The open/closed bookkeeping lives in this type, so never call the
+    /// adapter's `start_*`/`close_*`/`shutdown` through this accessor: a
+    /// subsystem started that way would never be closed, and one closed that
+    /// way would be closed again by [`Components::shutdown`].
     pub fn adapter_mut(&mut self) -> &mut A {
         &mut self.adapter
     }
@@ -63,12 +69,14 @@ impl<A: NativeComponentAdapter> Components for NativeComponents<A> {
         Ok(())
     }
     fn start_interfaces(&mut self) -> Result<(), String> {
-        self.adapter.start_interfaces()?;
+        // Record the subsystems before the adapter call: the adapter may start
+        // some interfaces and then fail, and `close_*` is documented as
+        // idempotent, so the flags must not hide a partially started graph.
         self.video_open = true;
         self.input_open = true;
         self.midi_open = true;
         self.audio_open = true;
-        Ok(())
+        self.adapter.start_interfaces()
     }
     fn next_event(&mut self) -> Result<Option<CoreEvent>, String> {
         self.adapter.next_event()
@@ -156,8 +164,9 @@ impl<C: StartupConfig, S: StartupServices, A: NativeComponentAdapter> Production
     /// Set up, run the main-thread event loop, and always perform clean
     /// shutdown. Startup errors retain their failing phase from `core_startup`.
     pub fn run(&mut self) -> Result<(), String> {
-        self.core.setup()?;
-        let result = self.core.go();
+        // Shutdown runs on every path, including a failed setup: the promise
+        // must not depend on `Core::shutdown` happening to be a no-op there.
+        let result = self.core.setup().and_then(|()| self.core.go());
         self.core.shutdown();
         result
     }
@@ -209,6 +218,66 @@ mod tests {
         fn restore_snapshot(&mut self, _: &Snapshot) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn a_partially_started_interface_set_is_still_closed() {
+        struct Failing {
+            calls: Arc<Mutex<Vec<&'static str>>>,
+        }
+        impl NativeComponentAdapter for Failing {
+            fn start_session(&mut self) -> Result<(), String> {
+                Ok(())
+            }
+            fn start_interfaces(&mut self) -> Result<(), String> {
+                // Video/input were started, then MIDI setup failed.
+                Err("no MIDI".into())
+            }
+            fn next_event(&mut self) -> Result<Option<CoreEvent>, String> {
+                Ok(None)
+            }
+            fn set_streaming(&mut self, _: bool, _: u64) -> Result<(), String> {
+                Ok(())
+            }
+            fn stream_state(&self) -> StreamState {
+                StreamState::Stopped
+            }
+            fn stream_bytes(&self) -> u64 {
+                0
+            }
+            fn close_video(&mut self) {
+                self.calls.lock().unwrap().push("video");
+            }
+            fn close_sdl(&mut self) {
+                self.calls.lock().unwrap().push("sdl");
+            }
+            fn close_midi(&mut self) {
+                self.calls.lock().unwrap().push("midi");
+            }
+            fn close_audio(&mut self) {
+                self.calls.lock().unwrap().push("audio");
+            }
+            fn shutdown(&mut self) {
+                self.calls.lock().unwrap().push("shutdown");
+            }
+            fn snapshot_loops(&self) -> Vec<LoopSnapshot> {
+                Vec::new()
+            }
+            fn restore_snapshot(&mut self, _: &Snapshot) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut components = NativeComponents::new(Failing {
+            calls: Arc::clone(&calls),
+        });
+        assert!(components.start_interfaces().is_err());
+        components.shutdown();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["video", "sdl", "midi", "audio"]
+        );
     }
 
     #[test]

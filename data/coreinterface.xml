@@ -392,8 +392,10 @@
     <binding input="key" conditions="key=KPperiod and keydown=1"
      output="adjust-midi-transpose" parameters="adjust=12"/>
 
-    <!-- HELP: 0/shift-0: Set/reset tuning from MIDI pitchbender -->
-    <binding input="key" conditions="key=openparen and keydown=1"
+    <!-- HELP: 0/shift-0: Set/reset tuning from MIDI pitchbender.
+         shift-0 produces the ')' keysym (closeparen), not '(' (openparen),
+         which is shift-9. -->
+    <binding input="key" conditions="key=closeparen and keydown=1"
      output="set-midi-tuning" parameters="tuning=0"/>
     <binding input="key" conditions="key=zero and keydown=1"
      output="set-midi-tuning" parameters="tuning=SYSTEM_cur_pitchbend"/>
@@ -454,41 +456,62 @@
      output2="set-variable" parameters2="var=VAR_mobile_clear and value=0"/>
     <!-- Armed: tapping a mobile grid loop erases it, then disarms. -->
     <binding input="loop-clicked"
-     conditions="loopid=97>114 and button=1 and down=1 and VAR_mobile_clear=1"
+     conditions="loopid=97>108 and button=1 and down=1 and VAR_mobile_clear=1"
      output1="erase-loop" parameters1="loopid=loopid"
      output2="set-variable" parameters2="var=VAR_mobile_clear and value=0"/>
     <!-- PULSE: create/select the pulse. -->
     <binding input="loop-clicked"
      conditions="loopid=130 and button=1 and down=1 and VAR_mobile_clear=0"
      output="select-pulse" parameters="pulse=0"/>
-    <!-- REC: start/stop stream recording to disk. -->
+    <!-- REC: start/stop stream recording to disk.
+         The non-grid buttons also disarm the erase latch: it has no visible
+         indicator outside the mobile layout, so leaving the screen armed would
+         let a later loop tap erase a loop unintentionally. -->
     <binding input="loop-clicked"
      conditions="loopid=132 and button=1 and down=1"
-     output="toggle-disk-output"/>
+     output1="toggle-disk-output"
+     output2="set-variable" parameters2="var=VAR_mobile_clear and value=0"/>
     <!-- SAVE: save the current scene of all loops. -->
     <binding input="loop-clicked"
      conditions="loopid=133 and button=1 and down=1"
-     output="save-current-scene"/>
+     output1="save-current-scene"
+     output2="set-variable" parameters2="var=VAR_mobile_clear and value=0"/>
     <!-- LOAD: open the saved-sessions list (the scene browser display).
          Tapping a row loads that session; tapping outside dismisses it. -->
     <binding input="loop-clicked"
      conditions="loopid=134 and button=1 and down=1"
-     output="video-show-display"
-     parameters="interfaceid=0 and displayid=DISPLAY_browser_scene and show=1"/>
+     output1="video-show-display"
+     parameters1="interfaceid=0 and displayid=DISPLAY_browser_scene and show=1"
+     output2="set-variable" parameters2="var=VAR_mobile_clear and value=0"/>
 
-    <!-- Mobile touch gestures (button codes 2/6 are unreachable on desktop).
+    <!-- Mobile touch gestures, gated on the selected interface:
+         `SYSTEM_cur_switchable_interface` (published by the runtime, desktop
+         default 1 = PC keyboard) must equal the id mobile.xml captures from its
+         own `start-interface` event. Same convention as the BCF-2000 keyboard
+         bindings, so neither file hardcodes an interface id.
+
+         Button 2 is SDL's middle button, so without the gate a middle-click on
+         a loop starts an overdub recording (destructive) and its release
+         triggers the loop again. Button 6 is unused by SDL2, but the gate
+         keeps both gestures in one place.
+
+         The gate cannot key off a flag set by mobile.xml's `start-interface`
+         binding: that binding runs for every loaded interface on every
+         platform (`FloConfig::StartInterfaces` parity), so it would open the
+         gate on the desktop too.
+
          Long-press on a cell = overdub (hold starts it, release stops it).
          Double-tap on a cell = mute/unmute. -->
     <binding input="loop-clicked"
-     conditions="button=2 and down=1"
+     conditions="SYSTEM_cur_switchable_interface=VAR_mobile_interfaceid and button=2 and down=1"
      output="trigger-loop"
      parameters="overdub=1 and overdubfeedback=VAR_overdubfeedback and loopid=loopid and vol=1.0"/>
     <binding input="loop-clicked"
-     conditions="button=2 and down=0"
+     conditions="SYSTEM_cur_switchable_interface=VAR_mobile_interfaceid and button=2 and down=0"
      output="trigger-loop"
      parameters="overdub=0 and loopid=loopid and vol=1.0"/>
     <binding input="loop-clicked"
-     conditions="button=6 and down=1"
+     conditions="SYSTEM_cur_switchable_interface=VAR_mobile_interfaceid and button=6 and down=1"
      output="mute-loop" parameters="loopid=loopid"/>
 
     <!-- HELP: trigger/click: Toggle Record-Play-Off for loop -->

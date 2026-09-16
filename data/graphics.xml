@@ -24,15 +24,19 @@
      Layouts do not define how loops are captured and triggered- only
      how they look onscreen. -->
 
-<!-- Screen resolution. This must be set first! -->
-  <var resolution="640,480"/>
+<!-- Screen resolution and video update delay. Both are declared on the
+     first <var> element: the loader reads `resolution` and `videodelay` from
+     the first one it finds, so a separate element for the delay would be
+     ignored. Resolution must be set first (it sizes the rest of the layout).
 
-<!-- Video update delay (ms). Delay for this many milliseconds between
-     video draws. On a slow system you will want a higher number to conserve
-     CPU. -->
-  <var videodelay="40"/>
+     videodelay is the delay in milliseconds between video draws, clamped by
+     the loader to 1..=1000: 0 would spin the render loop and saturate a core,
+     while a value above a second makes the UI look frozen. Raise it on a slow
+     system to conserve CPU. -->
+  <var resolution="640,480" videodelay="40"/>
 
-<!-- Fonts to load -
+<!-- Fonts to load. `file` is resolved relative to the data directory
+     (`data/`), so these paths are relative to it as well.
 
      name="main" is the main font for most onscreen text displays
      name="help" is the font for help panel
@@ -40,12 +44,13 @@
      name="tiny" is the font for synthedit and looptray
 
      FreeWheeling includes Bitstream Vera fonts by default.
-     Any custom font files specified below should be relative to /usr/share/fonts/ -->
+    Any custom font files specified below are resolved against the data
+    directory (the directory of this file), not a system font path. -->
 
-  <font name="main"  file="truetype/ttf-bitstream-vera/VeraBd.ttf" size="20" />
-  <font name="help"  file="truetype/ttf-bitstream-vera/Vera.ttf"   size="16" />
-  <font name="small" file="truetype/ttf-bitstream-vera/VeraBd.ttf" size="14" />
-  <font name="tiny"  file="truetype/ttf-bitstream-vera/Vera.ttf"   size="10" />
+  <font name="main"  file="fonts/truetype/ttf-bitstream-vera/VeraBd.ttf" size="20" />
+  <font name="help"  file="fonts/truetype/ttf-bitstream-vera/Vera.ttf"   size="16" />
+  <font name="small" file="fonts/truetype/ttf-bitstream-vera/VeraBd.ttf" size="14" />
+  <font name="tiny"  file="fonts/truetype/ttf-bitstream-vera/Vera.ttf"   size="10" />
 
 <!-- All positions on screen follow a coordinate system with (0,0) at the 
      top left and (1,1) at the bottom right of the screen.

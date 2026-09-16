@@ -4,14 +4,19 @@
     android:versionCode="16777472"
     android:versionName="0.1.0">
 
+    <!-- API 34 (Android 14) is required for the AAudio/NDK audio path this
+         port uses; lowering it needs a compatibility fallback for capture. -->
     <uses-sdk android:minSdkVersion="34" android:targetSdkVersion="34" />
 
     <!-- The live-looper records through the microphone. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- OSC transmission opens a UDP socket. -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- Stream recordings are written to the shared Documents folder. -->
-    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <!-- Stream recordings go to getExternalFilesDir()/MediaStore (scoped
+         storage), which needs no permission. MANAGE_EXTERNAL_STORAGE would
+         grant all-files access, needs a special settings flow that
+         requestPermissions cannot perform, and is restricted by Play policy
+         (only file managers and backup apps qualify), so it is not declared. -->
 
     <uses-feature android:glEsVersion="0x00020000" />
     <uses-feature
@@ -33,17 +38,23 @@
     <application
         android:label="FreeWheeling"
         android:allowBackup="false"
-        android:debuggable="true"
+        android:debuggable="false"
         android:hardwareAccelerated="true"
         android:extractNativeLibs="false"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
 
         <activity
             android:name="org.freewheeling.freewheeling_plus.FreeWheelingActivity"
-            android:alwaysRetainTaskState="true"
+            android:alwaysRetainTaskState="false"
             android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
             android:launchMode="singleInstance"
             android:exported="true">
+            <!-- `singleInstance` plus the broad `configChanges` list is
+                 deliberate: the whole UI is drawn by SDL, so the activity must
+                 keep one instance and never be recreated on rotation, locale
+                 or screen-size changes (which would tear the audio engine
+                 down). `alwaysRetainTaskState="false"` still lets Android
+                 discard the task under memory pressure. -->
 
             <meta-data
                 android:name="android.app.lib_name"
@@ -53,9 +64,12 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <intent-filter>
-                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
-            </intent-filter>
+            <!-- No USB_DEVICE_ATTACHED intent-filter: it needs a matching
+                 @xml/device_filter resource for the system to associate a
+                 device with this activity, and nothing in the app handles the
+                 intent. An exported activity that accepts arbitrary attach
+                 intents can also be started by any other app. USB MIDI is
+                 handled by the native MIDI stack instead. -->
         </activity>
     </application>
 </manifest>

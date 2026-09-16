@@ -8,6 +8,11 @@ pub type NFrames = u32;
 
 const MAX_DVOL: f32 = 1.5;
 const DCOFS_MINIMUM_SAMPLE_COUNT: u64 = 10_000;
+/// Running sample count at which the DC accumulators are halved. At 48 kHz
+/// this is about six hours of continuous input; beyond it the f32 running sum
+/// starts losing low-order bits, so sum and count are scaled together (their
+/// ratio, and therefore the DC estimate, is unchanged).
+const DCOFS_RESCALE_SAMPLE_COUNT: u64 = 1 << 30;
 const DCOFS_LOWPASS_COEFF: f32 = 0.99;
 const DCOFS_ONEMINUS_LOWPASS_COEFF: f32 = 0.01;
 
@@ -68,13 +73,55 @@ impl InputSettings {
             }
         }
     }
+    /// Copy every field from `source`.
+    ///
+    /// Returns `false` when the two sides disagree on the number of inputs or
+    /// when `source`'s parallel vectors have different lengths: cloning such a
+    /// source would leave this object internally inconsistent and index
+    /// out of bounds in the audio path.
     pub fn copy_from(&mut self, source: &Self) -> bool {
-        if self.selected.len() != source.selected.len() {
+        if self.selected.len() != source.selected.len() || !source.lengths_are_consistent() {
             return false;
         }
         self.clone_from(source);
         true
     }
+
+    /// Whether every parallel per-input vector has the same length.
+    pub fn lengths_are_consistent(&self) -> bool {
+        let inputs = self.selected.len();
+        self.input_volumes.len() == inputs
+            && self.delta_input_volumes.len() == inputs
+            && self.input_peaks.len() == inputs
+            && self.input_peak_times.len() == inputs
+            && self.input_counts.len() == inputs
+            && self.input_sums.iter().all(|sums| sums.len() == inputs)
+            && self.input_averages.iter().all(|avg| avg.len() == inputs)
+    }
+}
+
+/// Half the DC accumulators of input `i` once they pass
+/// [`DCOFS_RESCALE_SAMPLE_COUNT`].
+///
+/// `count` and `peak_time` share one scale, so both (and every other count in
+/// the same window) are scaled together to keep the peak-hold window and the
+/// DC ratio consistent.
+fn rescale_dc_counters(
+    sums: &mut [Vec<Sample>; 2],
+    count: &mut u64,
+    peak_time: &mut u64,
+    input: usize,
+) {
+    if *count < DCOFS_RESCALE_SAMPLE_COUNT {
+        return;
+    }
+    for channel in sums.iter_mut() {
+        if let Some(sum) = channel.get_mut(input) {
+            *sum *= 0.5;
+        }
+    }
+    *count /= 2;
+    *peak_time /= 2;
 }
 
 #[derive(Clone, Debug)]
@@ -128,6 +175,13 @@ impl AudioBuffers {
     pub fn output(&self, n: usize, channel: usize) -> Option<&[Sample]> {
         self.outputs.get(channel)?.get(n)?.as_deref()
     }
+    /// Resize every populated input and output buffer to `len` frames.
+    ///
+    /// Input slots are `Arc`-shared so the C++ input-source aliasing survives
+    /// in safe Rust, which makes this copy-on-write: `Arc::make_mut` clones a
+    /// buffer that is still shared and resizes the clone, so a resized input
+    /// stops aliasing the storage it was constructed from. Output slots are
+    /// independently owned and are resized in place.
     pub fn resize(&mut self, len: usize) {
         for channel in &mut self.inputs {
             for buffer in channel.iter_mut().flatten() {
@@ -140,14 +194,30 @@ impl AudioBuffers {
             }
         }
     }
-    pub fn set_input(&mut self, channel: usize, n: usize, data: Vec<Sample>) {
-        if let Some(slot) = self.inputs.get_mut(channel).and_then(|c| c.get_mut(n)) {
-            *slot = Some(Arc::new(data));
+    /// Store `data` as input slot `n` of `channel`.
+    ///
+    /// Returns `false` when `channel` or `n` is out of range, so callers can
+    /// tell an ignored write from a successful one.
+    pub fn set_input(&mut self, channel: usize, n: usize, data: Vec<Sample>) -> bool {
+        match self.inputs.get_mut(channel).and_then(|c| c.get_mut(n)) {
+            Some(slot) => {
+                *slot = Some(Arc::new(data));
+                true
+            }
+            None => false,
         }
     }
-    pub fn set_output(&mut self, channel: usize, n: usize, data: Vec<Sample>) {
-        if let Some(slot) = self.outputs.get_mut(channel).and_then(|c| c.get_mut(n)) {
-            *slot = Some(data);
+    /// Store `data` as output slot `n` of `channel`.
+    ///
+    /// Returns `false` when `channel` or `n` is out of range, so callers can
+    /// tell an ignored write from a successful one.
+    pub fn set_output(&mut self, channel: usize, n: usize, data: Vec<Sample>) -> bool {
+        match self.outputs.get_mut(channel).and_then(|c| c.get_mut(n)) {
+            Some(slot) => {
+                *slot = Some(data);
+                true
+            }
+            None => false,
         }
     }
     pub fn is_stereo_input<C: AudioBufferConfig>(&self, c: &C, n: usize) -> bool {
@@ -171,15 +241,36 @@ impl AudioBuffers {
     ) {
         let len = len as usize;
         if dest.is_empty() || dest[0].len() < len {
+            // A frame-count mismatch cannot be mixed: silence every channel
+            // instead of leaving the previous block's samples in place.
+            for channel in dest.iter_mut() {
+                channel.fill(0.0);
+            }
             return;
         }
         let stereo = dest.len() > 1 && dest[1].len() >= len;
-        dest[0][..len].fill(0.0);
-        if stereo {
-            dest[1][..len].fill(0.0);
+        for channel in dest.iter_mut() {
+            // A right channel that is too short for this block is cleared so
+            // the stale samples of the previous block cannot be replayed.
+            let frames = channel.len().min(len);
+            channel[..frames].fill(0.0);
         }
         let hold = config.sample_rate() as u64;
-        for i in 0..self.num_inputs().min(settings.selected.len()) {
+        // `InputSettings` fields are public and can be mutated independently,
+        // so bound the loop by the shortest parallel vector: a skewed length
+        // skips the input instead of panicking on the audio path.
+        let inputs = self
+            .num_inputs()
+            .min(settings.selected.len())
+            .min(settings.input_volumes.len())
+            .min(settings.input_counts.len())
+            .min(settings.input_peak_times.len())
+            .min(settings.input_peaks.len())
+            .min(settings.input_sums[0].len())
+            .min(settings.input_sums[1].len())
+            .min(settings.input_averages[0].len())
+            .min(settings.input_averages[1].len());
+        for i in 0..inputs {
             if !settings.selected[i] {
                 continue;
             }
@@ -189,10 +280,10 @@ impl AudioBuffers {
             if in0.len() < len {
                 continue;
             }
-            let in1 = self.inputs[1][i]
-                .as_ref()
-                .filter(|b| b.len() >= len)
-                .unwrap_or(in0);
+            // A right channel that is absent or shorter than the block cannot
+            // be mixed: falling back to `in0` would duplicate the left channel
+            // into the right output, silently changing the stereo image.
+            let in1 = self.inputs[1][i].as_ref().filter(|b| b.len() >= len);
             let vol = settings.input_volumes[i] * input_vol;
             let mut count = settings.input_counts[i];
             let mut peak_time = settings.input_peak_times[i];
@@ -201,6 +292,10 @@ impl AudioBuffers {
             } else {
                 settings.input_peaks[i]
             };
+            // Hoisted out of the per-sample loop: the DC estimate of this
+            // buffer is read on every frame and updated once per buffer.
+            let average = settings.input_averages[0][i];
+            let mut sum = settings.input_sums[0][i];
             for k in 0..len {
                 let s = in0[k];
                 if compute_stats {
@@ -210,24 +305,26 @@ impl AudioBuffers {
                         peak_time = count;
                     }
                     count += 1;
-                    settings.input_sums[0][i] += s;
+                    sum += s;
                 }
-                dest[0][k] += (s - settings.input_averages[0][i]) * vol;
+                dest[0][k] += (s - average) * vol;
             }
             if compute_stats {
                 settings.input_counts[i] = count;
                 settings.input_peak_times[i] = peak_time;
                 settings.input_peaks[i] = peak;
+                settings.input_sums[0][i] = sum;
                 if count > DCOFS_MINIMUM_SAMPLE_COUNT {
-                    settings.input_averages[0][i] = DCOFS_LOWPASS_COEFF
-                        * settings.input_averages[0][i]
-                        + DCOFS_ONEMINUS_LOWPASS_COEFF * settings.input_sums[0][i] / count as f32;
+                    settings.input_averages[0][i] = DCOFS_LOWPASS_COEFF * average
+                        + DCOFS_ONEMINUS_LOWPASS_COEFF * sum / count as f32;
                 }
             }
-            if stereo {
+            if let Some(in1) = in1.filter(|_| stereo) {
+                let average = settings.input_averages[1][i];
+                let mut sum = settings.input_sums[1][i];
                 for k in 0..len {
                     let s = in1[k];
-                    dest[1][k] += (s - settings.input_averages[1][i]) * vol;
+                    dest[1][k] += (s - average) * vol;
                     if compute_stats {
                         // C++ keeps one linked per-input peak meter: the
                         // right channel may raise the same peak/time as the
@@ -238,19 +335,26 @@ impl AudioBuffers {
                             peak = abs;
                             peak_time = count;
                         }
-                        settings.input_sums[1][i] += s;
+                        sum += s;
                     }
                 }
                 if compute_stats {
                     settings.input_peaks[i] = peak;
                     settings.input_peak_times[i] = peak_time;
+                    settings.input_sums[1][i] = sum;
                     if count > DCOFS_MINIMUM_SAMPLE_COUNT {
-                        settings.input_averages[1][i] = DCOFS_LOWPASS_COEFF
-                            * settings.input_averages[1][i]
-                            + DCOFS_ONEMINUS_LOWPASS_COEFF * settings.input_sums[1][i]
-                                / count as f32;
+                        settings.input_averages[1][i] = DCOFS_LOWPASS_COEFF * average
+                            + DCOFS_ONEMINUS_LOWPASS_COEFF * sum / count as f32;
                     }
                 }
+            }
+            if compute_stats {
+                rescale_dc_counters(
+                    &mut settings.input_sums,
+                    &mut settings.input_counts[i],
+                    &mut settings.input_peak_times[i],
+                    i,
+                );
             }
         }
     }
@@ -293,6 +397,68 @@ mod tests {
         assert_eq!(right, [0.125, 0.25]);
         assert_eq!(settings.input_counts[0], 2);
         assert_eq!(settings.input_peaks[0], 1.0);
+    }
+
+    #[test]
+    fn a_short_destination_is_silenced_instead_of_replaying_stale_samples() {
+        let mut buffers = AudioBuffers::new(1, 0, 1);
+        assert!(buffers.set_input(0, 0, vec![1.0, 1.0]));
+        let mut settings = InputSettings::new(1);
+        let mut left = vec![9.0; 2];
+        let mut right = vec![9.0; 1];
+        let mut dest: [&mut [Sample]; 2] = [&mut left, &mut right];
+        buffers.mix_inputs(2, &mut dest, &mut settings, 1.0, true, &Config);
+        assert_eq!(left, vec![1.0, 1.0]);
+        assert_eq!(right, vec![0.0]);
+    }
+
+    #[test]
+    fn skewed_parallel_vectors_skip_inputs_instead_of_panicking() {
+        let mut buffers = AudioBuffers::new(2, 0, 1);
+        assert!(buffers.set_input(0, 0, vec![1.0]));
+        assert!(buffers.set_input(0, 1, vec![1.0]));
+        let mut settings = InputSettings::new(2);
+        // A public field shortened behind the settings' back.
+        settings.input_volumes.truncate(1);
+        let mut destination = vec![0.0; 1];
+        let mut dest: [&mut [Sample]; 1] = [&mut destination];
+        buffers.mix_inputs(1, &mut dest, &mut settings, 1.0, true, &Config);
+        assert_eq!(destination, vec![1.0]);
+    }
+
+    #[test]
+    fn inconsistent_settings_are_rejected_and_out_of_range_writes_report() {
+        let mut settings = InputSettings::new(2);
+        let mut skewed = InputSettings::new(2);
+        skewed.input_counts.truncate(1);
+        assert!(!skewed.lengths_are_consistent());
+        assert!(!settings.copy_from(&skewed));
+        assert!(settings.copy_from(&InputSettings::new(2)));
+
+        let mut buffers = AudioBuffers::new(1, 0, 1);
+        assert!(!buffers.set_input(0, 5, vec![0.0]));
+        assert!(!buffers.set_output(2, 0, vec![0.0]));
+        assert!(buffers.set_output(0, 0, vec![1.0]));
+    }
+
+    #[test]
+    fn a_mono_input_is_not_duplicated_into_the_right_output() {
+        let mut buffers = AudioBuffers::new(1, 0, 1);
+        // Only the left buffer is populated: the input is mono.
+        buffers.set_input(0, 0, vec![1.0, 1.0]);
+        let mut settings = InputSettings::new(1);
+        let mut left = [0.0; 2];
+        let mut right = [0.0; 2];
+        let mut dest: [&mut [Sample]; 2] = [&mut left, &mut right];
+
+        buffers.mix_inputs(2, &mut dest, &mut settings, 1.0, true, &Config);
+
+        assert_eq!(left, [1.0, 1.0]);
+        assert_eq!(
+            right,
+            [0.0, 0.0],
+            "a mono input must not be copied into the right channel"
+        );
     }
 
     #[test]

@@ -4,11 +4,14 @@ use freewheeling_plus::audioio::{
 use freewheeling_plus::event::{Event, EventListener, EventManager, EventType};
 use freewheeling_plus::mem::{MemoryManager, Preallocated, PreallocatedTypeInner};
 use freewheeling_plus::midiio::{MidiBackend, MidiIo, MidiMessage, MidiPortMessage};
-use freewheeling_plus::processor_queue::{ProcessorCommand, ProcessorCommandQueue};
+use freewheeling_plus::processor_queue::{ProcessorCommand, ProcessorCommandQueue, ProcessorItem};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
+
+/// Frames per callback used by the fake backend.
+const TEST_FRAMES: u32 = 4;
 
 struct CountListener(Arc<AtomicUsize>);
 impl EventListener for CountListener {
@@ -69,7 +72,10 @@ fn memory_manager_recycles_deferred_items_before_shutdown() {
         move || Box::new(Item(r.clone()))
     });
     let item = ty.rt_new().unwrap();
-    ty.rt_delete(item);
+    assert!(
+        ty.rt_delete(item).is_none(),
+        "the deferred delete was rejected by the manager queue"
+    );
     // The manager deliberately parks for up to one millisecond while idle,
     // so yielding alone can exhaust the wait on a slower scheduler; poll
     // with a bounded sleep like the mem module's own tests.
@@ -94,7 +100,7 @@ fn processor_queue_preserves_all_commands_under_contention() {
         let b = barrier.clone();
         ts.push(thread::spawn(move || {
             b.wait();
-            q.enqueue_add(std::ptr::null_mut())
+            q.enqueue_add(std::ptr::NonNull::<ProcessorItem>::dangling().as_ptr())
         }));
     }
     barrier.wait();
@@ -117,18 +123,20 @@ impl AudioBackend for FakeAudio {
         })
     }
     fn activate(&mut self, mut cb: AudioCallbackFn) -> Result<(), String> {
-        let i = vec![1.; 4];
-        let mut l = vec![0.; 4];
-        let mut r = vec![0.; 4];
+        let frames = TEST_FRAMES as usize;
+        let i = vec![1.; frames];
+        let mut l = vec![0.; frames];
+        let mut r = vec![0.; frames];
         let mut c = AudioCallback {
             inputs: [&i, &i],
             outputs: [&mut l, &mut r],
-            nframes: 4,
+            nframes: TEST_FRAMES,
             position: Default::default(),
             transport_rolling: false,
         };
         cb(&mut c);
-        assert_eq!(l, [2.; 4]);
+        assert!(l.iter().all(|sample| *sample == 2.0));
+        assert!(r.iter().all(|sample| *sample == 2.0));
         Ok(())
     }
     fn close(&mut self) {}
@@ -137,8 +145,12 @@ impl AudioBackend for FakeAudio {
 struct Gain;
 impl AudioProcessor for Gain {
     fn process(&mut self, c: &mut AudioCallback<'_>) {
-        for i in 0..4 {
+        // `c.nframes`, not a hard-coded 4: a processor that ignores the
+        // negotiated frame count breaks as soon as the backend changes size.
+        // Both channels are written so the fake exercises the full contract.
+        for i in 0..c.nframes as usize {
             c.outputs[0][i] = c.inputs[0][i] * 2.;
+            c.outputs[1][i] = c.inputs[1][i] * 2.;
         }
     }
 }

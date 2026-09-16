@@ -34,41 +34,56 @@ pub struct PcmOutput {
     producer: Producer<PcmBlock>,
     recycled: Consumer<PcmBlock>,
     free: Vec<PcmBlock>,
+    /// Pool size this handle was created with; `Vec::capacity` is only an
+    /// allocation hint and cannot be relied on once a block is lost.
+    pool_blocks: usize,
     status: Arc<AtomicU8>,
+    overruns: Arc<AtomicU64>,
 }
 
 impl PcmOutput {
     /// Push one stereo PCM block into the ring buffer.
-    /// Returns `false` if the buffer is full or stop/error has been signaled.
+    ///
+    /// Returns `false` when the block was not queued. A full ring or a
+    /// momentarily exhausted pool only drops this block and counts an overrun:
+    /// ending (and deleting) a whole take because one callback was late is not
+    /// a recovery policy.
     pub fn push_audio(&mut self, left: &[Sample], right: &[Sample], frames: NFrames) -> bool {
         let s = self.status.load(Ordering::Relaxed);
         if s != STATUS_WRITING {
             return false;
         }
-        let cap = left.len().min(right.len()).min(frames as usize);
-        while self.free.len() < self.free.capacity() {
+        let frames = frames as usize;
+        if left.len() != right.len() || frames > left.len() {
+            // Mismatched channels or a frame count beyond the buffers: the
+            // caller's block is unusable, so it is dropped rather than
+            // truncated and written misaligned.
+            self.overruns.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        if frames > self.free.first().map_or(0, |block| block.left.len()) {
+            // Blocks are preallocated for the configured callback size.
+            self.overruns.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        while self.free.len() < self.pool_blocks {
             let Ok(block) = self.recycled.pop() else {
                 break;
             };
             self.free.push(block);
         }
         let Some(mut block) = self.free.pop() else {
-            self.status.store(STATUS_ERROR, Ordering::Release);
+            self.overruns.fetch_add(1, Ordering::Relaxed);
             return false;
         };
-        if cap > block.left.len() || cap > block.right.len() {
-            self.free.push(block);
-            self.status.store(STATUS_ERROR, Ordering::Release);
-            return false;
-        }
-        block.left[..cap].copy_from_slice(&left[..cap]);
-        block.right[..cap].copy_from_slice(&right[..cap]);
-        block.frames = cap as NFrames;
+        block.left[..frames].copy_from_slice(&left[..frames]);
+        block.right[..frames].copy_from_slice(&right[..frames]);
+        block.frames = frames as NFrames;
         match self.producer.push(block) {
             Ok(()) => true,
             Err(PushError::Full(block)) => {
                 self.free.push(block);
-                self.status.store(STATUS_ERROR, Ordering::Release);
+                self.overruns.fetch_add(1, Ordering::Relaxed);
                 false
             }
         }
@@ -88,6 +103,10 @@ pub struct AudioStreamer {
     encode_thread: Option<JoinHandle<Result<(), String>>>,
     status: Arc<AtomicU8>,
     bytes_written: Arc<AtomicU64>,
+    /// Blocks the audio callback could not queue (full ring or empty pool).
+    overruns: Arc<AtomicU64>,
+    /// Blocks the encode thread could not return to the recycle ring.
+    lost_blocks: Arc<AtomicU64>,
     output_path: Option<PathBuf>,
 }
 
@@ -103,6 +122,8 @@ impl AudioStreamer {
             encode_thread: None,
             status: Arc::new(AtomicU8::new(STATUS_IDLE)),
             bytes_written: Arc::new(AtomicU64::new(0)),
+            overruns: Arc::new(AtomicU64::new(0)),
+            lost_blocks: Arc::new(AtomicU64::new(0)),
             output_path: None,
         }
     }
@@ -121,8 +142,16 @@ impl AudioStreamer {
         if s != STATUS_IDLE {
             return Err("streamer is already active".into());
         }
-        if max_callback_frames == 0 {
-            return Err("stream callback size must be non-zero".into());
+        if max_callback_frames == 0
+            || max_callback_frames > crate::file_codecs::MAX_STREAMING_FRAMES
+        {
+            // The pool preallocates `DEFAULT_BUFFER_BLOCKS` blocks of two f32
+            // channels each, so an unbounded callback size would allocate
+            // gigabytes (or abort) instead of failing cleanly.
+            return Err(format!(
+                "stream callback size must be 1..={} frames",
+                crate::file_codecs::MAX_STREAMING_FRAMES
+            ));
         }
 
         // Create output directory and validate format before spawning thread.
@@ -147,10 +176,19 @@ impl AudioStreamer {
             });
         }
 
-        self.status.store(STATUS_WRITING, Ordering::Release);
+        // A fresh status per stream: a `PcmOutput` left over from the previous
+        // generation must not be able to change this stream's state.
+        self.status = Arc::new(AtomicU8::new(STATUS_WRITING));
         let status = Arc::clone(&self.status);
         let bytes_written = Arc::new(AtomicU64::new(0));
         let bw = Arc::clone(&bytes_written);
+        let lost_blocks = Arc::clone(&self.lost_blocks);
+        let bytes_per_frame = match format {
+            Codec::Wav | Codec::Au => Some(if stereo { 8 } else { 4 }),
+            // Compressed frames have no fixed size; the thread reports the
+            // file length instead.
+            _ => None,
+        };
         let out_path = path.clone();
         let handle = match thread::Builder::new()
             .name("fweelin-stream".into())
@@ -163,9 +201,11 @@ impl AudioStreamer {
                         format,
                         samplerate,
                         stereo,
+                        bytes_per_frame,
                     },
                     status,
                     bw,
+                    lost_blocks,
                 )
             })
         {
@@ -184,7 +224,9 @@ impl AudioStreamer {
             producer,
             recycled,
             free,
+            pool_blocks: DEFAULT_BUFFER_BLOCKS,
             status: Arc::clone(&self.status),
+            overruns: Arc::clone(&self.overruns),
         })
     }
 
@@ -234,6 +276,16 @@ impl AudioStreamer {
     pub fn status(&self) -> u8 {
         self.status.load(Ordering::Acquire)
     }
+
+    /// Blocks the audio callback could not queue for this stream.
+    pub fn overruns(&self) -> u64 {
+        self.overruns.load(Ordering::Acquire)
+    }
+
+    /// Blocks lost on their way back to the pool (recycle ring full).
+    pub fn lost_blocks(&self) -> u64 {
+        self.lost_blocks.load(Ordering::Acquire)
+    }
 }
 
 impl Drop for AudioStreamer {
@@ -251,6 +303,9 @@ struct EncodeSettings {
     format: Codec,
     samplerate: u32,
     stereo: bool,
+    /// Bytes per written frame for PCM streams; `None` for compressed codecs,
+    /// whose frames have no fixed size.
+    bytes_per_frame: Option<u64>,
 }
 
 fn run_encode_thread(
@@ -259,6 +314,7 @@ fn run_encode_thread(
     settings: EncodeSettings,
     status: Arc<AtomicU8>,
     bytes_written: Arc<AtomicU64>,
+    lost_blocks: Arc<AtomicU64>,
 ) -> Result<(), String> {
     // Create output file and encoder inside the thread so we don't need
     // SndFileEncoder (containing raw vorbis pointers) to be Send.
@@ -288,7 +344,14 @@ fn run_encode_thread(
             match status.load(Ordering::Acquire) {
                 STATUS_STOP_PENDING => {
                     while let Ok(block) = consumer.pop() {
-                        write_block(&mut encoder, block, &mut recycled, &bytes_written)?;
+                        write_block(
+                            &mut encoder,
+                            block,
+                            &mut recycled,
+                            &settings,
+                            &bytes_written,
+                            &lost_blocks,
+                        )?;
                     }
                     encoder
                         .prepare_file_for_closing()
@@ -301,7 +364,14 @@ fn run_encode_thread(
 
             match consumer.pop() {
                 Ok(block) => {
-                    write_block(&mut encoder, block, &mut recycled, &bytes_written)?;
+                    write_block(
+                        &mut encoder,
+                        block,
+                        &mut recycled,
+                        &settings,
+                        &bytes_written,
+                        &lost_blocks,
+                    )?;
                 }
                 Err(_) => thread::park_timeout(Duration::from_millis(1)),
             }
@@ -325,20 +395,36 @@ fn write_block(
     encoder: &mut SndFileEncoder,
     block: PcmBlock,
     recycled: &mut Producer<PcmBlock>,
+    settings: &EncodeSettings,
     bytes_written: &AtomicU64,
+    lost_blocks: &AtomicU64,
 ) -> Result<(), String> {
     let frames = block.frames as usize;
     let written = encoder
         .write_samples_to_disk(&block.left[..frames], Some(&block.right[..frames]))
         .map_err(|error| format!("write stream samples: {error}"));
-    let _ = recycled.push(block);
+    // A block that cannot go back to the ring is lost from the pool; report it
+    // instead of silently shrinking the pool for the rest of the session.
+    if recycled.push(block).is_err() {
+        lost_blocks.fetch_add(1, Ordering::Release);
+    }
     let written = written?;
     if written != frames {
         return Err(format!(
             "short stream write: wrote {written} of {frames} frames"
         ));
     }
-    bytes_written.fetch_add((written * 8) as u64, Ordering::Release);
+    match settings.bytes_per_frame {
+        Some(bytes_per_frame) => {
+            bytes_written.fetch_add(written as u64 * bytes_per_frame, Ordering::Release);
+        }
+        None => {
+            // Compressed output: the file itself is the only accurate measure.
+            if let Ok(metadata) = fs::metadata(&settings.path) {
+                bytes_written.store(metadata.len(), Ordering::Release);
+            }
+        }
+    }
     Ok(())
 }
 

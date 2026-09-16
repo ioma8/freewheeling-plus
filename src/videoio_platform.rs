@@ -9,9 +9,10 @@ use crate::sdlio::Sdl2Context;
 use crate::surface_primitives::{Color as SurfaceColor, SoftwareSurface};
 use crate::video_layout::FloLayout;
 use crate::videoio::{RenderMetrics, VideoBackend, VideoFrame, VideoMode};
-use crate::videoio_displays::{Display, DrawOp, Renderer};
+use crate::videoio_displays::{DrawOp, Renderer, SceneDisplay};
 use fontdue::{Font, FontSettings};
 use sdl2::pixels::PixelFormatEnum;
+
 use sdl2::render::{BlendMode, Canvas};
 #[cfg_attr(target_os = "android", allow(unused_imports))]
 use sdl2::video::{FullscreenType, Window};
@@ -26,14 +27,9 @@ struct TextStyle<'a> {
 #[path = "native_ui_scene.rs"]
 pub mod native_ui_scene;
 
-/// A platform backend may pump native events and perform its periodic update
-/// immediately before a frame is presented.  The default methods are real
-/// hooks (rather than no-op implementations): a backend must opt into the
-/// event loop explicitly.
-///
 /// The logical scene sent to the display/layout adapters.
 pub struct DisplayScene {
-    pub displays: Vec<Box<dyn Display>>,
+    pub displays: Vec<Box<dyn SceneDisplay>>,
     pub layouts: Vec<FloLayout>,
 }
 
@@ -46,9 +42,8 @@ impl std::fmt::Debug for DisplayScene {
     }
 }
 
-// SAFETY: DisplayScene only holds thread-safe types (Arc, Mutex,
-// Vec of AtomicallyReferenceCounted items).
-unsafe impl Send for DisplayScene {}
+// `SceneDisplay` requires `Send`, and the remaining fields are `Vec`/`Arc`, so
+// this follows from the field types rather than from an assertion.
 
 impl DisplayScene {
     pub fn new() -> Self {
@@ -78,7 +73,16 @@ impl Default for DisplayScene {
     }
 }
 
+/// Logical and drawable window sizes: `(logical, drawable)`.
+pub(crate) type SurfaceSizes = ((u32, u32), (u32, u32));
+
 /// Bridges logical draw operations to a platform renderer.
+///
+/// The scene is rendered into a backend-owned surface, and the optional hooks
+/// are called around it: `begin_frame` immediately before the scene and
+/// `finish_frame` immediately before a frame is presented. A backend that
+/// needs to pump events or flip buffers opts in by overriding them (the
+/// defaults do nothing).
 pub trait PlatformRenderer: Send {
     fn begin_frame(&mut self, _width: u32, _height: u32) {}
     fn draw(&mut self, op: DrawOp);
@@ -105,6 +109,8 @@ pub struct FrameRenderer {
     pub mouse_down: bool,
     pub beep_pending: bool,
     prev_mouse_down: bool,
+    /// Whether the current button press started inside the overlay button.
+    press_inside_button: bool,
 }
 
 impl FrameRenderer {
@@ -140,6 +146,7 @@ impl FrameRenderer {
                 &self.stream_output_path,
                 self.mouse_logical,
                 self.mouse_down,
+                &mut self.press_inside_button,
                 &mut self.prev_mouse_down,
             );
             if clicked {
@@ -157,6 +164,10 @@ pub struct SoftwareRgbaRenderer {
     fonts: HashMap<String, Font>,
     default_font: String,
     point_size: f32,
+    /// Scratch buffer for the loop-scope strip (one packed RGBA pixel per
+    /// entry), kept between frames: the strip is flat-colour filled on every
+    /// draw, so reallocating it per frame would be pure heap traffic.
+    scope_scratch: Vec<u32>,
 }
 
 impl SoftwareRgbaRenderer {
@@ -170,6 +181,7 @@ impl SoftwareRgbaRenderer {
             fonts,
             default_font: "default".to_string(),
             point_size: point_size.max(1.0),
+            scope_scratch: Vec::new(),
         })
     }
 
@@ -196,6 +208,7 @@ impl SoftwareRgbaRenderer {
             fonts: loaded,
             default_font,
             point_size: point_size.max(1.0),
+            scope_scratch: Vec::new(),
         })
     }
 
@@ -257,7 +270,12 @@ impl SoftwareRgbaRenderer {
             .font_name
             .and_then(|name| self.fonts.get(name))
             .or_else(|| self.fonts.get(&self.default_font))
-            .expect("renderer always has a default font");
+            .or_else(|| self.fonts.values().next());
+        // Without any font there is nothing to draw; skipping beats aborting
+        // the video worker (the styled-text path above degrades the same way).
+        let Some(font) = font else {
+            return;
+        };
         let characters: Vec<char> = text.chars().collect();
         let width: i32 = characters
             .iter()
@@ -439,7 +457,12 @@ impl PlatformRenderer for SoftwareRgbaRenderer {
                     // This is the temporary 320×30 `lscopepic` used by
                     // C++ `VideoIO::DrawLoop`.  Build it first, then apply
                     // the identical `CircularMap` coordinate transform.
-                    let mut flat = vec![bg; flat_width as usize * flat_height as usize];
+                    let pixels = flat_width as usize * flat_height as usize;
+                    self.scope_scratch.clear();
+                    // `u32` per pixel: `packed()` returns the RGBA value, not
+                    // four separate bytes.
+                    self.scope_scratch.resize(pixels, bg);
+                    let flat = &mut self.scope_scratch;
                     let midpoint = flat_height / 2;
                     let pixels_per_chunk = flat_width as f32 / peaks.len() as f32;
                     let mut strip_x = -(position as f32) * pixels_per_chunk;
@@ -524,7 +547,7 @@ impl PlatformRenderer for SoftwareRgbaRenderer {
             }
             DrawOp::Image(bytes, width, height, x, y, draw_width, draw_height) => {
                 self.surface.blit_rgba(
-                    &bytes,
+                    bytes.as_slice(),
                     width as i32,
                     height as i32,
                     width as usize * 4,
@@ -546,31 +569,56 @@ impl PlatformRenderer for SoftwareRgbaRenderer {
 /// worker, and never leave that thread.
 pub struct Sdl2VideoBackend {
     title: String,
+    /// SDL context this backend opened its window with.
+    ///
+    /// Retained so `open` uses the context the caller supplied instead of
+    /// whatever happens to be installed on the worker thread.
+    context: Option<Sdl2Context>,
     canvas: Option<Canvas<Window>>,
+    /// Streaming texture reused across frames of the same size, kept as a raw
+    /// handle: creating a texture per present is a driver allocation on the
+    /// hot path, and `Texture` borrows the creator so it cannot be stored
+    /// directly. `raw_create_texture` is the crate's documented pattern for
+    /// exactly this, with the handle owned by this field (never by a
+    /// `Texture` wrapper, which would destroy it on drop).
+    texture: Option<(u32, u32, *mut sdl2::sys::SDL_Texture)>,
 }
 
-// SAFETY: Sdl2VideoBackend only holds types that are used from one
-// thread at a time, protected by the type system.
+// SAFETY: this backend is moved to the video worker thread and used only
+// there (see `VideoIO::activate`). SDL window/canvas types are thread-affine,
+// so the type system cannot express the invariant; the runtime discipline is
+// "created and used on one thread, moved before first use".
 unsafe impl Send for Sdl2VideoBackend {}
 
 impl Sdl2VideoBackend {
     pub fn new(title: impl Into<String>) -> Self {
         Self {
             title: title.into(),
+            context: None,
             canvas: None,
+            texture: None,
         }
     }
 
-    pub fn new_with_context(title: impl Into<String>, _context: Sdl2Context) -> Self {
+    /// Create a backend bound to `context`.
+    ///
+    /// The context is owned by the backend and used by `open`, so callers that
+    /// created SDL on their own thread get a backend that does not depend on
+    /// the worker thread's thread-local context.
+    pub fn new_with_context(title: impl Into<String>, context: Sdl2Context) -> Self {
         Self {
             title: title.into(),
+            context: Some(context),
             canvas: None,
+            texture: None,
         }
     }
 
     /// Read the current SDL window and drawable sizes without the metrics
-    /// diagnostics. Used by the per-frame Android surface sync.
-    pub(crate) fn surface_sizes(&self) -> Result<((u32, u32), (u32, u32)), String> {
+    /// diagnostics. Used by the per-frame Android surface sync, so it is
+    /// unreachable on other targets.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub(crate) fn surface_sizes(&self) -> Result<SurfaceSizes, String> {
         let canvas = self
             .canvas
             .as_ref()
@@ -626,6 +674,7 @@ mod frame_renderer_tests {
             mouse_down: false,
             beep_pending: false,
             prev_mouse_down: false,
+            press_inside_button: false,
         };
         let mut frame = VideoFrame {
             pixels: Vec::new(),
@@ -665,10 +714,13 @@ impl VideoBackend for Sdl2VideoBackend {
         if self.canvas.is_some() {
             return self.set_mode(mode);
         }
-        let context = Sdl2Context::shared()
-            .ok()
-            .or_else(|| Sdl2Context::new().ok())
-            .ok_or_else(|| "SDL context has not been initialized on this thread".to_string())?;
+        let context = match self.context.clone() {
+            Some(context) => context,
+            None => Sdl2Context::shared()
+                .ok()
+                .or_else(|| Sdl2Context::new().ok())
+                .ok_or_else(|| "SDL context has not been initialized on this thread".to_string())?,
+        };
         let sdl = context.sdl();
         let video = sdl.video()?;
         let mut builder = video.window(
@@ -749,24 +801,58 @@ impl VideoBackend for Sdl2VideoBackend {
             .canvas
             .as_mut()
             .ok_or_else(|| "SDL video backend is closed".to_string())?;
+        // Reuse the texture unless the size changed: texture creation is a
+        // driver allocation and this runs once per presented frame.
+        let needs_new_texture = !matches!(
+            self.texture,
+            Some((width, height, _)) if width == frame.width && height == frame.height
+        );
         let creator = canvas.texture_creator();
-        let mut texture = creator
-            .create_texture_streaming(PixelFormatEnum::RGBA32, frame.width, frame.height)
-            .map_err(|error| error.to_string())?;
-        // C++ renders directly into the SDL window surface.  Its primitive
-        // pixels are replacement writes, including their alpha byte, so the
-        // final upload must not source-over blend this complete frame.
-        texture.set_blend_mode(BlendMode::None);
-        texture
+        if needs_new_texture {
+            if let Some((_, _, raw)) = self.texture.take() {
+                // SAFETY: the handle was created by `create_texture_streaming`
+                // and is owned by this field.
+                unsafe { sdl2::sys::SDL_DestroyTexture(raw) };
+            }
+            let texture = creator
+                .create_texture_streaming(PixelFormatEnum::RGBA32, frame.width, frame.height)
+                .map_err(|error| error.to_string())?;
+            // C++ renders directly into the SDL window surface.  Its primitive
+            // pixels are replacement writes, including their alpha byte, so the
+            // final upload must not source-over blend this complete frame.
+            let mut texture = texture;
+            texture.set_blend_mode(BlendMode::None);
+            let raw = texture.raw();
+            // The cache owns the handle; dropping the wrapper would destroy it.
+            std::mem::forget(texture);
+            self.texture = Some((frame.width, frame.height, raw));
+        }
+        let Some((_, _, raw)) = self.texture else {
+            return Err("video texture was not created".into());
+        };
+        // SAFETY: `raw` is the handle this field owns, and the wrapper is
+        // forgotten below so it cannot destroy it.
+        let mut texture = unsafe { creator.raw_create_texture(raw) };
+        let updated = texture
             .update(None, &frame.pixels, frame.stride)
-            .map_err(|error| error.to_string())?;
-        canvas.clear();
-        canvas.copy(&texture, None, None)?;
+            .map_err(|error| error.to_string());
+        let copied = updated.and_then(|()| {
+            canvas.clear();
+            canvas
+                .copy(&texture, None, None)
+                .map_err(|error| error.to_string())
+        });
+        std::mem::forget(texture);
+        copied?;
         canvas.present();
         Ok(())
     }
 
     fn close(&mut self) {
+        if let Some((_, _, raw)) = self.texture.take() {
+            // SAFETY: the handle is owned by this field (see `present`).
+            unsafe { sdl2::sys::SDL_DestroyTexture(raw) };
+        }
         self.canvas = None;
     }
 }

@@ -19,11 +19,27 @@ pub struct LaunchArguments {
 
 impl LaunchArguments {
     /// Reproduces SDLMain's `-psn...` handling without losing non-UTF-8 args.
-    pub fn from_args<I>(args: I) -> Self
+    ///
+    /// The iterator **must** include `argv[0]`: the `-psn` argument is only
+    /// ever the first argument after the program name, and that position is
+    /// what tells a Finder launch from a user-supplied `-psn...` value passed
+    /// later on the command line.
+    pub fn from_args<I, S>(args: I) -> Self
     where
-        I: IntoIterator<Item = OsString>,
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
     {
-        let mut args = args.into_iter().collect::<Vec<_>>();
+        let mut args: Vec<OsString> = args
+            .into_iter()
+            .map(|arg| arg.as_ref().to_os_string())
+            .collect();
+        debug_assert!(
+            args.len() != 1
+                || !args[0]
+                    .to_str()
+                    .is_some_and(|arg| arg.starts_with("-psn")),
+            "from_args expects argv[0]; passing only the -psn argument would misdetect a Finder launch",
+        );
         let finder_launch = args
             .get(1)
             .is_some_and(|arg| arg.to_str().is_some_and(|arg| arg.starts_with("-psn")));
@@ -57,6 +73,11 @@ impl LaunchArguments {
 
 /// Run the application handoff after the bundle setup.  Keeping this callback
 /// based makes the ordering and error propagation testable without Cocoa.
+///
+/// Side effect: a Finder launch changes the process-global working directory
+/// to the bundle's parent.  That must happen before other threads start (and
+/// before the video/audio subsystems hand off), because those threads share
+/// the process cwd.
 pub fn run_macos<F>(
     launch: &LaunchArguments,
     bundle_path: impl AsRef<Path>,
@@ -72,6 +93,8 @@ where
                 "application bundle has no parent",
             )
         })?;
+        // NOTE: process-global side effect - must run before other threads
+        // start.
         std::env::set_current_dir(parent)?;
     }
     Ok(app_main(&launch.args))
@@ -122,16 +145,44 @@ mod tests {
         assert_eq!(launch.args(), args(&["fweelin", "already.wav", "one.wav"]));
     }
 
+    /// Run `body` with the process cwd temporarily changed, restoring it even
+    /// when the body fails.
+    fn with_isolated_cwd<T>(body: impl FnOnce() -> T) -> T {
+        let original = std::env::current_dir().expect("cwd is readable");
+        let sandbox = std::env::temp_dir().join(format!(
+            "fweelin-sdlmain-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&sandbox).expect("sandbox directory");
+        std::env::set_current_dir(&sandbox).expect("enter sandbox");
+        let result = body();
+        std::env::set_current_dir(&original).expect("restore cwd");
+        let _ = std::fs::remove_dir(&sandbox);
+        result
+    }
+
     #[test]
-    fn bundle_parent_is_used_for_working_directory() {
-        assert_eq!(
-            Path::new("/Applications/Foo.app/Contents/MacOS/Foo").parent().map(Path::to_path_buf),
-            Some(PathBuf::from("/Applications/Foo.app/Contents/MacOS"))
-        );
-        assert_eq!(
-            Path::new("/Applications/Foo.app").parent().map(Path::to_path_buf),
-            Some(PathBuf::from("/Applications"))
-        );
+    fn a_finder_launch_moves_the_working_directory_to_the_bundle_parent() {
+        with_isolated_cwd(|| {
+            let bundle_parent = PathBuf::from("/Applications");
+            let launch = LaunchArguments::from_args(args(&["fweelin", "-psn_0_1"]));
+            let status = run_macos(&launch, bundle_parent.join("Foo.app"), |_| 3).unwrap();
+            assert_eq!(status, 3);
+            assert_eq!(std::env::current_dir().unwrap(), bundle_parent);
+
+            // A normal launch leaves the cwd alone.
+            let launch = LaunchArguments::from_args(args(&["fweelin"]));
+            run_macos(&launch, bundle_parent.join("Foo.app"), |_| 0).unwrap();
+            assert_eq!(std::env::current_dir().unwrap(), bundle_parent);
+        });
+    }
+
+    #[test]
+    fn a_bundle_without_a_parent_is_reported() {
+        let launch = LaunchArguments::from_args(args(&["fweelin", "-psn_0_1"]));
+        let error = run_macos(&launch, "/", |_| 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

@@ -28,11 +28,20 @@ impl Sdl2Context {
         // path below already translates SDL_FINGER* into mouse events, so the
         // duplicate synthesis is disabled; genuine mice are unaffected.
         #[cfg(target_os = "android")]
-        unsafe {
-            sdl2::sys::SDL_SetHint(
-                b"SDL_TOUCH_MOUSE_EVENTS\0".as_ptr().cast(),
-                b"0\0".as_ptr().cast(),
-            );
+        {
+            // SAFETY: both operands are static, NUL-terminated byte literals,
+            // and SDL is initialized above.
+            let applied = unsafe {
+                sdl2::sys::SDL_SetHint(
+                    b"SDL_TOUCH_MOUSE_EVENTS\0".as_ptr().cast(),
+                    b"0\0".as_ptr().cast(),
+                )
+            };
+            if applied == sdl2::sys::SDL_bool::SDL_FALSE {
+                // The duplicate-synthesis bug this hint prevents would return
+                // silently, so report that the hint did not apply.
+                eprintln!("FreeWheeling: SDL could not disable SDL_TOUCH_MOUSE_EVENTS");
+            }
         }
         CONTEXT.with(|slot| *slot.borrow_mut() = Some(context.clone()));
         Ok(context)
@@ -112,6 +121,10 @@ pub struct Sdl2InputBackend {
     touch: Option<TouchGesture>,
     /// When the previous tap ended and where, for double-tap detection.
     last_tap: Option<(std::time::Instant, (i32, i32))>,
+    /// Translated event held back when a gesture deadline fired first; the
+    /// next `poll_event` call delivers it instead of dropping it (it can be a
+    /// Quit or a key press).
+    pending_touch_event: Option<SdlEvent>,
 }
 
 impl Sdl2InputBackend {
@@ -149,6 +162,7 @@ impl Sdl2InputBackend {
             joysticks,
             window_size: (640, 480),
             touch: None,
+            pending_touch_event: None,
             last_tap: None,
         })
     }
@@ -164,9 +178,7 @@ impl Sdl2InputBackend {
     /// Called when no SDL event was pending: promotes a still-held, unmoved
     /// touch into a long-press (overdub, button 2).
     fn touch_long_press_tick(&mut self) -> Option<SdlEvent> {
-        let Some(touch) = self.touch.as_mut() else {
-            return None;
-        };
+        let touch = self.touch.as_mut()?;
         if touch.dragging || touch.down_button != 0 {
             return None;
         }
@@ -206,6 +218,9 @@ const DOUBLE_TAP_DIST: i32 = 60;
 const DRAG_THRESHOLD: i32 = 30;
 /// Vertical drag distance (window px) per loop-gain step (one wheel event).
 const DRAG_WHEEL_STEP: i32 = 22;
+/// SDL's synthetic-touch mouse device id (`SDL_TOUCH_MOUSEID` is
+/// `((Uint32)-1)` in the C headers, which the `sdl2` crate does not export).
+const TOUCH_MOUSEID: u32 = u32::MAX;
 
 /// In-flight single-finger touch gesture on the mobile UI.
 ///
@@ -215,7 +230,7 @@ const DRAG_WHEEL_STEP: i32 = 22;
 /// - hold >= LONG_PRESS_MS -> button 2 down (overdub), button 2 up on release,
 /// - double-tap       -> button 6 (mute/unmute), first tap suppressed,
 /// - vertical drag    -> repeated button 4/5 events (loop gain, like the
-///                        desktop scrollwheel), never a trigger.
+///   desktop scrollwheel), never a trigger.
 struct TouchGesture {
     finger_id: i64,
     start: std::time::Instant,
@@ -234,6 +249,11 @@ struct TouchGesture {
 impl SdlBackend for Sdl2InputBackend {
     fn poll_event(&mut self, timeout_ms: u32) -> Option<SdlEvent> {
         use sdl2::event::Event;
+        // An event buffered while a gesture deadline fired is delivered before
+        // anything new is polled.
+        if let Some(event) = self.pending_touch_event.take() {
+            return Some(event);
+        }
         loop {
             let event = match self.event_pump.wait_event_timeout(timeout_ms) {
                 Some(event) => event,
@@ -276,6 +296,20 @@ impl SdlBackend for Sdl2InputBackend {
                     button: button_idx as i32,
                     down: false,
                 }),
+                // SDL synthesizes mouse events from touches on every platform
+                // (`SDL_TOUCH_MOUSE_EVENTS` defaults to on). Android disables
+                // the hint in `Sdl2Context::new`; elsewhere the synthesized
+                // events are dropped here, because the finger path below
+                // already translates the same gesture and a single tap would
+                // otherwise toggle the CLEAR latch twice.
+                Event::MouseButtonDown { which, .. }
+                | Event::MouseButtonUp { which, .. }
+                | Event::MouseMotion { which, .. }
+                    if which == TOUCH_MOUSEID
+                        && std::env::var_os("FWEELIN_ALLOW_TOUCH_MOUSE").is_none() =>
+                {
+                    continue;
+                }
                 Event::MouseMotion { x, y, .. } => Some(SdlEvent::MouseMotion { x, y }),
                 // SDL2 touch events never become mouse events by themselves;
                 // on Android (and desktop touchscreens) the first finger to
@@ -284,36 +318,37 @@ impl SdlBackend for Sdl2InputBackend {
                     finger_id, x, y, ..
                 } => {
                     if self.touch.is_some() {
-                        return None; // multi-touch: ignore additional fingers
+                        // Multi-touch: ignore the extra finger but keep
+                        // draining, so queued events (including Quit) and the
+                        // gesture deadline are still handled this poll.
+                        continue;
                     }
                     let (px, py) = self.touch_pixel(x, y);
                     let now = std::time::Instant::now();
                     // Double-tap: a new touch lands shortly after the previous
                     // tap ended, near the same spot -> mute/unmute (button 6).
-                    if let Some((tap_time, tap_pos)) = self.last_tap {
-                        if tap_time.elapsed().as_millis() <= DOUBLE_TAP_MS
-                            && (px - tap_pos.0).abs() + (py - tap_pos.1).abs()
-                                <= DOUBLE_TAP_DIST
-                        {
-                            self.last_tap = None;
-                            self.touch = Some(TouchGesture {
-                                finger_id,
-                                start: now,
-                                start_pos: (px, py),
-                                last_pos: (px, py),
-                                drag_accum: 0,
-                                dragging: false,
-                                down_button: 6,
-                                pending_tap: false,
-                            });
-                            return Some(SdlEvent::MouseButton {
-                                button: 6,
-                                x: px,
-                                y: py,
-                                down: true,
-                                presslen: 0,
-                            });
-                        }
+                    if let Some((tap_time, tap_pos)) = self.last_tap
+                        && tap_time.elapsed().as_millis() <= DOUBLE_TAP_MS
+                        && (px - tap_pos.0).abs() + (py - tap_pos.1).abs() <= DOUBLE_TAP_DIST
+                    {
+                        self.last_tap = None;
+                        self.touch = Some(TouchGesture {
+                            finger_id,
+                            start: now,
+                            start_pos: (px, py),
+                            last_pos: (px, py),
+                            drag_accum: 0,
+                            dragging: false,
+                            down_button: 6,
+                            pending_tap: false,
+                        });
+                        return Some(SdlEvent::MouseButton {
+                            button: 6,
+                            x: px,
+                            y: py,
+                            down: true,
+                            presslen: 0,
+                        });
                     }
                     self.touch = Some(TouchGesture {
                         finger_id,
@@ -334,7 +369,9 @@ impl SdlBackend for Sdl2InputBackend {
                     finger_id, x, y, ..
                 } => {
                     if !self.touch.as_ref().is_some_and(|t| t.finger_id == finger_id) {
-                        return None;
+                        // A motion from another finger must not abort the
+                        // drain loop either: keep polling.
+                        continue;
                     }
                     let (px, py) = self.touch_pixel(x, y);
                     let touch = self.touch.as_mut()?;
@@ -346,33 +383,37 @@ impl SdlBackend for Sdl2InputBackend {
                         if moved > DRAG_THRESHOLD {
                             // This is a gain drag, not a tap or long-press.
                             touch.dragging = true;
-                            touch.pending_tap = false;
-                            touch.down_button = 0;
+                            // A long press that already emitted its button
+                            // down keeps it, so the release can send the
+                            // matching up event and the overdub is not
+                            // latched for the rest of the session.
+                            if touch.down_button == 0 {
+                                touch.pending_tap = false;
+                            }
                         }
                     }
                     if touch.dragging {
                         // Vertical drag adjusts the loop gain, exactly like
                         // the mouse wheel over a loop on desktop.
                         touch.drag_accum += dy;
+                        // One step per event: consuming the whole
+                        // accumulator here would collapse a fast drag into a
+                        // single wheel event and silently drop the rest.
                         let mut step = None;
-                        while touch.drag_accum.abs() >= DRAG_WHEEL_STEP {
+                        if touch.drag_accum.abs() >= DRAG_WHEEL_STEP {
                             let dir = if touch.drag_accum > 0 { 1 } else { -1 };
                             touch.drag_accum -= dir * DRAG_WHEEL_STEP;
                             // drag down -> wheel down (button 5, gain down);
                             // drag up -> wheel up (button 4, gain up)
                             step = Some(if dir > 0 { 5 } else { 4 });
                         }
-                        if let Some(button) = step {
-                            Some(SdlEvent::MouseButton {
-                                button,
-                                x: px,
-                                y: py,
-                                down: true,
-                                presslen: 0,
-                            })
-                        } else {
-                            None
-                        }
+                        step.map(|button| SdlEvent::MouseButton {
+                            button,
+                            x: px,
+                            y: py,
+                            down: true,
+                            presslen: 0,
+                        })
                     } else {
                         Some(SdlEvent::MouseMotion { x: px, y: py })
                     }
@@ -380,16 +421,40 @@ impl SdlBackend for Sdl2InputBackend {
                 Event::FingerUp {
                     finger_id, x, y, ..
                 } => {
+                    // An untracked finger (a second finger lifting, or one that
+                    // began before this backend started tracking) is not a
+                    // reason to end the poll: `continue` keeps draining the
+                    // events SDL has already queued for this frame.
                     let Some(touch) = self.touch.take() else {
-                        return None;
+                        continue;
                     };
                     if touch.finger_id != finger_id {
                         self.touch = Some(touch);
-                        return None;
+                        continue;
                     }
                     let (px, py) = self.touch_pixel(x, y);
                     if touch.dragging {
-                        return None; // gain events already emitted
+                        // The drag's wheel events are already out, but a
+                        // long-press that latched an overdub (button 2) still
+                        // needs its matching up event, otherwise the overdub
+                        // stays latched for the rest of the session.
+                        return match touch.down_button {
+                            2 => Some(SdlEvent::MouseButton {
+                                button: 2,
+                                x: px,
+                                y: py,
+                                down: false,
+                                presslen: 0,
+                            }),
+                            6 => Some(SdlEvent::MouseButton {
+                                button: 6,
+                                x: px,
+                                y: py,
+                                down: false,
+                                presslen: 0,
+                            }),
+                            _ => None,
+                        };
                     }
                     if touch.pending_tap {
                         // Quick tap: record/play trigger on release.
@@ -513,6 +578,9 @@ impl SdlBackend for Sdl2InputBackend {
                 // streaming in (e.g. a held finger): a long-press is due even
                 // though the last event was a motion, so let it win.
                 if let Some(event) = self.touch_long_press_tick() {
+                    // Buffered rather than dropped: `translated` may be a Quit
+                    // or a key press, and losing one would be permanent.
+                    self.pending_touch_event = translated;
                     return Some(event);
                 }
                 return translated;
@@ -622,6 +690,11 @@ impl<B: SdlBackend> SdlIo<B> {
         self.backend.shutdown();
         self.held.fill(false);
         self.settings = KeySettings::default();
+        // Reset the input-mode flags: `Drop` calls this too, and a second
+        // `close()` (or a later `enable_unicode`) must not talk to a
+        // shut-down backend.
+        self.unicode_input_enabled = false;
+        self.key_repeat_enabled = false;
         self.active = false;
     }
     pub fn is_active(&self) -> bool {
@@ -695,7 +768,10 @@ impl<B: SdlBackend> SdlIo<B> {
                     return None;
                 }
                 let key = crate::sdlkey_compat::translate_sdl_keycode(keycode);
-                if !(0..SDLK_LAST as i32).contains(&key) {
+                // `FWL_SDLK_UNKNOWN` is 0, which is inside the valid key
+                // range: filter it explicitly so an unmapped SDL2 key does not
+                // arrive as a real key-0 press.
+                if key == FWL_SDLK_UNKNOWN || !(0..SDLK_LAST as i32).contains(&key) {
                     return None;
                 }
                 self.held[key as usize] = down;
@@ -1207,6 +1283,20 @@ mod tests {
     }
 
     #[test]
+    fn an_unmapped_sdl2_key_is_not_reported_as_a_key_press() {
+        // SDLK_CLEAR has no legacy binding and translates to the unknown
+        // sentinel; it must not become a key-0 event.
+        let mut io = SdlIo::new(Fake(vec![SdlEvent::Key {
+            keycode: 12,
+            down: true,
+            repeat: false,
+        }]));
+        io.activate();
+        assert_eq!(io.poll(), None);
+        assert!(!io.keys_held()[0]);
+    }
+
+    #[test]
     fn names_and_repeat_policy_match_compatibility_behavior() {
         assert_eq!(key_from_name("leftshift"), 304);
         assert_eq!(key_name(282), "f1");
@@ -1234,6 +1324,7 @@ mod tests {
         assert_eq!(key_from_name("equal"), 61);
         assert_eq!(key_from_name("KPplus"), 270);
         assert_eq!(key_from_name("KPminus"), 269);
+        // Repeats are dropped while repeats are disabled...
         let mut io = SdlIo::new(Fake(vec![SdlEvent::Key {
             keycode: 65,
             down: true,
@@ -1241,7 +1332,25 @@ mod tests {
         }]));
         io.activate();
         assert_eq!(io.poll(), None);
+
+        // ...and delivered once they are enabled (the toggle has to precede
+        // the poll: the backend event is consumed either way).
+        let mut io = SdlIo::new(Fake(vec![SdlEvent::Key {
+            keycode: 65,
+            down: true,
+            repeat: true,
+        }]));
         io.enable_key_repeat(true);
+        io.activate();
+        assert_eq!(
+            io.poll(),
+            Some(InputEvent::Key {
+                down: true,
+                keysym: 65,
+                unicode: 0,
+            })
+        );
+
         let mut io = SdlIo::new(Fake(vec![SdlEvent::Text("é".into())]));
         io.activate();
         io.enable_unicode(true);

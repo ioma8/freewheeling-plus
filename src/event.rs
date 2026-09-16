@@ -14,19 +14,28 @@ use std::thread::{self, JoinHandle};
 // ============================================================
 
 pub const FWEELIN_OUTNAME_LEN: usize = 1024;
-/// Join a thread with a 3-second timeout.  Detaches instead of hanging.
-pub fn join_with_timeout(t: JoinHandle<()>) {
+/// Join a thread with a 3-second timeout.
+///
+/// Returns `true` when the thread exited and was joined, `false` when it was
+/// detached because it did not finish in time (the caller reports that: a
+/// detached worker keeps running against state it was told to release). The
+/// wait parks instead of spinning, so shutdown does not burn a core.
+pub fn join_with_timeout(t: JoinHandle<()>) -> bool {
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    while !t.is_finished() && std::time::Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
+    while !t.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::park_timeout(Duration::from_millis(10));
     }
-    if t.is_finished() {
-        let _ = t.join();
-    }
-    // else: thread hung — detach rather than blocking shutdown forever
+    t.join().is_ok()
 }
 
 pub const MAX_MIDI_CHANNELS: usize = 16;
+/// Highest valid MIDI channel index (channels are 0..=15, or 1..=16 on the
+/// wire). `MAX_MIDI_CHANNELS` is a *count*, so it must not be used as a bound:
+/// that would make the channel limit one wider than the note/controller ones.
+pub const MAX_MIDI_CHANNEL_INDEX: i32 = MAX_MIDI_CHANNELS as i32 - 1;
 pub const MAX_MIDI_CONTROLLERS: usize = 127;
 pub const MAX_MIDI_NOTES: usize = 127;
 pub const MAX_MIDI_PORTS: usize = 4;
@@ -83,7 +92,7 @@ const MOUSE_MOTION_INPUT_PARAMS: [EventParameter; 2] = [
 
 const MIDI_CONTROLLER_INPUT_PARAMS: [EventParameter; 5] = [
     EventParameter::new("outport", CoreDataType::Int),
-    EventParameter::with_max_index("midichannel", CoreDataType::Int, MAX_MIDI_CHANNELS as i32),
+    EventParameter::with_max_index("midichannel", CoreDataType::Int, MAX_MIDI_CHANNEL_INDEX),
     EventParameter::with_max_index("controlnum", CoreDataType::Int, MAX_MIDI_CONTROLLERS as i32),
     EventParameter::new("controlval", CoreDataType::Int),
     EventParameter::new("routethroughpatch", CoreDataType::Char),
@@ -91,21 +100,21 @@ const MIDI_CONTROLLER_INPUT_PARAMS: [EventParameter; 5] = [
 
 const MIDI_CHANNEL_PRESSURE_INPUT_PARAMS: [EventParameter; 4] = [
     EventParameter::new("outport", CoreDataType::Int),
-    EventParameter::with_max_index("midichannel", CoreDataType::Int, MAX_MIDI_CHANNELS as i32),
+    EventParameter::with_max_index("midichannel", CoreDataType::Int, MAX_MIDI_CHANNEL_INDEX),
     EventParameter::new("pressureval", CoreDataType::Int),
     EventParameter::new("routethroughpatch", CoreDataType::Char),
 ];
 
 const MIDI_PROGRAM_CHANGE_INPUT_PARAMS: [EventParameter; 4] = [
     EventParameter::new("outport", CoreDataType::Int),
-    EventParameter::with_max_index("midichannel", CoreDataType::Int, MAX_MIDI_CHANNELS as i32),
+    EventParameter::with_max_index("midichannel", CoreDataType::Int, MAX_MIDI_CHANNEL_INDEX),
     EventParameter::new("programval", CoreDataType::Int),
     EventParameter::new("routethroughpatch", CoreDataType::Char),
 ];
 
 const MIDI_PITCH_BEND_INPUT_PARAMS: [EventParameter; 4] = [
     EventParameter::new("outport", CoreDataType::Int),
-    EventParameter::with_max_index("midichannel", CoreDataType::Int, MAX_MIDI_CHANNELS as i32),
+    EventParameter::with_max_index("midichannel", CoreDataType::Int, MAX_MIDI_CHANNEL_INDEX),
     EventParameter::new("pitchval", CoreDataType::Int),
     EventParameter::new("routethroughpatch", CoreDataType::Char),
 ];
@@ -113,14 +122,14 @@ const MIDI_PITCH_BEND_INPUT_PARAMS: [EventParameter; 4] = [
 const MIDI_KEY_INPUT_PARAMS: [EventParameter; 6] = [
     EventParameter::new("outport", CoreDataType::Int),
     EventParameter::new("keydown", CoreDataType::Char),
-    EventParameter::with_max_index("midichannel", CoreDataType::Int, MAX_MIDI_CHANNELS as i32),
+    EventParameter::with_max_index("midichannel", CoreDataType::Int, MAX_MIDI_CHANNEL_INDEX),
     EventParameter::with_max_index("notenum", CoreDataType::Int, MAX_MIDI_NOTES as i32),
     EventParameter::new("velocity", CoreDataType::Int),
     EventParameter::new("routethroughpatch", CoreDataType::Char),
 ];
 
 const MIDI_POLYPHONIC_PRESSURE_INPUT_PARAMS: [EventParameter; 3] = [
-    EventParameter::with_max_index("midichannel", CoreDataType::Int, MAX_MIDI_CHANNELS as i32),
+    EventParameter::with_max_index("midichannel", CoreDataType::Int, MAX_MIDI_CHANNEL_INDEX),
     EventParameter::with_max_index("notenum", CoreDataType::Int, MAX_MIDI_NOTES as i32),
     EventParameter::new("pressureval", CoreDataType::Int),
 ];
@@ -529,6 +538,7 @@ impl EventType {
         use EventType::*;
         let (name, slow) = match self {
             InputKey => ("key", false),
+            PulseSync => ("pulse-sync", false),
             InputJoystickButton => ("joybutton", false),
             InputMouseButton => ("mousebutton", false),
             InputMouseMotion => ("mousemotion", false),
@@ -634,7 +644,8 @@ impl EventType {
             SaveCurrentScene => ("save-current-scene", true),
             SetLoadLoopId => ("set-load-loop-id", false),
             SetDefaultLoopPlacement => ("set-default-loop-placement", false),
-            _ => ("", false),
+            // Not bindable: these have no name and never appear in a binding.
+            None | LastBindable | Last => ("", false),
         };
         (name, slow)
     }
@@ -646,117 +657,39 @@ impl EventType {
         self.meta().1
     }
 
+    /// Every bindable type, in the order `meta` names them.
+    ///
+    /// [`EventType::from_name`] is derived from this list, so the lookup table
+    /// cannot drift from the names; the round-trip test below fails when a
+    /// type is added to one table but not the other.
+    pub const BINDABLE: &[EventType] = &[
+        EventType::InputKey, EventType::InputJoystickButton, EventType::InputMouseButton, EventType::InputMouseMotion, EventType::InputMIDIKey, EventType::InputMIDIController,
+        EventType::InputMIDIProgramChange, EventType::InputMIDIChannelPressure, EventType::InputMIDIPitchBend, EventType::InputMIDIPolyphonicPressure, EventType::InputMIDISystemExclusive, EventType::InputMIDITimeCodeQuarterFrame,
+        EventType::InputMIDISongPosition, EventType::InputMIDISongSelect, EventType::InputMIDITuneRequest, EventType::InputMIDIActiveSensing, EventType::InputMIDIReset, EventType::InputMIDIClock,
+        EventType::InputMIDIStartStop, EventType::EndRecord, EventType::LoopList, EventType::SceneMarker, EventType::TriggerSet, EventType::ALSAMixerControlSet,
+        EventType::AddProcessor, EventType::DelProcessor, EventType::CleanupProcessor, EventType::LoopClicked, EventType::GoSub, EventType::StartSession,
+        EventType::StartInterface, EventType::ExitSession, EventType::SlideMasterInVolume, EventType::SlideMasterOutVolume, EventType::SlideInVolume, EventType::SetMasterInVolume,
+        EventType::SetMasterOutVolume, EventType::SetInVolume, EventType::ToggleInputRecord, EventType::SetMidiEchoPort, EventType::SetMidiEchoChannel, EventType::AdjustMidiTranspose,
+        EventType::FluidSynthEnable, EventType::SetMidiTuning, EventType::SetTriggerVolume, EventType::SlideLoopAmp, EventType::SetLoopAmp, EventType::AdjustLoopAmp,
+        EventType::TriggerLoop, EventType::MuteLoop, EventType::MoveLoop, EventType::RenameLoop, EventType::EraseLoop, EventType::EraseAllLoops,
+        EventType::EraseSelectedLoops, EventType::SlideLoopAmpStopAll, EventType::DeletePulse, EventType::SelectPulse, EventType::TapPulse, EventType::SwitchMetronome,
+        EventType::SetSyncType, EventType::SetSyncSpeed, EventType::SetMidiSync, EventType::ToggleSelectLoop, EventType::SelectOnlyPlayingLoops, EventType::SelectAllLoops,
+        EventType::TriggerSelectedLoops, EventType::SetSelectedLoopsTriggerVolume, EventType::AdjustSelectedLoopsAmp, EventType::InvertSelection, EventType::CreateSnapshot, EventType::RenameSnapshot,
+        EventType::TriggerSnapshot, EventType::SwapSnapshots, EventType::BrowserMoveToItem, EventType::BrowserMoveToItemAbsolute, EventType::BrowserSelectItem, EventType::BrowserRenameItem,
+        EventType::BrowserItemBrowsed, EventType::PatchBrowserMoveToBank, EventType::PatchBrowserMoveToBankByIndex, EventType::TransmitPlayingLoopsToDAW, EventType::SetVariable, EventType::ToggleVariable,
+        EventType::SplitVariableMSBLSB, EventType::ParamSetGetAbsoluteParamIdx, EventType::ParamSetGetParam, EventType::ParamSetSetParam, EventType::LogFaderVolToLinear, EventType::VideoShowParamSetBank,
+        EventType::VideoShowParamSetPage, EventType::VideoShowSnapshotPage, EventType::VideoShowLoop, EventType::VideoShowLayout, EventType::VideoSwitchInterface, EventType::VideoShowDisplay,
+        EventType::VideoShowHelp, EventType::VideoFullScreen, EventType::ShowDebugInfo, EventType::ToggleDiskOutput, EventType::SetAutoLoopSaving, EventType::SaveLoop,
+        EventType::SaveNewScene, EventType::SaveCurrentScene, EventType::SetLoadLoopId, EventType::SetDefaultLoopPlacement, EventType::PulseSync,
+    ];
+
+    /// Resolve a binding name back to its event type.
     pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "key" => Some(EventType::InputKey),
-            "joybutton" => Some(EventType::InputJoystickButton),
-            "mousebutton" => Some(EventType::InputMouseButton),
-            "mousemotion" => Some(EventType::InputMouseMotion),
-            "midikey" => Some(EventType::InputMIDIKey),
-            "midicontroller" => Some(EventType::InputMIDIController),
-            "midiprogramchange" => Some(EventType::InputMIDIProgramChange),
-            "midichannelpressure" => Some(EventType::InputMIDIChannelPressure),
-            "midipitchbend" => Some(EventType::InputMIDIPitchBend),
-            "midipolyphonicpressure" => Some(EventType::InputMIDIPolyphonicPressure),
-            "midisysex" => Some(EventType::InputMIDISystemExclusive),
-            "midimtcquarterframe" => Some(EventType::InputMIDITimeCodeQuarterFrame),
-            "midisongposition" => Some(EventType::InputMIDISongPosition),
-            "midisongselect" => Some(EventType::InputMIDISongSelect),
-            "miditunerequest" => Some(EventType::InputMIDITuneRequest),
-            "midiactivesensing" => Some(EventType::InputMIDIActiveSensing),
-            "midireset" => Some(EventType::InputMIDIReset),
-            "midiclock" => Some(EventType::InputMIDIClock),
-            "midistartstop" => Some(EventType::InputMIDIStartStop),
-            "end-record" => Some(EventType::EndRecord),
-            "loop-list" => Some(EventType::LoopList),
-            "scene-marker" => Some(EventType::SceneMarker),
-            "trigger-set" => Some(EventType::TriggerSet),
-            "go-sub" => Some(EventType::GoSub),
-            "loop-clicked" => Some(EventType::LoopClicked),
-            "add-processor" => Some(EventType::AddProcessor),
-            "del-processor" => Some(EventType::DelProcessor),
-            "cleanup-processor" => Some(EventType::CleanupProcessor),
-            "alsa-mixer-control-set" => Some(EventType::ALSAMixerControlSet),
-            "browser-move-to-item" => Some(EventType::BrowserMoveToItem),
-            "browser-move-to-item-absolute" => Some(EventType::BrowserMoveToItemAbsolute),
-            "browser-select-item" => Some(EventType::BrowserSelectItem),
-            "browser-rename-item" => Some(EventType::BrowserRenameItem),
-            "browser-item-browsed" => Some(EventType::BrowserItemBrowsed),
-            "patchbrowser-move-to-bank" => Some(EventType::PatchBrowserMoveToBank),
-            "patchbrowser-move-to-bank-by-index" => Some(EventType::PatchBrowserMoveToBankByIndex),
-            "start-freewheeling" => Some(EventType::StartSession),
-            "start-interface" => Some(EventType::StartInterface),
-            "exit-freewheeling" => Some(EventType::ExitSession),
-            "fluidsynth-enable" => Some(EventType::FluidSynthEnable),
-            "set-midi-tuning" => Some(EventType::SetMidiTuning),
-            "video-show-loop" => Some(EventType::VideoShowLoop),
-            "video-show-layout" => Some(EventType::VideoShowLayout),
-            "video-show-snapshot-page" => Some(EventType::VideoShowSnapshotPage),
-            "video-show-paramset-bank" => Some(EventType::VideoShowParamSetBank),
-            "video-show-paramset-page" => Some(EventType::VideoShowParamSetPage),
-            "video-switch-interface" => Some(EventType::VideoSwitchInterface),
-            "video-show-display" => Some(EventType::VideoShowDisplay),
-            "video-show-help" => Some(EventType::VideoShowHelp),
-            "video-full-screen" => Some(EventType::VideoFullScreen),
-            "show-debug-info" => Some(EventType::ShowDebugInfo),
-            "slide-master-in-volume" => Some(EventType::SlideMasterInVolume),
-            "slide-master-out-volume" => Some(EventType::SlideMasterOutVolume),
-            "slide-in-volume" => Some(EventType::SlideInVolume),
-            "set-master-in-volume" => Some(EventType::SetMasterInVolume),
-            "set-master-out-volume" => Some(EventType::SetMasterOutVolume),
-            "set-in-volume" => Some(EventType::SetInVolume),
-            "toggle-input-record" => Some(EventType::ToggleInputRecord),
-            "set-midi-echo-port" => Some(EventType::SetMidiEchoPort),
-            "set-midi-echo-channel" => Some(EventType::SetMidiEchoChannel),
-            "adjust-midi-transpose" => Some(EventType::AdjustMidiTranspose),
-            "paramset-get-absolute-param-index" => Some(EventType::ParamSetGetAbsoluteParamIdx),
-            "paramset-get-param" => Some(EventType::ParamSetGetParam),
-            "paramset-set-param" => Some(EventType::ParamSetSetParam),
-            "log-fader-to-linear" => Some(EventType::LogFaderVolToLinear),
-            "set-trigger-volume" => Some(EventType::SetTriggerVolume),
-            "slide-loop-amplifier" => Some(EventType::SlideLoopAmp),
-            "set-loop-amplifier" => Some(EventType::SetLoopAmp),
-            "adjust-loop-amplifier" => Some(EventType::AdjustLoopAmp),
-            "rename-loop" => Some(EventType::RenameLoop),
-            "erase-selected-loops" => Some(EventType::EraseSelectedLoops),
-            "toggle-disk-output" => Some(EventType::ToggleDiskOutput),
-            "set-auto-loop-saving" => Some(EventType::SetAutoLoopSaving),
-            "save-new-scene" => Some(EventType::SaveNewScene),
-            "save-current-scene" => Some(EventType::SaveCurrentScene),
-            "set-load-loop-id" => Some(EventType::SetLoadLoopId),
-            "create-snapshot" => Some(EventType::CreateSnapshot),
-            "swap-snapshots" => Some(EventType::SwapSnapshots),
-            "rename-snapshot" => Some(EventType::RenameSnapshot),
-            "trigger-snapshot" => Some(EventType::TriggerSnapshot),
-            "transmit-playing-loops-to-daw" => Some(EventType::TransmitPlayingLoopsToDAW),
-            "toggle-select-loop" => Some(EventType::ToggleSelectLoop),
-            "select-only-playing-loops" => Some(EventType::SelectOnlyPlayingLoops),
-            "select-all-loops" => Some(EventType::SelectAllLoops),
-            "trigger-selected-loops" => Some(EventType::TriggerSelectedLoops),
-            "set-selected-loops-trigger-volume" => Some(EventType::SetSelectedLoopsTriggerVolume),
-            "adjust-selected-loops-amp" => Some(EventType::AdjustSelectedLoopsAmp),
-            "invert-selection" => Some(EventType::InvertSelection),
-            "trigger-loop" => Some(EventType::TriggerLoop),
-            "mute-loop" => Some(EventType::MuteLoop),
-            "move-loop" => Some(EventType::MoveLoop),
-            "erase-loop" => Some(EventType::EraseLoop),
-            "erase-all-loops" => Some(EventType::EraseAllLoops),
-            "save-loop" => Some(EventType::SaveLoop),
-            "set-default-loop-placement" => Some(EventType::SetDefaultLoopPlacement),
-            "select-pulse" => Some(EventType::SelectPulse),
-            "delete-pulse" => Some(EventType::DeletePulse),
-            "tap-pulse" => Some(EventType::TapPulse),
-            "switch-metronome" => Some(EventType::SwitchMetronome),
-            "set-sync-type" => Some(EventType::SetSyncType),
-            "set-sync-speed" => Some(EventType::SetSyncSpeed),
-            "set-midi-sync" => Some(EventType::SetMidiSync),
-            "pulse-sync" => Some(EventType::PulseSync),
-            "slide-loop-amplifier-stop-all" => Some(EventType::SlideLoopAmpStopAll),
-            "set-variable" => Some(EventType::SetVariable),
-            "toggle-variable" => Some(EventType::ToggleVariable),
-            "split-variable-msb-lsb" => Some(EventType::SplitVariableMSBLSB),
-            _ => Option::None,
-        }
+        Self::BINDABLE
+            .iter()
+            .copied()
+            .find(|typ| typ.name() == name)
+
     }
 
     pub fn parameters(self) -> &'static [EventParameter] {
@@ -857,7 +790,22 @@ impl EventType {
             EventType::InputMIDITuneRequest => &[],
             EventType::InputMIDIActiveSensing => &[],
             EventType::InputMIDIReset => &[],
-            _ => &[],
+            // Explicitly parameterless: listed so that adding a variant forces
+            // an answer here instead of silently defaulting to "no parameters".
+            EventType::None
+            | EventType::StartSession
+            | EventType::ExitSession
+            | EventType::EndRecord
+            | EventType::LoopList
+            | EventType::SceneMarker
+            | EventType::TriggerSet
+            | EventType::AddProcessor
+            | EventType::DelProcessor
+            | EventType::CleanupProcessor
+            | EventType::EraseAllLoops
+            | EventType::InputMIDISystemExclusive
+            | EventType::LastBindable
+            | EventType::Last => &[],
         }
     }
 }
@@ -1392,8 +1340,59 @@ impl Event {
 // Event manager
 // ============================================================
 
+/// A registered listener.
+///
+/// The listener lives behind its own `Arc<Mutex<..>>` so a dispatch can clone
+/// the handles out of the registry, release the registry lock and only then
+/// call into user code (which may register another listener or post an event).
 struct ListenerEntry {
-    listener: Mutex<Box<dyn EventListener>>,
+    listener: Arc<Mutex<Box<dyn EventListener>>>,
+}
+
+type ListenerHandle = Arc<Mutex<Box<dyn EventListener>>>;
+
+/// Drain the shared queue and dispatch the batch.
+///
+/// Only the queue lock is held while taking the batch, and only the registry
+/// lock while snapshotting the listener handles: no lock is held while a
+/// callback runs, so a listener may re-enter the manager.
+fn drain_and_dispatch(
+    queue: &Mutex<VecDeque<Event>>,
+    listeners: &Mutex<HashMap<EventType, Vec<ListenerEntry>>>,
+) {
+    let batch: Vec<Event> = {
+        let mut queued = queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        queued.drain(..).collect()
+    };
+    if batch.is_empty() {
+        return;
+    }
+    let registry: HashMap<EventType, Vec<ListenerHandle>> = {
+        let lists = listeners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        lists
+            .iter()
+            .map(|(typ, entries)| {
+                (
+                    *typ,
+                    entries
+                        .iter()
+                        .map(|entry| Arc::clone(&entry.listener))
+                        .collect(),
+                )
+            })
+            .collect()
+    };
+    for ev in &batch {
+        if let Some(entries) = registry.get(&ev.get_type()) {
+            for entry in entries {
+                if let Ok(mut listener) = entry.lock() {
+                    listener.receive_event(ev, &());
+                }
+            }
+        }
+    }
 }
 
 pub struct EventManager {
@@ -1429,23 +1428,22 @@ impl EventManager {
             .spawn(move || {
                 while worker_running.load(Ordering::Acquire) {
                     let (state, wake) = &*worker_lock;
-                    let mut ready = state.lock().unwrap();
+                    let mut ready = state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     while !*ready && worker_running.load(Ordering::Acquire) {
-                        ready = wake.wait(ready).unwrap();
+                        ready = wake
+                            .wait(ready)
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
                     }
                     *ready = false;
                     drop(ready);
-                    let events = std::mem::take(&mut *worker_queue_ref.lock().unwrap());
-                    let lists = worker_listeners_ref.lock().unwrap();
-                    for ev in events {
-                        if let Some(entries) = lists.get(&ev.get_type()) {
-                            for entry in entries {
-                                if let Ok(mut listener) = entry.listener.lock() {
-                                    listener.receive_event(&ev, &());
-                                }
-                            }
-                        }
+                    // A shutdown must not dispatch another batch: callbacks
+                    // may not run once the owner believes teardown started.
+                    if !worker_running.load(Ordering::Acquire) {
+                        break;
                     }
+                    drain_and_dispatch(&worker_queue_ref, &worker_listeners_ref);
                 }
             })
             .expect("event dispatch thread");
@@ -1467,14 +1465,18 @@ impl EventManager {
         }
     }
 
+    /// Register a listener for `typ`.
+    ///
+    /// Poisoned locks are recovered throughout this manager (a panic inside a
+    /// listener must not make registration impossible).
     pub fn listen(&self, listener: Box<dyn EventListener>, typ: EventType) {
         self.listeners
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entry(typ)
             .or_default()
             .push(ListenerEntry {
-                listener: Mutex::new(listener),
+                listener: Arc::new(Mutex::new(listener)),
             });
     }
 
@@ -1482,7 +1484,16 @@ impl EventManager {
     /// when the bounded queue is full.
     #[allow(clippy::result_large_err)]
     pub fn try_post_event(&self, ev: Event) -> Result<(), Event> {
-        let mut queue = self.queue.lock().unwrap();
+        // An event posted after shutdown started would be enqueued and never
+        // dispatched; it is rejected (and counted) instead.
+        if !self.running.load(Ordering::Acquire) {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            return Err(ev);
+        }
+        let mut queue = self
+            .queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if queue.len() >= self.capacity {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             return Err(ev);
@@ -1490,7 +1501,7 @@ impl EventManager {
         queue.push_back(ev);
         drop(queue);
         let (m, cv) = &*self.lock;
-        *m.lock().unwrap() = true;
+        *m.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
         cv.notify_one();
         Ok(())
     }
@@ -1507,25 +1518,7 @@ impl EventManager {
     /// without any locks held.  This avoids a lock-ordering deadlock when a
     /// listener callback calls try_post_event (which also locks the queue).
     pub fn process_pending(&self) {
-        let batch: Vec<Event> = {
-            let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
-            q.drain(..).collect()
-        };
-        if batch.is_empty() {
-            return;
-        }
-        let lists = self.listeners.lock().unwrap_or_else(|e| e.into_inner());
-        for ev in &batch {
-            let typ = ev.get_type();
-            if let Some(entries) = lists.get(&typ) {
-                for entry in entries {
-                    if let Ok(mut listener) = entry.listener.lock() {
-                        let stub: () = ();
-                        listener.receive_event(ev, &stub);
-                    }
-                }
-            }
-        }
+        drain_and_dispatch(&self.queue, &self.listeners);
     }
 }
 
@@ -1539,11 +1532,59 @@ impl Drop for EventManager {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Release);
         let (m, cv) = &*self.lock;
-        drop(m.lock().unwrap_or_else(|e| e.into_inner()));
+        drop(m.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
         cv.notify_one();
-        if let Some(worker) = self.worker.take() {
-            join_with_timeout(worker);
+        if let Some(worker) = self.worker.take()
+            && !join_with_timeout(worker)
+        {
+            eprintln!(
+                "FreeWheeling: event dispatch thread did not exit within the shutdown \
+                 timeout; detached"
+            );
         }
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_bindable_type_round_trips_through_its_name() {
+        for typ in EventType::BINDABLE {
+            let name = typ.name();
+            assert!(!name.is_empty(), "{typ:?} has no binding name");
+            assert_eq!(
+                EventType::from_name(name),
+                Some(*typ),
+                "{name} does not resolve back to {typ:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn binding_names_are_unique() {
+        let mut names: Vec<&str> = EventType::BINDABLE.iter().map(|typ| typ.name()).collect();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), count, "two event types share a binding name");
+    }
+
+    #[test]
+    fn midi_channel_parameters_use_the_index_bound() {
+        for parameters in [
+            EventType::InputMIDIPitchBend,
+            EventType::InputMIDIChannelPressure,
+        ] {
+            let channel = parameters
+                .parameters()
+                .iter()
+                .find(|parameter| parameter.name == "midichannel")
+                .expect("event has a channel parameter");
+            assert_eq!(channel.max_index, MAX_MIDI_CHANNEL_INDEX);
+            assert!(channel.max_index < MAX_MIDI_CONTROLLERS as i32);
+        }
+    }
+}

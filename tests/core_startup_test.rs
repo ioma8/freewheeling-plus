@@ -64,10 +64,12 @@ impl StartupServices for Services {
         init_streamers_and_finalize_rings,
         add_processing_elements
     );
-    fn rollback_setup(&mut self) {
+    fn rollback_setup(&mut self) -> Result<(), String> {
         self.rollback += 1;
         self.calls.push("rollback_setup");
+        Ok(())
     }
+    fn commit_setup(&mut self) {}
 }
 
 #[test]
@@ -89,6 +91,14 @@ fn variables_match_startup_shape() {
     for name in LIVE_SYSTEM_VARIABLES {
         assert!(STARTUP_SYSTEM_VARIABLES.contains(name), "missing {name}");
     }
+    // The live list is a refresh inventory: it must carry exactly the same
+    // names (order is irrelevant, and consumers look them up).
+    assert_eq!(LIVE_SYSTEM_VARIABLES.len(), STARTUP_SYSTEM_VARIABLES.len());
+    let mut live = LIVE_SYSTEM_VARIABLES.to_vec();
+    let mut declared = STARTUP_SYSTEM_VARIABLES.to_vec();
+    live.sort_unstable();
+    declared.sort_unstable();
+    assert_eq!(live, declared);
 }
 
 #[test]

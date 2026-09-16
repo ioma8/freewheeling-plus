@@ -22,12 +22,14 @@
 
   <!-- Customization -->
   <interface setup="mercury.xml" switchable="0"/>
-  <!-- Legacy controller-specific interfaces are not bundled on macOS. -->
+  <!-- Legacy controller-specific interfaces are disabled for every platform
+       (macOS packaging copies the whole data/ tree, so the files are present;
+       commenting the entries out is what turns the interfaces off). -->
   <!-- <interface setup="synthedit.xml" switchable="0"/> -->
   <!-- <interface setup="bcf2000-synthedit.xml" switchable="0"/> -->
   <!-- <interface setup="rme-hdsp.xml" switchable="0"/> -->
 
-  <!-- Bare minimum -->
+  <!-- Browser / paramset displays -->
   <interface setup="browsers.xml" switchable="0"/>
 
   <!-- Controller device<->loop mapping interfaces -->
@@ -37,6 +39,10 @@
   <interface setup="bcf2000.xml"/>
 <!-- <interface setup="pcr-m1.xml" switchable="0"/> -->
   <interface setup="dancemat.xml"/>
-  <!-- Mobile touch layout; the Android build switches to it at startup. -->
+  <!-- Mobile touch layout; the Android build switches to it at startup.
+       Interface ids are auto-assigned by position among the switchable entries
+       above (config.rs numbers them 1..N in file order) and the Android switch
+       uses mobile.xml's real id, which mobile.xml also captures for its own
+       bindings, so this entry may be moved or reordered freely. -->
   <interface setup="mobile.xml"/>
 </interfaces>

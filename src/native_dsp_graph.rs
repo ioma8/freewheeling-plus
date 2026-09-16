@@ -14,8 +14,21 @@ use std::time::Duration;
 use crossbeam_queue::ArrayQueue;
 use crate::file_streamer::PcmOutput;
 
-/// Legacy pckeyboard addresses are zero-based and extend through 322.
-pub const MAX_RUNTIME_LOOPS: usize = 323;
+/// Size of the runtime loop address space.
+///
+/// The shipped interfaces address loops by fixed legacy offsets, so the space
+/// has to cover all of them; a binding whose id falls outside it is rejected
+/// (`InvalidLoopId`) and aborts its whole dispatch batch:
+///
+/// * `data/pckeyboard.xml` — zero-based and extends through 322;
+/// * `data/midifootswitch.xml` — footswitch loop at 340;
+/// * `data/bcf2000.xml` — controller range base at 350;
+/// * `data/midikeyboard.xml` — piano range base at 350 plus a note offset of
+///   up to 127 (477).
+///
+/// 512 covers every one of those with headroom for the page shifts the piano
+/// interface applies on top.
+pub const MAX_RUNTIME_LOOPS: usize = 512;
 /// A scene reset can enqueue one erase per supported loop slot.
 pub const DEFAULT_COMMAND_CAPACITY: usize = 512;
 pub const DEFAULT_STATUS_CAPACITY: usize = 64;
@@ -350,49 +363,49 @@ impl TransferPool {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RuntimeCommand {
     Record {
-        slot: u8,
+        slot: u16,
         /// How long the initiating tap was held (ms). A free (non-synced)
         /// recording pre-rolls by this amount from the input-history ring so
         /// the captured audio starts at the moment of touch, not release.
         presslen_ms: u32,
     },
     Overdub {
-        slot: u8,
+        slot: u16,
         feedback: f32,
         gain: f32,
     },
     StopRecord,
     Trigger {
-        slot: u8,
+        slot: u16,
         gain: f32,
     },
     SetTriggerGain {
-        slot: u8,
+        slot: u16,
         gain: f32,
     },
     SetLoopGain {
-        slot: u8,
+        slot: u16,
         gain: f32,
     },
     AdjustLoopGain {
-        slot: u8,
+        slot: u16,
         factor: f32,
     },
     AdjustLoopGainDelta {
-        slot: u8,
+        slot: u16,
         amount: f32,
     },
     ResetLoopGainDeltas,
     MoveLoop {
-        from: u8,
-        to: u8,
+        from: u16,
+        to: u16,
     },
     Mute {
-        slot: u8,
+        slot: u16,
         muted: bool,
     },
     Erase {
-        slot: u8,
+        slot: u16,
     },
     SetInputMonitor(f32),
     AdjustInputMonitor(f32),
@@ -434,7 +447,7 @@ pub enum RuntimeCommand {
     /// C++ `Fweelin::SetSyncType`: false = bar sync, true = beat sync.
     SetSyncType(bool),
     SetPulseFromLoop {
-        slot: u8,
+        slot: u16,
     },
     /// C++ `LoopManager::TapPulse` with `pulse` fixed to the single runtime
     /// pulse: the first tap arms a zero-length stopped pulse, the second
@@ -482,14 +495,14 @@ pub enum RuntimeCommand {
         cents: f32,
     },
     ImportLoop {
-        slot: u8,
+        slot: u16,
         handle: PcmTransferHandle,
         position: u32,
         mode: LoopMode,
         gain: f32,
     },
     RequestLoopExport {
-        slot: u8,
+        slot: u16,
         replacement: PcmTransferHandle,
     },
     RequestSnapshot,
@@ -535,10 +548,10 @@ impl Default for RuntimeLoopSnapshot {
 /// is the stereo sample range (`max - min`); average is mean absolute stereo
 /// amplitude. The renderer consumes those two signals before bending its flat
 /// strip into a ring. Eight entries cover the visible scope snapshot without
-/// making every one of the 323 address slots carry video memory.
+/// making every one of the loop address slots carry video memory.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RuntimeScopePreview {
-    pub loop_id: u8,
+    pub loop_id: u16,
     pub position_column: u16,
     pub chunk_count: u16,
     pub current_peak: f32,
@@ -549,7 +562,7 @@ pub struct RuntimeScopePreview {
 impl Default for RuntimeScopePreview {
     fn default() -> Self {
         Self {
-            loop_id: u8::MAX,
+            loop_id: u16::MAX,
             position_column: 0,
             chunk_count: 0,
             current_peak: 0.0,
@@ -612,22 +625,22 @@ pub enum RuntimeStatus {
     Snapshot(RuntimeSnapshot),
     CommandRejected(RuntimeCommand),
     RecordingFull {
-        slot: u8,
+        slot: u16,
     },
     LoopCompleted {
-        slot: u8,
+        slot: u16,
     },
     LoopImported {
-        slot: u8,
+        slot: u16,
         handle: PcmTransferHandle,
     },
     LoopExported {
-        slot: u8,
+        slot: u16,
         handle: PcmTransferHandle,
         metadata: LoopTransferMetadata,
     },
     TransferError {
-        slot: u8,
+        slot: u16,
         handle: PcmTransferHandle,
         error: PcmTransferError,
     },
@@ -707,7 +720,7 @@ impl RuntimeControls {
 
     pub fn try_import_loop(
         &mut self,
-        slot: u8,
+        slot: u16,
         handle: PcmTransferHandle,
         position: u32,
         mode: LoopMode,
@@ -747,7 +760,7 @@ impl RuntimeControls {
 
     pub fn try_request_loop_export(
         &mut self,
-        slot: u8,
+        slot: u16,
     ) -> Result<PcmTransferHandle, PcmTransferError> {
         let replacement = self.transfers.acquire()?;
         let transfer = self.transfers.slot(replacement).unwrap();
@@ -863,7 +876,7 @@ struct LoopSlot {
 
 #[derive(Clone, Copy)]
 struct ExportJob {
-    slot: u8,
+    slot: u16,
     handle: PcmTransferHandle,
     cursor: usize,
     metadata: LoopTransferMetadata,
@@ -1024,7 +1037,7 @@ impl OverdubJumpCache {
     }
 }
 
-/// Startup-owned scope state. Boxing it keeps the fixed 323-loop realtime
+/// Startup-owned scope state. Boxing it keeps the fixed-size realtime
 /// processor compact enough for normal audio/test thread stacks.
 struct LoopScopeCache {
     peaks: [f32; MAX_LOOP_SCOPE_CHUNKS],
@@ -1711,7 +1724,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                 continue;
             }
             let mut preview = RuntimeScopePreview {
-                loop_id: loop_id as u8,
+                loop_id: loop_id as u16,
                 position_column: (slot.position / PEAK_AVG_CHUNK_FRAMES) as u16,
                 chunk_count: (slot.len / PEAK_AVG_CHUNK_FRAMES).min(MAX_LOOP_SCOPE_CHUNKS) as u16,
                 current_peak: slot.recent_peak,
@@ -1833,7 +1846,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
             }
             self.recording_pulse_extension_applied = false;
             if notify && extension.1 {
-                self.send_status(RuntimeStatus::LoopCompleted { slot: index as u8 });
+                self.send_status(RuntimeStatus::LoopCompleted { slot: index as u16 });
             }
         }
     }
@@ -2799,7 +2812,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
     }
 
     /// Returns the recorded length of a loop slot.
-    pub fn recorded_frames(&self, slot: u8) -> Option<NFrames> {
+    pub fn recorded_frames(&self, slot: u16) -> Option<NFrames> {
         let idx = slot as usize;
         self.loops.get(idx).and_then(|s| {
             if s.len == 0 {
@@ -2811,7 +2824,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
     }
 
     /// Reposition a new recording so its position matches the current pulse phase.
-    pub fn resync_recording(&mut self, slot: u8) {
+    pub fn resync_recording(&mut self, slot: u16) {
         let idx = slot as usize;
         let Some(s) = self.loops.get_mut(idx) else {
             return;
@@ -2831,7 +2844,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
 
     /// Reposition a playing loop to match the current pulse phase after a manual
     /// pulse-length change.
-    pub fn resync_playback(&mut self, slot: u8) {
+    pub fn resync_playback(&mut self, slot: u16) {
         let idx = slot as usize;
         let Some(s) = self.loops.get_mut(idx) else {
             return;
@@ -2877,7 +2890,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
 }
 
 impl RuntimeCommand {
-    fn mutates_loop(self, slot: u8) -> bool {
+    fn mutates_loop(self, slot: u16) -> bool {
         match self {
             Self::Record { slot: target, presslen_ms: 0 }
             | Self::Overdub { slot: target, .. }
@@ -3054,7 +3067,7 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                             if slot.pulse_synced
                                 && slot.pulse_beats != 0
                                 && slot.len != 0
-                                && self.pulse_long_count % slot.pulse_beats == 0 =>
+                                && self.pulse_long_count.is_multiple_of(slot.pulse_beats) =>
                         {
                             let expected = pulse_synced_loop_position(
                                 self.pulse_frames,
@@ -3144,7 +3157,7 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                             self.recording_tail_remaining = None;
                             let _ = self
                                 .statuses
-                                .try_send(RuntimeStatus::RecordingFull { slot: index as u8 });
+                                .try_send(RuntimeStatus::RecordingFull { slot: index as u16 });
                         } else if self.recording_skip_frames > 0 {
                             self.recording_skip_frames -= 1;
                         } else {
@@ -3482,7 +3495,7 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
                     .min(CALIBRATION_PULSE_FRAMES as usize);
 
                 if calibration.correlation_seen == CALIBRATION_PULSE_FRAMES as usize
-                    && sample % 8 == 0
+                    && sample.is_multiple_of(8)
                 {
                     let mut dot = 0.0_f32;
                     let mut input_energy = 0.0_f32;
@@ -4186,7 +4199,7 @@ mod tests {
 
         // Every new recording observes the still-active pulse, including
         // recordings started after the reselect.
-        for slot in [1_u8, 2_u8] {
+        for slot in [1_u16, 2_u16] {
             controls
                 .try_command(RuntimeCommand::Record { slot, presslen_ms: 0 })
                 .unwrap();
@@ -5187,7 +5200,7 @@ mod tests {
     }
 
     #[test]
-    fn supports_high_u8_loop_ids_without_per_id_sample_buffers() {
+    fn supports_high_loop_ids_without_per_id_sample_buffers() {
         let (mut processor, mut controls) = processor(0.0);
         controls
             .try_command(RuntimeCommand::Record { slot: 255, presslen_ms: 0 })
@@ -5212,7 +5225,7 @@ mod tests {
         // set, then give the real manager-thread boundary a chance to run
         // before requiring the next block; an instantaneous 41-command burst
         // is allowed to exhaust either implementation's ready list.
-        for slot in 0..DEFAULT_AUDIO_BLOCKS as u8 {
+        for slot in 0..DEFAULT_AUDIO_BLOCKS as u16 {
             controls
                 .try_command(RuntimeCommand::Record { slot, presslen_ms: 0 })
                 .unwrap();
@@ -5234,7 +5247,7 @@ mod tests {
         assert!(!processor.loop_storage.free.is_empty());
         controls
             .try_command(RuntimeCommand::Record {
-                slot: DEFAULT_AUDIO_BLOCKS as u8,
+                slot: DEFAULT_AUDIO_BLOCKS as u16,
                 presslen_ms: 0,
             })
             .unwrap();
@@ -5372,7 +5385,7 @@ mod tests {
             )
             .unwrap();
         controls
-            .try_import_loop(handle.index as u8, handle, 0, LoopMode::Playing, 1.0)
+            .try_import_loop(handle.index, handle, 0, LoopMode::Playing, 1.0)
             .unwrap();
         run(&mut processor, &[], &[]);
         let scope = &processor.loops[handle.index as usize].scope;

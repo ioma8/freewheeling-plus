@@ -56,19 +56,24 @@ impl NativeLoopSelection {
         Ok(())
     }
 
+    /// Replace the set with `loop_ids` (deduplicated, in order).
+    ///
+    /// The new selection is built first and committed only on success, so a
+    /// capacity failure leaves the caller's existing selection intact.
     pub fn select_all(&mut self, set: usize, loop_ids: &[usize]) -> Result<(), String> {
         let capacity = self.capacity;
-        let selected = self.set_mut(set)?;
-        selected.clear();
+        let capacity_hint = self.set(set)?.len().min(capacity);
+        let mut next = Vec::with_capacity(capacity_hint);
         for &id in loop_ids {
-            if !selected.contains(&id) {
-                if selected.len() == capacity {
-                    selected.clear();
-                    return Err("selection capacity exceeded".to_string());
-                }
-                selected.push(id);
+            if next.contains(&id) {
+                continue;
             }
+            if next.len() == capacity {
+                return Err("selection capacity exceeded".to_string());
+            }
+            next.push(id);
         }
+        *self.set_mut(set)? = next;
         Ok(())
     }
 
@@ -82,20 +87,23 @@ impl NativeLoopSelection {
         self.select_all(set, &ids)
     }
 
+    /// Invert the set against `loop_ids`.
+    ///
+    /// Like [`Self::select_all`], the result is committed only on success.
     pub fn invert(&mut self, set: usize, loop_ids: &[usize]) -> Result<(), String> {
         let old = self.set(set)?.clone();
         let capacity = self.capacity;
-        let selected = self.set_mut(set)?;
-        selected.clear();
+        let mut next = Vec::with_capacity(old.len().min(capacity));
         for &id in loop_ids {
-            if !old.contains(&id) {
-                if selected.len() == capacity {
-                    selected.clear();
-                    return Err("selection capacity exceeded".to_string());
-                }
-                selected.push(id);
+            if old.contains(&id) || next.contains(&id) {
+                continue;
             }
+            if next.len() == capacity {
+                return Err("selection capacity exceeded".to_string());
+            }
+            next.push(id);
         }
+        *self.set_mut(set)? = next;
         Ok(())
     }
 
@@ -109,8 +117,11 @@ impl NativeLoopSelection {
     /// Keep imported/runtime loop ids valid in every set.  This also removes
     /// stale selections after a library import or reload.
     pub fn update_after_import(&mut self, available_ids: &[usize]) {
+        // Membership is looked up once per id: `available_ids.contains` inside
+        // `retain` made this quadratic on every import/reload.
+        let available: std::collections::HashSet<usize> = available_ids.iter().copied().collect();
         for set in &mut self.sets {
-            set.retain(|id| available_ids.contains(id));
+            set.retain(|id| available.contains(id));
         }
     }
 
@@ -126,9 +137,14 @@ impl NativeLoopSelection {
     /// Return ids to erase, then remove them from all sets.  The caller owns
     /// deleting the actual loop objects.
     pub fn erase_selected(&mut self, set: usize) -> Result<Vec<usize>, String> {
-        let ids = self.set(set)?.clone();
-        for id in &ids {
-            self.update_after_erase(*id);
+        // `take` hands the caller the ids without cloning them; the set is
+        // already empty, and every other set is filtered once for all ids.
+        let ids = std::mem::take(self.set_mut(set)?);
+        if !ids.is_empty() {
+            let erased: std::collections::HashSet<usize> = ids.iter().copied().collect();
+            for other in &mut self.sets {
+                other.retain(|id| !erased.contains(id));
+            }
         }
         Ok(ids)
     }

@@ -36,8 +36,18 @@ fi
 
 STAGE=${FWP_ANDROID_STAGE:-$ROOT/target/android-stage}
 OUT=$ROOT/target/release/apk
+mkdir -p "$OUT"
 LIB="$ROOT/target/aarch64-linux-android/release/libfreewheeling_plus.so"
-SDL_JAVA="$HOME/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sdl2-sys-0.38.0/SDL/android-project/app/src/main/java"
+# Resolved from the cargo registry rather than a hardcoded index hash and
+# version, so a registry bump or a vendored CARGO_HOME cannot silently skip the
+# Java-source staging below.
+REGISTRY_SRC=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 1 -type d -name 'index.crates.io-*' 2>/dev/null | head -n 1)
+SDL2_SYS_DIR=$(find "$REGISTRY_SRC" -maxdepth 1 -type d -name 'sdl2-sys-*' 2>/dev/null | head -n 1)
+if [ -z "$REGISTRY_SRC" ] || [ -z "$SDL2_SYS_DIR" ]; then
+    echo "error: sdl2-sys source not found under ${CARGO_HOME:-$HOME/.cargo}/registry/src; run cargo fetch first" >&2
+    exit 1
+fi
+SDL_JAVA="$SDL2_SYS_DIR/SDL/android-project/app/src/main/java"
 
 for command in javac java aapt2 d8 zipalign apksigner; do
     command -v "$command" >/dev/null 2>&1 || PATH="$BUILD_TOOLS:$PATH"
@@ -59,8 +69,20 @@ javac --release 8 -nowarn -classpath "$PLATFORM/android.jar" \
 
 # 2. Dex the compiled classes.
 mkdir -p "$STAGE/dex"
-d8 --release --lib "$PLATFORM/android.jar" --output "$STAGE/dex" \
-    $(find "$STAGE/classes" -name '*.class')
+# The class paths are passed as an argument vector (not through shell word
+# splitting), so a checkout path containing whitespace cannot split them.
+python3 - "$PLATFORM/android.jar" "$STAGE/classes" "$STAGE/dex" <<'CLASSES'
+import pathlib, subprocess, sys
+
+android_jar, classes, output = sys.argv[1:4]
+inputs = sorted(str(path) for path in pathlib.Path(classes).rglob("*.class"))
+if not inputs:
+    raise SystemExit(f"error: no compiled classes under {classes}")
+subprocess.run(
+    ["d8", "--release", "--lib", android_jar, "--output", output, *inputs],
+    check=True,
+)
+CLASSES
 
 # 3. Link the base APK: manifest, resources, and assets (bundled data/).
 # aapt2 -A adds a directory's *contents* at the asset root, so passing
@@ -88,9 +110,33 @@ fi
 # interface; on the phone the grid replaces them (and there is no keyboard
 # to switch browsers with). Hide them in the Android assets.
 if [ -f "$ASSET_ROOT/data/browsers.xml" ]; then
-    sed 's/show="1"/show="0"/g' "$ASSET_ROOT/data/browsers.xml" > "$ASSET_ROOT/data/browsers.xml.tmp"
-    mv "$ASSET_ROOT/data/browsers.xml.tmp" "$ASSET_ROOT/data/browsers.xml"
-    echo "Hidden desktop-only browsers for Android"
+    # Hide exactly the two desktop browsers by id: a blanket
+    # `show="1" -> 0` rewrite would also hide a display added later, and a
+    # count-based check cannot tell the two apart.
+    python3 - "$ASSET_ROOT/data/browsers.xml" <<'HIDE'
+import pathlib, re, sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+hidden = ("DISPLAY_browser_patch", "DISPLAY_loop_tray")
+for display_id in hidden:
+    pattern = re.compile(r'<display\b[^>]*?id="' + re.escape(display_id) + r'"[^>]*?>', re.S)
+    tag = pattern.search(text)
+    if tag is None:
+        raise SystemExit(f"error: {display_id} not found in {path}")
+    rewritten = tag.group(0).replace('show="1"', 'show="0"')
+    if rewritten == tag.group(0):
+        raise SystemExit(f"error: {display_id} has no visible show=\"1\" in {path}")
+    text = text[: tag.start()] + rewritten + text[tag.end() :]
+path.write_text(text, encoding="utf-8")
+print("hidden desktop-only displays: " + ", ".join(hidden))
+HIDE
+    for display_id in DISPLAY_browser_patch DISPLAY_loop_tray; do
+        grep -qE "<display[^>]*id=\"$display_id\"[^>]*show=\"0\"" "$ASSET_ROOT/data/browsers.xml" || {
+            echo "error: $display_id is still visible in the Android assets" >&2
+            exit 1
+        }
+    done
 fi
 # The scene browser is the mobile saved-sessions list: give it a large box
 # above the action buttons instead of the desktop bottom strip.
@@ -137,17 +183,25 @@ zipalign -f -P 16 4 "$STAGE/base.apk" "$STAGE/aligned.apk"
 KEYSTORE="${CARGO_APK_RELEASE_KEYSTORE:-$HOME/.android/debug.keystore}"
 if [ ! -f "$KEYSTORE" ] && command -v keytool >/dev/null 2>&1; then
     mkdir -p "$HOME/.android"
+    # Let keytool's diagnostic surface: `|| true` used to hide a read-only
+    # $HOME/.android or a weak crypto policy behind a misleading message.
+    export CARGO_APK_RELEASE_KEYSTORE_PASSWORD="${CARGO_APK_RELEASE_KEYSTORE_PASSWORD:-android}"
+    # `:env` (JDK 9+) reads the password from the environment: passing it as
+    # `-storepass <value>`/`-keypass <value>` would expose it through ps//proc.
     keytool -genkeypair -keystore "$KEYSTORE" \
-        -storepass "${CARGO_APK_RELEASE_KEYSTORE_PASSWORD:-android}" \
-        -alias androiddebugkey -keypass "${CARGO_APK_RELEASE_KEYSTORE_PASSWORD:-android}" \
-        -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -validity 3650 >/dev/null 2>&1 || true
+        -storepass:env CARGO_APK_RELEASE_KEYSTORE_PASSWORD \
+        -alias androiddebugkey -keypass:env CARGO_APK_RELEASE_KEYSTORE_PASSWORD \
+        -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -validity 3650
 fi
 if [ ! -f "$KEYSTORE" ]; then
-    echo "no signing keystore available; set CARGO_APK_RELEASE_KEYSTORE" >&2
+    echo "no signing keystore available; set CARGO_APK_RELEASE_KEYSTORE (or look at the keytool error above)" >&2
     exit 1
 fi
+# The password is passed through the environment: a command-line `--ks-pass`
+# is world-readable through `ps`/`/proc`.
+export CARGO_APK_RELEASE_KEYSTORE_PASSWORD="${CARGO_APK_RELEASE_KEYSTORE_PASSWORD:-android}"
 apksigner sign --ks "$KEYSTORE" \
-    --ks-pass "pass:${CARGO_APK_RELEASE_KEYSTORE_PASSWORD:-android}" \
+    --ks-pass "env:CARGO_APK_RELEASE_KEYSTORE_PASSWORD" \
     --out "$OUT/freewheeling-plus.apk" "$STAGE/aligned.apk"
 
 apksigner verify --verbose "$OUT/freewheeling-plus.apk" | head -3

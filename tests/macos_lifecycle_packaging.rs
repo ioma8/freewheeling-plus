@@ -1,4 +1,6 @@
-#![cfg(target_os = "macos")]
+// macOS-only *API* tests carry their own `#[cfg(target_os = "macos")]`; the
+// file-content checks below read repository scripts and docs, so they run on
+// every platform (they used to be skipped by a file-level gate).
 
 use freewheeling_plus::macos::{
     application_support_path, bundle_resources_path, create_application_support_path,
@@ -8,6 +10,12 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[path = "support/scratch.rs"]
+mod scratch;
+
+use scratch::ScratchDir;
+
+#[cfg(target_os = "macos")]
 #[test]
 fn finder_arguments_keep_documents_already_supplied_by_launch_services() {
     let launch = LaunchArguments::from_args([
@@ -25,6 +33,7 @@ fn finder_arguments_keep_documents_already_supplied_by_launch_services() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn bundle_resources_are_derived_from_executable_location() {
     assert_eq!(
@@ -37,14 +46,14 @@ fn bundle_resources_are_derived_from_executable_location() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn application_support_creation_is_recursive_and_idempotent() {
-    let home = std::env::temp_dir().join(format!("fweelin-home-{}", std::process::id()));
+    let home = ScratchDir::new("fweelin-home");
     let expected = application_support_path(&home);
     assert_eq!(create_application_support_path(&home).unwrap(), expected);
     assert_eq!(create_application_support_path(&home).unwrap(), expected);
     assert!(expected.is_dir());
-    fs::remove_dir_all(home).unwrap();
 }
 
 #[test]

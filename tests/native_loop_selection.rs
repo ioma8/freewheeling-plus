@@ -1,7 +1,4 @@
-#[path = "../src/native_loop_selection.rs"]
-mod native_loop_selection;
-
-use native_loop_selection::{NUM_SELECTION_SETS, NativeLoopSelection};
+use freewheeling_plus::native_loop_selection::{NUM_SELECTION_SETS, NativeLoopSelection};
 
 #[test]
 fn all_sets_are_independent_and_toggle_is_idempotent() {
@@ -37,6 +34,49 @@ fn erase_and_import_update_every_set() {
     s.update_after_import(&[4]);
     assert_eq!(s.selected_ids(1).unwrap(), &[4]);
     assert_eq!(s.selected_ids(2).unwrap(), &[4]);
+}
+
+#[test]
+fn a_failed_bulk_selection_keeps_the_previous_selection() {
+    let mut s = NativeLoopSelection::new(2);
+    s.select_all(0, &[1, 2]).unwrap();
+    // The capacity check happens while building the new selection, so the old
+    // one must survive the error.
+    assert!(s.select_all(0, &[3, 4, 5]).is_err());
+    assert_eq!(s.selected_ids(0).unwrap(), &[1, 2]);
+
+    assert!(s.invert(0, &[3, 4, 5]).is_err());
+    assert_eq!(s.selected_ids(0).unwrap(), &[1, 2]);
+}
+
+#[test]
+fn stale_ids_are_pruned_and_selection_is_handed_over_on_erase() {
+    let mut s = NativeLoopSelection::new(2);
+    s.select_all(0, &[1, 2]).unwrap();
+    s.select_all(1, &[2, 3]).unwrap();
+    // Ids that are no longer available must be dropped from every set.
+    s.update_after_import(&[2, 3]);
+    assert_eq!(s.selected_ids(0).unwrap(), &[2]);
+    assert_eq!(s.selected_ids(1).unwrap(), &[2, 3]);
+
+    let erased = s.erase_selected(0).unwrap();
+    assert_eq!(erased, vec![2]);
+    assert!(s.selected_ids(0).unwrap().is_empty());
+    assert_eq!(s.selected_ids(1).unwrap(), &[3]);
+}
+
+#[test]
+fn out_of_range_sets_are_reported_by_every_accessor() {
+    let mut s = NativeLoopSelection::new(2);
+    let invalid = NUM_SELECTION_SETS;
+    assert!(s.clear(invalid).is_err());
+    assert!(s.selected(invalid, 0).is_err());
+    assert!(s.selected_ids(invalid).is_err());
+    assert!(s.count(invalid).is_err());
+    assert!(s.toggle(invalid, 1).is_err());
+    assert!(s.select_all(invalid, &[1]).is_err());
+    assert!(s.invert(invalid, &[1]).is_err());
+    assert!(s.erase_selected(invalid).is_err());
 }
 
 #[test]

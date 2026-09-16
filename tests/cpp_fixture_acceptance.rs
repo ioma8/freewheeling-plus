@@ -184,8 +184,18 @@ fn verify_manifest(directory: &Path) -> Result<(), String> {
 
 #[test]
 fn unavailable_artifacts_are_not_silently_substituted() {
-    if std::env::var_os("FW_REQUIRE_COMPLETE_CPP_GOLDEN").is_none() {
+    // The check is opt-in locally, but a `CI` run must never report green
+    // while skipping it: the fixture tree is authoritative there.
+    if std::env::var_os("FW_REQUIRE_COMPLETE_CPP_GOLDEN").is_none()
+        && std::env::var_os("CI").is_none()
+    {
+        eprintln!(
+            "skipping: set FW_REQUIRE_COMPLETE_CPP_GOLDEN=1 (or run under CI) to require the full C++ fixture set"
+        );
         return;
     }
-    assert!(!root().join("UNAVAILABLE").exists());
+    assert!(
+        !root().join("UNAVAILABLE").exists(),
+        "the C++ fixture tree is incomplete (see UNAVAILABLE)"
+    );
 }

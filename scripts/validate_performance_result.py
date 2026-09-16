@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 import pathlib
 import sys
 
@@ -33,7 +34,13 @@ def main() -> int:
     args = parser.parse_args()
     try:
         try:
-            value = json.loads(args.result.read_text(encoding="utf-8"))
+            # `json.loads` accepts the non-standard NaN/Infinity tokens by
+            # default; they defeat every later comparison, so they are
+            # rejected at parse time.
+            value = json.loads(
+                args.result.read_text(encoding="utf-8"),
+                parse_constant=lambda token: fail(f"non-finite JSON value: {token}"),
+            )
         except FileNotFoundError:
             fail(f"required performance result is missing: {args.result}")
         except json.JSONDecodeError as error:
@@ -43,9 +50,14 @@ def main() -> int:
         for name, expected_type in REQUIRED.items():
             if name not in value:
                 fail(f"missing required field: {name}")
-            if isinstance(value[name], bool) or not isinstance(value[name], expected_type):
+            field = value[name]
+            if isinstance(field, bool) or not isinstance(field, expected_type):
                 fail(f"field {name} has the wrong type")
-            if value[name] < 0:
+            # `1e400` parses to `inf`, and `inf < 0` is false: the finiteness
+            # check has to come before the comparison.
+            if isinstance(field, float) and not math.isfinite(field):
+                fail(f"field {name} must be a finite number")
+            if field < 0:
                 fail(f"field {name} must be non-negative")
         if value["schema_version"] != 1:
             fail("schema_version must be 1")
@@ -53,6 +65,10 @@ def main() -> int:
             fail("acceptance requires 48000 Hz and 128 or 256 frames")
         if value["callback_allocations"] or value["blocking_lock_attempts"] or value["unexplained_xruns"]:
             fail("callback allocations, blocking locks, and unexplained xruns must all be zero")
+        if value["callback_deadline_us"] <= 0:
+            fail("callback_deadline_us must be positive")
+        if value["rss_start_bytes"] <= 0:
+            fail("rss_start_bytes must be positive")
         if value["callback_p99_us"] >= value["callback_deadline_us"] * 0.70:
             fail("callback p99 must be below 70% of the deadline")
         if value["rss_peak_bytes"] < value["rss_start_bytes"]:

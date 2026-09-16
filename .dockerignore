@@ -1,0 +1,24 @@
+# Build context for the Linux acceptance image.
+#
+# The image only needs the crate sources: keeping .git/ (full history),
+# target/ (gigabytes of build output) and local artifacts out of the context
+# avoids shipping them in the image and stops unrelated changes from
+# invalidating the expensive apt/toolchain layers.
+.git/
+.github/
+target/
+dist/
+*.tar.gz
+*.app/
+acceptance-evidence/
+freewheeling-diagnostic-*/
+.cargo/registry/
+# Local agent/tool state, which is git-ignored and may hold credentials.
+.reasonix/
+*.create_token
+.env*
+# Editor and OS files are never part of the image.
+.idea/
+.vscode/
+*.swp
+.DS_Store

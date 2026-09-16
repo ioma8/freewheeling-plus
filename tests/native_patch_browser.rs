@@ -6,7 +6,9 @@ fn fixture_browser() -> NativePatchBrowser {
     let mut config = FloConfig::new();
     config.patch_banks.push(PatchBankConfig {
         interface_id: 0,
-        patches: PathBuf::from("data/patches3.xml"),
+        // Anchored to the crate root: a relative path depends on the test
+        // runner's working directory.
+        patches: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/patches3.xml"),
         midi_port: 1,
         separate_channels: false,
         suppress_program_changes: true,
@@ -70,7 +72,7 @@ fn suppression_applies_only_to_program_messages_not_echo_destinations() {
     assert!(!plan.external_midi.is_empty());
     assert!(plan.echo_routing.iter().any(|route| {
         route.midi_port == plan.external_midi[0].midi_port
-            && Some(route.channel) == Some(plan.external_midi[0].channel)
+            && route.channel == plan.external_midi[0].channel
     }));
 }
 
@@ -107,4 +109,87 @@ fn selecting_an_empty_or_invalid_index_is_explicit() {
     let mut browser = fixture_browser();
     assert!(browser.select_bank(99).is_none());
     assert!(browser.select_item(999).is_none());
+}
+
+fn browser_for(
+    xml: &str,
+    midi_port: u32,
+    separate_channels: bool,
+) -> Result<NativePatchBrowser, String> {
+    let path = std::env::temp_dir().join(format!(
+        "freewheeling-patch-browser-{}-{:?}.xml",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::write(&path, xml).unwrap();
+    let mut config = FloConfig::new();
+    config.patch_banks.push(PatchBankConfig {
+        interface_id: 0,
+        patches: path.clone(),
+        midi_port,
+        separate_channels,
+        suppress_program_changes: false,
+        tag: None,
+    });
+    let browser = NativePatchBrowser::from_config(&config);
+    let _ = std::fs::remove_file(&path);
+    browser
+}
+
+#[test]
+fn malformed_keyranges_are_rejected_with_context() {
+    let error = browser_for(
+        r#"<patchlist><combi name="c"><zone keyrange="10>5"/></combi></patchlist>"#,
+        0,
+        false,
+    )
+    .unwrap_err();
+    assert!(error.contains("10>5"), "{error}");
+
+    let error = browser_for(
+        r#"<patchlist><combi name="c"><zone keyrange="0>200"/></combi></patchlist>"#,
+        0,
+        false,
+    )
+    .unwrap_err();
+    assert!(error.contains("0 <= low <= high <= 127"), "{error}");
+
+    let error = browser_for(
+        r#"<patchlist><combi name="c"><zone keyrange="0>127>5"/></combi></patchlist>"#,
+        0,
+        false,
+    )
+    .unwrap_err();
+    assert!(error.contains("<low>><high>"), "{error}");
+}
+
+#[test]
+fn internal_port_patches_select_a_program_on_the_default_soundfont() {
+    let browser = browser_for(
+        r#"<patchlist><patch name="organ" bank="1" program="2" channel="0"/></patchlist>"#,
+        0,
+        false,
+    )
+    .unwrap();
+    let plan = browser.action_plan().unwrap();
+    assert_eq!(plan.synth.len(), 1);
+    assert_eq!(
+        plan.synth[0].soundfont_id,
+        freewheeling_plus::native_patch_browser::DEFAULT_SOUNDFONT_ID
+    );
+    assert_eq!((plan.synth[0].bank, plan.synth[0].program), (1, 2));
+}
+
+#[test]
+fn combis_form_their_own_channel_group() {
+    let xml = r#"<patchlist>
+        <patch name="first" channel="1" bank="0" program="1"/>
+        <combi name="combi"><zone keyrange="0>127" channel="2" bank="0" program="2"/></combi>
+        <patch name="last" channel="1" bank="0" program="3"/>
+    </patchlist>"#;
+    let browser = browser_for(xml, 1, true).unwrap();
+    assert_eq!(browser.banks.len(), 3);
+    assert_eq!(browser.banks[0].items[0].name, "first");
+    assert_eq!(browser.banks[1].items[0].name, "combi");
+    assert_eq!(browser.banks[2].items[0].name, "last");
 }

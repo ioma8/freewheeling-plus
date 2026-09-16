@@ -116,10 +116,11 @@ impl FakeNative {
     }
     pub fn lose_device_and_restart(&mut self) {
         let mut state = self.state.borrow_mut();
-        state.device_lost = true;
+        // The window is recorded in the log; setting `device_lost` here would
+        // be overwritten before the borrow ends and could never be observed.
+        state.log.push("device:lost".to_owned());
         state.log.extend(
             [
-                "device:lost",
                 "audio:quiesce",
                 "audio:close",
                 "audio:open",
@@ -156,6 +157,10 @@ impl NativeComponentAdapter for FakeNative {
             state.log.push(format!("stream:start:{sequence}"));
         } else {
             state.stream = StreamState::Stopped;
+            // The recording is gone: leaving the byte count reported a size
+            // for a stopped (and deleted) stream.
+            state.bytes = 0;
+            let _ = fs::remove_file(&self.stream_file);
             state.log.push(format!("stream:stop:{sequence}"));
         }
         Ok(())
@@ -194,6 +199,7 @@ impl NativeComponentAdapter for FakeNative {
 pub enum SynthCall {
     Render(usize),
     Note(u8, i32, u8),
+    NoteOff(u8, i32),
     Controller(u8, u8, u8),
     Bend(u8, i32),
     Patch(u8, i32, i32, i32),
@@ -204,48 +210,54 @@ pub enum SynthCall {
 pub struct FakeFluid {
     pub calls: Arc<Mutex<Vec<SynthCall>>>,
 }
+
+/// Record a call, recovering from a poisoned lock.
+///
+/// A panic in one test would otherwise turn every later call into an
+/// unrelated `PoisonError` panic and mask the real failure.
+fn record(calls: &Arc<Mutex<Vec<SynthCall>>>, call: SynthCall) {
+    calls
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(call);
+}
 impl FluidSynthBackend for FakeFluid {
     fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(SynthCall::Render(left.len()));
+        record(&self.calls, SynthCall::Render(left.len()));
         left.fill(0.0);
         right.fill(0.0);
     }
     fn controller(&mut self, c: u8, k: u8, v: u8) {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(SynthCall::Controller(c, k, v));
+        record(&self.calls, SynthCall::Controller(c, k, v));
     }
     fn pitch_bend(&mut self, c: u8, v: i32) {
-        self.calls.lock().unwrap().push(SynthCall::Bend(c, v));
+        record(&self.calls, SynthCall::Bend(c, v));
     }
     fn note_on(&mut self, c: u8, n: i32, v: u8) {
-        self.calls.lock().unwrap().push(SynthCall::Note(c, n, v));
+        record(&self.calls, SynthCall::Note(c, n, v));
     }
-    fn note_off(&mut self, _: u8, _: i32) {}
+    fn note_off(&mut self, c: u8, n: i32) {
+        // Recorded like the other calls: note-off ordering matters for patch
+        // changes and stuck-note handling.
+        record(&self.calls, SynthCall::NoteOff(c, n));
+    }
     fn program_select(&mut self, c: u8, sf: i32, b: i32, p: i32) {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(SynthCall::Patch(c, sf, b, p));
+        record(&self.calls, SynthCall::Patch(c, sf, b, p));
     }
     fn set_tuning(&mut self, cents: f64) {
-        self.calls.lock().unwrap().push(SynthCall::Tuning(cents));
+        record(&self.calls, SynthCall::Tuning(cents));
     }
     fn patches(&self) -> Vec<Patch> {
         vec![]
     }
     fn shutdown(&mut self) {
-        self.calls.lock().unwrap().push(SynthCall::Shutdown);
+        record(&self.calls, SynthCall::Shutdown);
     }
 }
 
 pub fn playing_loop() -> LoopSnapshot {
     LoopSnapshot {
-        loop_id: 0,
+        slot: 0,
         status: LoopStatus::Playing,
         loop_volume: 0.8,
         trigger_volume: 1.0,

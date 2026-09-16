@@ -52,13 +52,22 @@ def verify_macho(binary: pathlib.Path, frameworks: pathlib.Path, expected_archit
 
 
 def verify_signature(bundle: pathlib.Path, contents: pathlib.Path, executable: pathlib.Path,
-                     plist: dict) -> None:
-    """Verify a complete app seal, or the code seal of a minimal test fixture."""
+                     plist: dict, fixture: bool) -> None:
+    """Verify a complete app seal, or the code seal of a minimal test fixture.
+
+    `fixture` is an explicit command-line choice: deriving it from the bundle's
+    own `CFBundlePackageType` let a tampered bundle downgrade its own
+    verification. The resource seal is checked whenever it is present, whatever
+    mode was requested.
+    """
     code_resources = contents / "_CodeSignature" / "CodeResources"
-    if plist.get("CFBundlePackageType") == "APPL":
-        if not code_resources.is_file():
-            raise ValueError(f"signed application has no resource seal: {code_resources}")
+    if code_resources.is_file():
         run("codesign", "--verify", "--deep", "--strict", str(bundle))
+        return
+    if not fixture:
+        # No seal at all: only a fixture may be missing one, and the caller
+        # asked for a real bundle.
+        raise ValueError(f"bundle has no resource seal: {code_resources}")
     else:
         # Unit-test fixtures intentionally contain only the fields exercised by
         # this verifier.  They are not distributable APPL bundles, but their
@@ -75,6 +84,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("bundle", type=pathlib.Path)
     parser.add_argument("--architectures", nargs="+", default=["arm64"])
+    parser.add_argument(
+        "--fixture",
+        action="store_true",
+        help="verify a minimal test fixture (no APPL seal) instead of a distributable bundle",
+    )
     args = parser.parse_args()
     try:
         bundle = args.bundle.resolve()
@@ -82,6 +96,8 @@ def main() -> int:
         plist_path = contents / "Info.plist"
         with plist_path.open("rb") as source:
             plist = plistlib.load(source)
+        if not isinstance(plist, dict):
+            raise ValueError("Info.plist root is not a dictionary")
         executable_name = plist.get("CFBundleExecutable")
         if not executable_name:
             raise ValueError("Info.plist has no CFBundleExecutable")
@@ -105,7 +121,11 @@ def main() -> int:
         document_types = plist.get("CFBundleDocumentTypes", [])
         if not document_types:
             raise ValueError("Info.plist has no Finder document declarations")
-        vera_notice = (resources / "licenses/Bitstream-Vera-NOTICE.txt").read_text()
+        # Explicit encoding: the locale default (often ASCII under LANG=C on
+        # CI) would make a non-ASCII byte fail on some machines only.
+        vera_notice = (resources / "licenses/Bitstream-Vera-NOTICE.txt").read_text(
+            encoding="utf-8"
+        )
         if not all(marker in vera_notice for marker in VERA_MARKERS):
             raise ValueError("Bitstream Vera notice is incomplete")
         if sys.platform == "darwin":
@@ -114,11 +134,17 @@ def main() -> int:
             verify_macho(executable, frameworks, expected_architectures)
             for dylib in frameworks.glob("*.dylib"):
                 verify_macho(dylib, frameworks, expected_architectures)
-            verify_signature(bundle, contents, executable, plist)
+            verify_signature(bundle, contents, executable, plist, args.fixture)
 
+        if sys.platform != "darwin":
+            print(
+                "warning: Mach-O architecture, bundled-dylib linkage and "
+                "code-signature checks were skipped on this platform",
+                file=sys.stderr,
+            )
         print(f"bundle verified: {bundle}")
         return 0
-    except (OSError, ValueError, plistlib.InvalidFileException) as error:
+    except (OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
 

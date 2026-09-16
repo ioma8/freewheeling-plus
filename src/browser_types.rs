@@ -109,32 +109,38 @@ impl PatchBank {
 pub struct PatchBrowser {
     pub browser: Browser,
     pub banks: Vec<PatchBank>,
-    pub current_bank: Option<usize>,
+    /// Index of the bank shown in `browser`; [`Self::current_bank`] returns the
+    /// bank itself.
+    pub current_bank_index: Option<usize>,
 }
 impl PatchBrowser {
     pub fn new(path: &str) -> Self {
         Self {
             browser: Browser::new(path, BrowserItemType::Patch),
             banks: Vec::new(),
-            current_bank: None,
+            current_bank_index: None,
         }
     }
     pub fn add_bank(&mut self, bank: PatchBank) {
         self.banks.push(bank);
-        if self.current_bank.is_none() {
-            self.current_bank = Some(0);
+        if self.current_bank_index.is_none() {
+            self.current_bank_index = Some(0);
         }
         self.refresh();
     }
     pub fn move_to_bank(&mut self, direction: i32) -> bool {
-        let Some(i) = self.current_bank else {
+        let Some(current) = self.current_bank_index else {
             return false;
         };
-        let n = i as i32 + direction;
-        if n < 0 || n as usize >= self.banks.len() {
+        let target = if direction >= 0 {
+            current.checked_add(direction as usize)
+        } else {
+            current.checked_sub(direction.unsigned_abs() as usize)
+        };
+        let Some(target) = target.filter(|target| *target < self.banks.len()) else {
             return false;
         };
-        self.current_bank = Some(n as usize);
+        self.current_bank_index = Some(target);
         self.refresh();
         true
     }
@@ -142,19 +148,19 @@ impl PatchBrowser {
         if index >= self.banks.len() {
             return false;
         };
-        self.current_bank = Some(index);
+        self.current_bank_index = Some(index);
         self.refresh();
         true
     }
     pub fn current_bank(&self) -> Option<&PatchBank> {
-        self.current_bank.and_then(|i| self.banks.get(i))
+        self.current_bank_index.and_then(|i| self.banks.get(i))
     }
     fn refresh(&mut self) {
-        self.browser.items = self
+        let items = self
             .current_bank()
-            .map(|b| b.items.iter().map(|p| p.item.clone()).collect())
+            .map(|bank| bank.items.iter().map(|item| item.item.clone()).collect())
             .unwrap_or_default();
-        self.browser.current_index = self.browser.items.first().map(|_| 0);
+        self.browser.replace_items(items);
     }
 }
 
@@ -206,25 +212,36 @@ impl SceneBrowserItem {
     }
 }
 
+/// Drop the extension of the final path component.
+///
+/// Only a dot inside the last component counts: `".gitignore"` keeps its name
+/// and `"dir.with.dots/file"` keeps its directory.
 fn strip_extension(path: &str) -> String {
-    path.rsplit_once('.')
-        .map(|(base, _)| base)
-        .unwrap_or(path)
-        .to_string()
+    let component_start = path
+        .rfind(['/', '\\'])
+        .map_or(0, |separator| separator + 1);
+    match path.rfind('.') {
+        // A dot before the final component belongs to a parent directory, and
+        // a leading dot names a hidden file rather than an extension.
+        Some(dot) if dot > component_start => path[..dot].to_string(),
+        _ => path.to_string(),
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SnapshotBrowser {
     pub names: Vec<String>,
     pub first_index: usize,
-    pub displayed: Option<usize>,
+    /// Number of visible entries in the window starting at `first_index`, or
+    /// `None` when no window has been computed yet.
+    pub displayed_count: Option<usize>,
 }
 impl SnapshotBrowser {
     pub fn new(names: Vec<String>) -> Self {
         Self {
             names,
             first_index: 0,
-            displayed: None,
+            displayed_count: None,
         }
     }
     pub fn rename(&mut self, index: usize, name: impl Into<String>) -> bool {
@@ -237,7 +254,6 @@ impl SnapshotBrowser {
     }
     pub fn display_range(&mut self, first: usize, count: usize) {
         self.first_index = first.min(self.names.len());
-        self.displayed = Some(count.min(self.names.len().saturating_sub(self.first_index)));
+        self.displayed_count = Some(count.min(self.names.len().saturating_sub(self.first_index)));
     }
 }
-

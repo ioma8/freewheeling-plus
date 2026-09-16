@@ -631,7 +631,7 @@ struct RuntimeResources {
     cached_modes: [LoopMode; crate::native_dsp_graph::MAX_RUNTIME_LOOPS],
     trigger_gains: [f32; crate::native_dsp_graph::MAX_RUNTIME_LOOPS],
     pending_exports: Vec<PendingLoopExport>,
-    queued_exports: VecDeque<(u8, Codec)>,
+    queued_exports: VecDeque<(u16, Codec)>,
     pending_imports: Vec<PcmTransferHandle>,
     queued_imports: VecDeque<QueuedLoopImport>,
     load_loop_id: i32,
@@ -665,8 +665,8 @@ struct RuntimeResources {
     pulse_selected: bool,
     sync_type: bool,
     sync_speed: u32,
-    last_recorded_loop: Option<u8>,
-    recent_recordings: VecDeque<u8>,
+    last_recorded_loop: Option<u16>,
+    recent_recordings: VecDeque<u16>,
     current_interface: i32,
     synth_enabled: bool,
     help_page_count: usize,
@@ -683,7 +683,7 @@ struct PendingLoopExport {
 
 struct QueuedLoopImport {
     path: std::path::PathBuf,
-    slot: u8,
+    slot: u16,
     gain: f32,
 }
 
@@ -737,6 +737,12 @@ impl NativeRuntime {
         state.values.insert(
             "SYSTEM_variable_snapshot_truncated".into(),
             config_variables.truncated as u8 as f32,
+        );
+        // Live mirror of the selected interface for the renderer, which draws
+        // an interface's own layouts and displays only while it is selected.
+        state.values.insert(
+            "SYSTEM_cur_switchable_interface".into(),
+            r.current_interface as f32,
         );
         state
             .values
@@ -871,8 +877,8 @@ impl NativeRuntime {
                 .entry(i32::from(scope.loop_id))
                 .or_default();
             let chunks = usize::from(scope.chunk_count);
-            visual.peaks = scope.peaks[..chunks].to_vec();
-            visual.averages = scope.averages[..chunks].to_vec();
+            visual.peaks = std::sync::Arc::from(&scope.peaks[..chunks]);
+            visual.averages = std::sync::Arc::from(&scope.averages[..chunks]);
             visual.position_column = scope.position_column;
             visual.chunk_count = scope.chunk_count;
             visual.current_peak = scope.current_peak;
@@ -1547,10 +1553,7 @@ impl NativeRuntime {
                 }
             }
             ApplicationAction::SaveLoop { loop_id, codec } => {
-                let slot = u8::try_from(loop_id)
-                    .ok()
-                    .filter(|slot| usize::from(*slot) < crate::native_dsp_graph::MAX_RUNTIME_LOOPS)
-                    .ok_or_else(|| format!("loop id out of range: {loop_id}"))?;
+                let slot = Self::runtime_slot(loop_id)?;
                 let codec = Self::resolve_codec(r, codec)?;
                 Self::request_loop_export(r, slot, codec)?;
             }
@@ -1636,20 +1639,20 @@ impl NativeRuntime {
                         LoopMode::Empty => {}
                         LoopMode::Playing | LoopMode::Recording | LoopMode::Overdubbing => controls
                             .try_command(RuntimeCommand::Trigger {
-                                slot: slot as u8,
+                                slot: slot as u16,
                                 gain: item.trigger_gain,
                             })
                             .map_err(|_| "DSP command queue is full")?,
                         LoopMode::Muted => {
                             controls
                                 .try_command(RuntimeCommand::Trigger {
-                                    slot: slot as u8,
+                                    slot: slot as u16,
                                     gain: item.trigger_gain,
                                 })
                                 .map_err(|_| "DSP command queue is full")?;
                             controls
                                 .try_command(RuntimeCommand::Mute {
-                                    slot: slot as u8,
+                                    slot: slot as u16,
                                     muted: true,
                                 })
                                 .map_err(|_| "DSP command queue is full")?;
@@ -1825,7 +1828,7 @@ impl NativeRuntime {
                 let controls = r.controls.as_mut().ok_or("DSP controls are closed")?;
                 for slot in 0..crate::native_dsp_graph::MAX_RUNTIME_LOOPS {
                     controls
-                        .try_command(RuntimeCommand::Erase { slot: slot as u8 })
+                        .try_command(RuntimeCommand::Erase { slot: slot as u16 })
                         .map_err(|_| "DSP command queue is full")?;
                     r.loop_selection.update_after_erase(slot);
                     r.loop_files.remove(&(slot as i32));
@@ -1842,7 +1845,7 @@ impl NativeRuntime {
                 let controls = r.controls.as_mut().ok_or("DSP controls are closed")?;
                 for slot in slots {
                     controls
-                        .try_command(RuntimeCommand::Erase { slot: slot as u8 })
+                        .try_command(RuntimeCommand::Erase { slot: slot as u16 })
                         .map_err(|_| "DSP command queue is full")?;
                     r.loop_files.remove(&(slot as i32));
                     r.loop_hashes.remove(&(slot as i32));
@@ -1919,7 +1922,7 @@ impl NativeRuntime {
                 for slot in slots {
                     let command = match r.cached_modes[slot] {
                         LoopMode::Playing if toggle => RuntimeCommand::Mute {
-                            slot: slot as u8,
+                            slot: slot as u16,
                             muted: true,
                         },
                         LoopMode::Recording | LoopMode::Overdubbing if toggle => {
@@ -1927,7 +1930,7 @@ impl NativeRuntime {
                         }
                         LoopMode::Playing | LoopMode::Recording | LoopMode::Overdubbing => continue,
                         LoopMode::Muted => RuntimeCommand::Trigger {
-                            slot: slot as u8,
+                            slot: slot as u16,
                             gain,
                         },
                         LoopMode::Empty => continue,
@@ -1949,7 +1952,7 @@ impl NativeRuntime {
                         .as_mut()
                         .ok_or("DSP controls are closed")?
                         .try_command(RuntimeCommand::SetTriggerGain {
-                            slot: *slot as u8,
+                            slot: *slot as u16,
                             gain: gain.max(0.0),
                         })
                         .map_err(|_| "DSP command queue is full")?;
@@ -1966,7 +1969,7 @@ impl NativeRuntime {
                 for slot in slots {
                     controls
                         .try_command(RuntimeCommand::AdjustLoopGain {
-                            slot: slot as u8,
+                            slot: slot as u16,
                             factor,
                         })
                         .map_err(|_| "DSP command queue is full")?;
@@ -2204,8 +2207,8 @@ impl NativeRuntime {
         }
     }
 
-    fn runtime_slot(loop_id: i32) -> Result<u8, String> {
-        u8::try_from(loop_id)
+    fn runtime_slot(loop_id: i32) -> Result<u16, String> {
+        u16::try_from(loop_id)
             .ok()
             .filter(|slot| usize::from(*slot) < crate::native_dsp_graph::MAX_RUNTIME_LOOPS)
             .ok_or_else(|| format!("loop id out of range: {loop_id}"))
@@ -2215,7 +2218,7 @@ impl NativeRuntime {
         Self::runtime_slot(loop_id).ok().map(i32::from)
     }
 
-    fn move_loop_map_entry<T>(map: &mut HashMap<i32, T>, from: u8, to: u8) {
+    fn move_loop_map_entry<T>(map: &mut HashMap<i32, T>, from: u16, to: u16) {
         if let Some(value) = map.remove(&i32::from(from)) {
             map.insert(i32::from(to), value);
         }
@@ -2493,7 +2496,7 @@ impl NativeRuntime {
         Ok(())
     }
 
-    fn request_loop_export(r: &mut RuntimeResources, slot: u8, codec: Codec) -> Result<(), String> {
+    fn request_loop_export(r: &mut RuntimeResources, slot: u16, codec: Codec) -> Result<(), String> {
         if r.pending_exports
             .iter()
             .any(|pending| pending.loop_id == i32::from(slot))
@@ -2508,7 +2511,7 @@ impl NativeRuntime {
         Self::start_loop_export(r, slot, codec)
     }
 
-    fn start_loop_export(r: &mut RuntimeResources, slot: u8, codec: Codec) -> Result<(), String> {
+    fn start_loop_export(r: &mut RuntimeResources, slot: u16, codec: Codec) -> Result<(), String> {
         let handle = r
             .controls
             .as_mut()
@@ -2572,7 +2575,7 @@ impl NativeRuntime {
             let gain = r
                 .cached_loops
                 .iter()
-                .find(|item| item.loop_id == *slot as usize)
+                .find(|item| i32::from(item.slot) == *slot)
                 .map_or(metadata.gain, |item| item.loop_volume);
             for repetition in 0..repetitions {
                 let start = i64::from(length)
@@ -2867,7 +2870,7 @@ impl NativeRuntime {
             let controls = r.controls.as_mut().ok_or("DSP controls are closed")?;
             for slot in 0..crate::native_dsp_graph::MAX_RUNTIME_LOOPS {
                 controls
-                    .try_command(RuntimeCommand::Erase { slot: slot as u8 })
+                    .try_command(RuntimeCommand::Erase { slot: slot as u16 })
                     .map_err(|_| "DSP command queue is full")?;
             }
         }
@@ -2884,13 +2887,13 @@ impl NativeRuntime {
         r.loop_hashes.clear();
         r.loop_metadata.clear();
         r.queued_imports.clear();
-        for item in scene.loops {
-            let slot = u8::try_from(item.loop_id)
+        for item in scene.loops() {
+            let slot = u16::try_from(item.loop_id)
                 .ok()
                 .filter(|slot| usize::from(*slot) < crate::native_dsp_graph::MAX_RUNTIME_LOOPS)
                 .or_else(|| {
                     (r.default_loop_placement.lo..r.default_loop_placement.hi)
-                        .find_map(|slot| u8::try_from(slot).ok())
+                        .find_map(|slot| u16::try_from(slot).ok())
                 })
                 .ok_or_else(|| format!("no placement available for scene loop {}", item.loop_id))?;
             let prefix = format!("loop-{}", item.hash);
@@ -2912,7 +2915,7 @@ impl NativeRuntime {
                 })
                 .ok_or_else(|| format!("scene loop audio is missing for hash {}", item.hash))?;
             r.loop_files.insert(i32::from(slot), audio.clone());
-            r.loop_hashes.insert(i32::from(slot), item.hash);
+            r.loop_hashes.insert(i32::from(slot), item.hash.clone());
             r.queued_imports.push_back(QueuedLoopImport {
                 path: audio,
                 slot,
@@ -2921,7 +2924,7 @@ impl NativeRuntime {
         }
         r.snapshots.clear();
         r.snapshot_names.clear();
-        for saved in scene.snapshots {
+        for saved in scene.into_scene().snapshots {
             let mut snapshot = RuntimeSnapshot::default();
             for item in saved.loops {
                 let Some(slot) = usize::try_from(item.loop_id)
@@ -2959,7 +2962,7 @@ impl NativeRuntime {
     fn decode_and_queue_import(
         r: &mut RuntimeResources,
         path: &std::path::Path,
-        slot: u8,
+        slot: u16,
         gain: f32,
     ) -> Result<(), String> {
         let codec = match path
@@ -3106,7 +3109,7 @@ impl NativeRuntime {
             let _ = controls.release_transfer(handle);
             return Err(format!("stage loop import: {error:?}"));
         }
-        let slot = u8::try_from(r.load_loop_id)
+        let slot = u16::try_from(r.load_loop_id)
             .ok()
             .filter(|slot| usize::from(*slot) < crate::native_dsp_graph::MAX_RUNTIME_LOOPS)
             .ok_or_else(|| format!("load loop id out of range: {}", r.load_loop_id));
@@ -3457,7 +3460,10 @@ impl NativeStartupAdapter for NativeRuntime {
             }
             StartupPhase::InputAndMidi => {
                 let manager = Arc::clone(r.events.as_ref().ok_or("event manager missing")?);
-                let bridge = Arc::new(NativeEventBridge::new(manager, 1024));
+                let bridge = Arc::new(
+                    NativeEventBridge::new(manager, 1024)
+                        .map_err(|error| error.to_string())?,
+                );
                 // When using the JACK audio backend, MIDI arrives through
                 // the audio callback (JACK MIDI ports → ring buffer), so we
                 // skip the standalone Midir backend to avoid duplicate paths.
@@ -3743,7 +3749,7 @@ impl NativeComponentAdapter for NativeRuntime {
                                     .loops
                                     .iter()
                                     .enumerate()
-                                    .filter_map(|(loop_id, item)| {
+                                    .filter_map(|(slot, item)| {
                                         let status = match item.mode {
                                             LoopMode::Empty => return None,
                                             LoopMode::Recording => LoopStatus::Recording,
@@ -3753,7 +3759,7 @@ impl NativeComponentAdapter for NativeRuntime {
                                             }
                                         };
                                         Some(LoopSnapshot {
-                                            loop_id,
+                                            slot: u16::try_from(slot).ok()?,
                                             status,
                                             loop_volume: item.gain,
                                             trigger_volume: item.trigger_gain,
@@ -3830,7 +3836,7 @@ impl NativeComponentAdapter for NativeRuntime {
                     .iter()
                     .enumerate()
                     .filter(|(_, item)| item.mode != LoopMode::Empty)
-                    .map(|(slot, _)| slot as u8)
+                    .map(|(slot, _)| slot as u16)
                     .collect();
                 for slot in slots {
                     Self::request_loop_export(&mut r, slot, codec)?;
@@ -4203,13 +4209,13 @@ impl NativeComponentAdapter for NativeRuntime {
         for slot in 0..crate::native_dsp_graph::MAX_RUNTIME_LOOPS {
             controls
                 .try_command(RuntimeCommand::Mute {
-                    slot: slot as u8,
+                    slot: slot as u16,
                     muted: true,
                 })
                 .map_err(|_| "DSP command queue full")?;
         }
         for item in &snapshot.loops {
-            let slot = u8::try_from(item.loop_id).map_err(|_| "snapshot loop id out of range")?;
+            let slot = item.slot;
             controls
                 .try_command(RuntimeCommand::Trigger {
                     slot,
@@ -4415,9 +4421,16 @@ mod tests {
     }
 
     #[test]
-    fn legacy_footswitch_load_slot_falls_back_to_zero() {
-        assert_eq!(normalized_load_loop_id(340), 0);
+    fn legacy_footswitch_load_slot_is_a_real_slot() {
+        // 340 is the id data/midifootswitch.xml uses, and the loop address
+        // space covers it; only an id outside the space falls back to 0.
+        assert_eq!(normalized_load_loop_id(340), 340);
         assert_eq!(normalized_load_loop_id(322), 322);
+        assert_eq!(
+            normalized_load_loop_id(crate::native_dsp_graph::MAX_RUNTIME_LOOPS as i32),
+            0
+        );
+        assert_eq!(normalized_load_loop_id(-1), 0);
     }
 
     #[test]

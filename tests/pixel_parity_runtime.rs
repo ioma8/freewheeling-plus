@@ -45,10 +45,16 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// Logical size the production scene is authored at (see `data/*.xml`).
+const LOGICAL_BASE_SIZE: (u32, u32) = (640, 480);
+
 fn render(drawable: (u32, u32), logo_started: Instant) -> VideoFrame {
     let scene = load_production_scene_at(root().join("data"), logo_started)
         .expect("load production XML scene");
-    assert_eq!(scene.manifest.logical_size, (640, 480));
+    assert_eq!(
+        scene.manifest.logical_size, LOGICAL_BASE_SIZE,
+        "the production scene's logical size changed; the region scaling and the fixtures must change with it"
+    );
     let mut renderer = production_software_renderer(scene).expect("create software renderer");
     let mut frame = VideoFrame {
         pixels: Vec::new(),
@@ -76,18 +82,22 @@ fn fwrgba(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
 }
 
 fn region_declarations(width: u32, height: u32) -> Vec<RegionDeclaration> {
+    // Both the regions and the scene's logical size derive from
+    // `LOGICAL_BASE_SIZE`, so a change there cannot leave them mis-scaled.
+    let (base_width, base_height) = LOGICAL_BASE_SIZE;
     let scaled = |x: u32, y: u32, w: u32, h: u32| {
+        // u64 intermediates: `x * width` overflows u32 for a large drawable.
         (
-            x * width / 640,
-            y * height / 480,
-            w * width / 640,
-            h * height / 480,
+            (u64::from(x) * u64::from(width) / u64::from(base_width)) as u32,
+            (u64::from(y) * u64::from(height) / u64::from(base_height)) as u32,
+            (u64::from(w) * u64::from(width) / u64::from(base_width)) as u32,
+            (u64::from(h) * u64::from(height) / u64::from(base_height)) as u32,
         )
     };
     vec![
-        ("keyboard-and-logo", scaled(0, 0, 640, 145)),
+        ("keyboard-and-logo", scaled(0, 0, base_width, 145)),
         ("primary-browser", scaled(23, 240, 555, 192)),
-        ("status-and-controls", scaled(0, 382, 640, 98)),
+        ("status-and-controls", scaled(0, 382, base_width, 98)),
     ]
 }
 
@@ -103,19 +113,41 @@ fn region_parity(
     reference: &[u8],
     candidate: &[u8],
     frame_width: u32,
+    frame_height: u32,
     region: (u32, u32, u32, u32),
 ) -> f64 {
     let (x, y, width, height) = region;
+    // A declared region must exist inside the frame, and the buffers must
+    // describe that frame: indexing past either would panic with an opaque
+    // range error instead of naming the fixture that disagrees.
+    assert!(
+        x + width <= frame_width && y + height <= frame_height,
+        "declared region {region:?} is outside the {frame_width}x{frame_height} frame"
+    );
+    assert_eq!(
+        reference.len(),
+        (frame_width as usize) * (frame_height as usize) * 4,
+        "reference buffer does not describe the {frame_width}x{frame_height} frame"
+    );
+    assert_eq!(reference.len(), candidate.len(), "buffer size mismatch");
+    let area = u64::from(width) * u64::from(height);
+    if area == 0 {
+        // A zero-area region would divide by zero and compare NaN, which is
+        // neither >= nor < the threshold: fail instead of passing silently.
+        panic!("declared region {region:?} has no area");
+    }
     let mut good = 0usize;
     for row in y..y + height {
         for column in x..x + width {
-            let offset = ((row * frame_width + column) * 4) as usize;
+            // u64 intermediate: `row * frame_width` overflows u32 on a large
+            // drawable.
+            let offset = (u64::from(row) * u64::from(frame_width) + u64::from(column)) as usize * 4;
             good += (0..4).all(|channel| {
                 reference[offset + channel].abs_diff(candidate[offset + channel]) <= MAX_DELTA
             }) as usize;
         }
     }
-    good as f64 * 100.0 / (width * height) as f64
+    good as f64 * 100.0 / area as f64
 }
 
 fn parity(reference: &[u8], candidate: &[u8]) -> f64 {
@@ -135,8 +167,12 @@ fn decode_reference(path: &Path, dimensions: (u32, u32)) -> Vec<u8> {
     assert_eq!(
         image.dimensions(),
         dimensions,
-        "{} dimensions",
-        path.display()
+        "{}: fixture is {}x{} in logical/physical terms but the capture expects {}x{}",
+        path.display(),
+        image.dimensions().0,
+        image.dimensions().1,
+        dimensions.0,
+        dimensions.1
     );
     image.into_raw()
 }
@@ -162,8 +198,20 @@ fn production_xml_scene_is_deterministic_at_all_acceptance_sizes() {
 #[test]
 fn emit_candidates_and_compare_genuine_cpp_references_when_requested() {
     let Some(evidence_root) = std::env::var_os("FW_PIXEL_EVIDENCE") else {
+        // Silent skipping turned a green CI run into zero coverage. The
+        // comparison job sets FW_REQUIRE_PIXEL_EVIDENCE, and an ordinary CI run
+        // reports the skip instead of pretending it compared.
+        assert!(
+            std::env::var_os("FW_REQUIRE_PIXEL_EVIDENCE").is_none(),
+            "FW_PIXEL_EVIDENCE is unset but this run requires pixel evidence"
+        );
+        eprintln!(
+            "skipping pixel evidence: set FW_PIXEL_EVIDENCE=<dir> (and FW_REQUIRE_PIXEL_EVIDENCE=1 in CI)"
+        );
         return;
     };
+    let mut comparisons = 0usize;
+    let mut candidates = 0usize;
     let reference_root = std::env::var_os("FW_CPP_SCREENSHOTS")
         .map(PathBuf::from)
         .unwrap_or_else(|| root().join("fixtures/cpp-golden/screenshots"));
@@ -186,6 +234,7 @@ fn emit_candidates_and_compare_genuine_cpp_references_when_requested() {
         )
         .unwrap();
 
+        candidates += 1;
         let reference_path = reference_root.join(capture.reference);
         if !reference_path.is_file() {
             eprintln!(
@@ -194,6 +243,7 @@ fn emit_candidates_and_compare_genuine_cpp_references_when_requested() {
             );
             continue;
         }
+        comparisons += 1;
         let reference = decode_reference(&reference_path, capture.drawable);
         fs::write(
             directory.join("reference.fwrgba"),
@@ -209,7 +259,8 @@ fn emit_candidates_and_compare_genuine_cpp_references_when_requested() {
             failures.push(format!("{}={percent:.6}%", capture.evidence));
         }
         for (name, bounds) in region_declarations(frame.width, frame.height) {
-            let region_percent = region_parity(&reference, &frame.pixels, frame.width, bounds);
+            let region_percent =
+                region_parity(&reference, &frame.pixels, frame.width, frame.height, bounds);
             eprintln!(
                 "{} region={name} pixels_within_delta={region_percent:.6}%",
                 capture.evidence
@@ -224,4 +275,13 @@ fn emit_candidates_and_compare_genuine_cpp_references_when_requested() {
         "pixel parity below {MINIMUM_PERCENT:.6}%: {}",
         failures.join(", ")
     );
+    assert!(candidates > 0, "no pixel candidates were rendered");
+    // A run that produced evidence but compared nothing (every reference
+    // missing) must not look like a passing parity run.
+    if std::env::var_os("FW_REQUIRE_PIXEL_EVIDENCE").is_some() {
+        assert!(
+            comparisons == candidates,
+            "{comparisons} of {candidates} captures were compared against a genuine reference"
+        );
+    }
 }

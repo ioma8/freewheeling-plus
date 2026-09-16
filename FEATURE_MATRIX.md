@@ -1,6 +1,6 @@
 # Feature and acceptance matrix
 
-“Automated” identifies a checked-in test. “Hardware” is a release gate and cannot be replaced by `--smoke-test`. C++ compatibility rows require genuine fixtures captured as described in `fixtures/cpp-golden/README.md`.
+“Automated” identifies a checked-in test. “Hardware” is a release gate and cannot be replaced by `--smoke-test` (a `smoke-test`-feature build that runs the no-op core path). C++ compatibility rows require genuine fixtures captured as described in `fixtures/cpp-golden/README.md`.
 
 | Original workflow | Automated coverage | Hardware/release acceptance |
 |---|---|---|

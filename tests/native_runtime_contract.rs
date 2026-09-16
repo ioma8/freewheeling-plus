@@ -1,5 +1,10 @@
 mod support;
 
+#[path = "support/scratch.rs"]
+mod scratch;
+
+use scratch::ScratchDir;
+
 use freewheeling_plus::application_services::Components;
 use freewheeling_plus::audioio::{AudioCallback, AudioProcessor, JackPosition};
 use freewheeling_plus::core::{CoreEvent, LoopStatus, StreamState};
@@ -22,14 +27,10 @@ use support::*;
 #[global_allocator]
 static ALLOCATOR: CallbackCountingAllocator = CallbackCountingAllocator;
 
-fn temp_root(name: &str) -> std::path::PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "freewheeling-native-contract-{name}-{}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(root.join("resources")).unwrap();
-    fs::create_dir_all(root.join("support")).unwrap();
+fn temp_root(name: &str) -> ScratchDir {
+    let root = ScratchDir::new(&format!("native-contract-{name}"));
+    root.subdir("resources");
+    root.subdir("support");
     fs::write(root.join("resources/fweelin.xml"), b"<config/>").unwrap();
     root
 }
@@ -99,6 +100,14 @@ fn process<B: FluidSynthBackend>(
     left: &[f32],
     right: &[f32],
 ) -> [Vec<f32>; 2] {
+    // The processor clamps the frame count to its configured maximum, so a
+    // caller passing more frames than intended would silently exercise fewer
+    // frames than the test believes it does.
+    assert_eq!(
+        left.len(),
+        right.len(),
+        "left/right frame counts must match"
+    );
     let mut out_l = vec![0.0; left.len()];
     let mut out_r = vec![0.0; right.len()];
     let mut callback = AudioCallback {
@@ -131,7 +140,7 @@ fn production_app_runs_every_real_phase_handles_quit_and_rolls_back_in_reverse()
     let startup_log = Rc::new(RefCell::new(Vec::new()));
     let component_state = Rc::new(RefCell::new(ComponentState::default()));
     let startup = NativeStartupServices::new(
-        paths(root.clone()),
+        paths(root.path().to_path_buf()),
         FakeStartup {
             log: startup_log.clone(),
             fail_at: None,
@@ -170,7 +179,7 @@ fn failed_native_phase_rolls_back_only_completed_phases() {
     let root = temp_root("rollback");
     let log = Rc::new(RefCell::new(Vec::new()));
     let startup = NativeStartupServices::new(
-        paths(root.clone()),
+        paths(root.path().to_path_buf()),
         FakeStartup {
             log: log.clone(),
             fail_at: Some(StartupPhase::SynthAndBuffers),
@@ -188,12 +197,16 @@ fn failed_native_phase_rolls_back_only_completed_phases() {
         "{error}"
     );
     let entries = log.borrow();
-    let completed = &PHASES[..11];
-    let expected: Vec<_> = completed
-        .iter()
-        .rev()
-        .map(|p| format!("rollback:{p}"))
-        .collect();
+    // The failed phase is rolled back first: `start` may have allocated part of
+    // its native state before reporting the error, and this call is what
+    // releases it. The completed phases follow in reverse order.
+    let mut expected = vec![format!("rollback:{}", PHASES[11])];
+    expected.extend(
+        PHASES[..11]
+            .iter()
+            .rev()
+            .map(|phase| format!("rollback:{phase}")),
+    );
     assert_eq!(&entries[12..], expected);
 }
 
@@ -392,18 +405,48 @@ fn export_rejects_mutation_of_source_or_move_destination() {
         .unwrap();
     process(&mut dsp, &[], &[]);
     let mut rejected = [false; 2];
-    for _ in 0..3 {
-        match controls.try_status() {
-            Some(RuntimeStatus::CommandRejected(RuntimeCommand::SetLoopGain {
-                slot: 0, ..
-            })) => rejected[0] = true,
-            Some(RuntimeStatus::CommandRejected(RuntimeCommand::MoveLoop { from: 0, to: 1 })) => {
-                rejected[1] = true
+    let mut completed = false;
+    let mut exported = false;
+    let mut drained = 0;
+    // Drain to empty, failing on anything unexpected: an unrelated status (or
+    // a mis-typed rejection for another slot) must not be swallowed as "no
+    // status". This test's two commands produce exactly two rejections and the
+    // recording's completion.
+    while let Some(status) = controls.try_status() {
+        drained += 1;
+        assert!(drained <= 4, "more statuses than the test produced: {status:?}");
+        match status {
+            RuntimeStatus::CommandRejected(RuntimeCommand::SetLoopGain { slot: 0, .. }) => {
+                assert!(!rejected[0], "SetLoopGain rejection was reported twice");
+                rejected[0] = true;
             }
-            Some(_) | None => {}
+            RuntimeStatus::CommandRejected(RuntimeCommand::MoveLoop { from: 0, to: 1 }) => {
+                assert!(!rejected[1], "MoveLoop rejection was reported twice");
+                rejected[1] = true;
+            }
+            RuntimeStatus::LoopCompleted { slot: 0 } => {
+                assert!(!completed, "the recording completed twice");
+                completed = true;
+            }
+            RuntimeStatus::LoopExported {
+                slot: 0, metadata, ..
+            } => {
+                assert!(!exported, "the export was reported twice");
+                // The recording captured two frames before it was trimmed to
+                // the loop position.
+                assert_eq!(metadata.frames, 1, "exported frame count");
+                exported = true;
+            }
+            other => panic!("unexpected status: {other:?}"),
         }
     }
     assert_eq!(rejected, [true, true]);
+    assert!(completed, "the recording never reported completion");
+    assert!(exported, "the export never reported its result");
+    assert_eq!(
+        drained, 4,
+        "expected the export, the completion and two rejections"
+    );
 }
 
 #[test]
@@ -459,7 +502,7 @@ fn fake_native_stream_round_trip_device_restart_snapshot_and_clean_shutdown() {
         ..ComponentState::default()
     }));
     let startup = NativeStartupServices::new(
-        paths(root.clone()),
+        paths(root.path().to_path_buf()),
         FakeStartup {
             log: Rc::new(RefCell::new(Vec::new())),
             fail_at: None,

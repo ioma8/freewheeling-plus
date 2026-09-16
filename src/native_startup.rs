@@ -73,9 +73,20 @@ impl NativePaths {
             ));
         }
         let path = self.resources.join(relative);
-        path.is_file()
-            .then_some(path.clone())
-            .ok_or_else(|| format!("resource not found: {}", path.display()))
+        // Textual checks are not enough: a symlink inside the resources tree
+        // can point anywhere, so the resolved path is confined to the
+        // canonicalized root.
+        let canonical = path
+            .canonicalize()
+            .map_err(|error| format!("resource not found: {}: {error}", path.display()))?;
+        let root = self
+            .resources
+            .canonicalize()
+            .map_err(|error| format!("resources root unavailable: {error}"))?;
+        if !canonical.starts_with(&root) || !canonical.is_file() {
+            return Err(format!("resource not found: {}", path.display()));
+        }
+        Ok(canonical)
     }
 }
 
@@ -111,13 +122,21 @@ pub fn application_support_path(home: &Path) -> PathBuf {
     #[cfg(target_os = "android")]
     {
         // Android internal storage: /data/data/<package>/
-        // Matches Cargo.toml [package.metadata.android].package.
         let _ = home;
-        Path::new("/data/data/org.freewheeling.freewheeling_plus/files/.fweelin").to_path_buf()
+        Path::new("/data/data")
+            .join(ANDROID_PACKAGE_ID)
+            .join("files/.fweelin")
     }
     #[cfg(not(any(target_os = "macos", target_os = "android")))]
     home.join(".fweelin")
 }
+
+/// Android application id.
+///
+/// Kept in one place so the storage paths cannot drift from the package
+/// declared in `Cargo.toml` (`[package.metadata.android].package`).
+#[cfg(target_os = "android")]
+pub const ANDROID_PACKAGE_ID: &str = "org.freewheeling.freewheeling_plus";
 
 /// Where the Android runtime extracts the bundled `data/` assets so the
 /// filesystem-based resource discovery can find them.
@@ -129,8 +148,11 @@ pub fn android_runtime_data_dir() -> PathBuf {
         .join("data")
 }
 
-/// Locate bundle resources first, then an explicit data directory, then
-/// development/install layouts adjacent to the executable.
+/// Locate bundle resources.
+///
+/// Order: an explicit `FWEELIN_DATA_DIR` override, then platform-specific
+/// extraction/layout candidates (Android internal storage, macOS bundle
+/// resources), then development/install layouts adjacent to the executable.
 pub fn discover_resources(executable: &Path) -> Result<PathBuf, String> {
     let mut candidates = Vec::new();
     #[cfg(target_os = "android")]
@@ -157,7 +179,12 @@ pub fn discover_resources(executable: &Path) -> Result<PathBuf, String> {
         candidates.push(cwd);
     }
     for candidate in candidates {
-        let normalized = candidate.canonicalize().unwrap_or(candidate);
+        // A candidate that cannot be canonicalized (permissions, dangling
+        // symlink, missing path) is not a resource root; skipping it keeps the
+        // returned path normalized for the confinement checks above.
+        let Ok(normalized) = candidate.canonicalize() else {
+            continue;
+        };
         if normalized.join(DEFAULT_CONFIG_FILE).is_file() {
             return Ok(normalized);
         }
@@ -196,8 +223,11 @@ impl fmt::Display for StartupPhase {
     }
 }
 
-/// Boundary implemented by the assembled native graph. `rollback` must be
-/// safe after a successful `start` for the same phase.
+/// Boundary implemented by the assembled native graph.
+///
+/// `start` may create part of a phase's native state before reporting an error,
+/// so `rollback` must be safe for a phase whose `start` failed as well as after
+/// a successful `start` for the same phase.
 pub trait NativeStartupAdapter {
     fn start(&mut self, phase: StartupPhase, paths: &NativePaths) -> Result<(), String>;
     fn rollback(&mut self, phase: StartupPhase);
@@ -224,6 +254,11 @@ impl<A: NativeStartupAdapter> NativeStartupServices<A> {
     pub fn adapter(&self) -> &A {
         &self.adapter
     }
+    /// Mutable adapter access.
+    ///
+    /// The phase bookkeeping lives in this type, so never call the adapter's
+    /// `start`/`rollback` through this accessor: a phase started that way is
+    /// never torn down, and one rolled back that way is torn down twice.
     pub fn adapter_mut(&mut self) -> &mut A {
         &mut self.adapter
     }
@@ -231,9 +266,13 @@ impl<A: NativeStartupAdapter> NativeStartupServices<A> {
 
 impl<A: NativeStartupAdapter> NativeStartupServices<A> {
     fn start_phase(&mut self, phase: StartupPhase) -> Result<(), String> {
-        self.adapter
-            .start(phase, &self.paths)
-            .map_err(|error| format!("{phase}: {error}"))?;
+        if let Err(error) = self.adapter.start(phase, &self.paths) {
+            // `start` may already have created part of the phase's native
+            // state; the adapter contract makes rollback safe for a phase
+            // whose start failed, and this keeps the leak out of `Drop`.
+            self.adapter.rollback(phase);
+            return Err(format!("{phase}: {error}"));
+        }
         self.completed.push(phase);
         Ok(())
     }
@@ -298,10 +337,11 @@ impl<A: NativeStartupAdapter> StartupServices for NativeStartupServices<A> {
         self.start_phase(StartupPhase::ProcessingElements)
     }
 
-    fn rollback_setup(&mut self) {
+    fn rollback_setup(&mut self) -> Result<(), String> {
         while let Some(phase) = self.completed.pop() {
             self.adapter.rollback(phase);
         }
+        Ok(())
     }
 
     fn commit_setup(&mut self) {
@@ -314,7 +354,9 @@ impl<A: NativeStartupAdapter> StartupServices for NativeStartupServices<A> {
 
 impl<A: NativeStartupAdapter> Drop for NativeStartupServices<A> {
     fn drop(&mut self) {
-        self.rollback_setup();
+        // Dropping discards the failure stack; the phases themselves are
+        // released by NativeComponents.
+        let _ = self.rollback_setup();
     }
 }
 
@@ -371,8 +413,8 @@ mod tests {
         let mut startup = NativeStartupServices::new(paths(), Recorder(calls.clone()));
         startup.init_sdl().unwrap();
         startup.init_audio().unwrap();
-        startup.rollback_setup();
-        startup.rollback_setup();
+        let _ = startup.rollback_setup();
+        let _ = startup.rollback_setup();
         assert_eq!(
             *calls.lock().unwrap(),
             vec![

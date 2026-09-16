@@ -43,8 +43,13 @@ pub struct FloLayoutBox {
     pub linebottom: bool,
 }
 impl FloLayoutBox {
+    /// Whether a logical point is inside this box.
+    ///
+    /// Half-open on all four edges: two abutting boxes must not both claim
+    /// their shared boundary, otherwise the later element (which wins the
+    /// reverse-order hit test) swallows its neighbour's edge pixel.
     pub fn inside(&self, x: i32, y: i32) -> bool {
-        x >= self.left && x <= self.right && y >= self.top && y <= self.bottom
+        x >= self.left && x < self.right && y >= self.top && y < self.bottom
     }
     pub fn render(&self, r: &mut dyn Renderer, m: &RenderMetrics, color: Color) {
         let (l, t, rr, b) = (
@@ -54,7 +59,15 @@ impl FloLayoutBox {
             m.y(self.bottom),
         );
         r.draw(DrawOp::Box(l, t, rr, b, color));
-        let black = Color(0, 0, 0, 255);
+        // The outline follows the element colour (a toggled element must look
+        // active as a whole, per `FloLayoutElement::toggle`) but is darkened
+        // for contrast against the fill.
+        let black = Color(
+            (color.0 as f32 * 0.35) as u8,
+            (color.1 as f32 * 0.35) as u8,
+            (color.2 as f32 * 0.35) as u8,
+            255,
+        );
         if self.lineleft {
             r.draw(DrawOp::Line((l, t), (l, b), black));
         }
@@ -69,6 +82,9 @@ impl FloLayoutBox {
         }
     }
 }
+
+/// Logical font size used for an element label when `efontsize` is absent.
+pub const DEFAULT_ELEMENT_FONT_SIZE: f32 = 20.0;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FloLayoutElement {
@@ -111,7 +127,7 @@ impl FloLayoutElement {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FloLayout {
     pub id: i32,
     pub iid: i32,
@@ -129,14 +145,32 @@ pub struct FloLayout {
     /// (mobile first-run hint, e.g. "tap a cell to record").
     pub emptyhint: Option<String>,
 }
-impl FloLayout {
-    pub fn new() -> Self {
+impl Default for FloLayout {
+    fn default() -> Self {
         Self {
+            id: 0,
+            iid: 0,
+            xpos: 0,
+            ypos: 0,
+            name: None,
+            nxpos: 0,
+            nypos: 0,
+            loopids: (0, 0),
+            elements: Vec::new(),
+            // Visible with labels, matching `FloLayout::new()` and the C++
+            // layout defaults: a hidden, label-less layout would be a silent
+            // behaviour change for every `..Default::default()` caller.
             show: true,
             showlabel: true,
             showelabel: true,
-            ..Default::default()
+            emptyhint: None,
         }
+    }
+}
+
+impl FloLayout {
+    pub fn new() -> Self {
+        Self::default()
     }
     pub fn add_element(&mut self, element: FloLayoutElement) {
         self.elements.push(element);
@@ -214,8 +248,12 @@ mod tests {
             bottom: 4,
             ..Default::default()
         };
+        // Half-open: the right/bottom edge belongs to the next box, so two
+        // abutting boxes cannot both claim their shared boundary.
         assert!(b.inside(1, 2));
-        assert!(b.inside(3, 4));
+        assert!(b.inside(2, 3));
+        assert!(!b.inside(3, 4));
+        assert!(!b.inside(3, 2));
         assert!(!b.inside(0, 2));
     }
     #[test]

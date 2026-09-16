@@ -1,6 +1,6 @@
 use freewheeling_plus::event::{Event, EventListener, EventManager, EventType};
 use freewheeling_plus::mem::{MemoryManager, Preallocated, PreallocatedTypeInner};
-use freewheeling_plus::processor_queue::{ProcessorCommand, ProcessorCommandQueue};
+use freewheeling_plus::processor_queue::{ProcessorCommand, ProcessorCommandQueue, ProcessorItem};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
@@ -57,13 +57,22 @@ fn processor_queue_is_bounded_and_fifo_under_concurrent_producers() {
     let queue = Arc::new(ProcessorCommandQueue::new());
     let gate = Arc::new(Barrier::new(PRODUCERS + 1));
     let mut workers = Vec::new();
-    for _ in 0..PRODUCERS {
+    for producer in 0..PRODUCERS {
         let queue = Arc::clone(&queue);
         let gate = Arc::clone(&gate);
         workers.push(thread::spawn(move || {
             gate.wait();
             (0..EACH)
-                .filter(|_| queue.enqueue_add(std::ptr::null_mut()))
+                .filter(|sequence| {
+                    // The handle encodes producer and sequence: the queue
+                    // stores it verbatim, which is what lets the drain below
+                    // verify per-producer FIFO order.
+                    let handle = producer * 4096 + *sequence;
+                    queue
+                        .enqueue_add(handle as *mut ProcessorItem)
+                        .then_some(())
+                        .is_some()
+                })
                 .count()
         }));
     }
@@ -75,15 +84,34 @@ fn processor_queue_is_bounded_and_fifo_under_concurrent_producers() {
     assert_eq!(queue.pending_count(), accepted);
     let mut command = ProcessorCommand::default();
     let mut drained = 0;
+    // One sequence list per producer, appended in drain order: the queue must
+    // hand back each producer's commands in the order they were enqueued, so
+    // a LIFO or interleaving regression fails here instead of passing on a
+    // type-only check.
+    let mut sequences: Vec<Vec<usize>> = vec![Vec::new(); PRODUCERS];
     while queue.read_next(&mut command) {
         assert_eq!(
             command.command_type,
             freewheeling_plus::processor_queue::ProcessorCommandType::Add
         );
+        // The handle carries the producer index and its per-producer sequence.
+        let handle = command.item as usize;
+        let (producer, sequence) = (handle / 4096, handle % 4096);
+        assert!(producer < PRODUCERS, "unexpected producer index {producer}");
+        sequences[producer].push(sequence);
         drained += 1;
     }
     assert_eq!(drained, accepted);
     assert_eq!(queue.pending_count(), 0);
+    let mut total = 0;
+    for (producer, sequence) in sequences.iter().enumerate() {
+        assert!(
+            sequence.windows(2).all(|pair| pair[0] < pair[1]),
+            "producer {producer} commands were not drained in FIFO order: {sequence:?}"
+        );
+        total += sequence.len();
+    }
+    assert_eq!(total, accepted, "commands were lost or duplicated");
 }
 
 struct Recycled(Arc<AtomicUsize>, mpsc::Sender<()>);
@@ -114,7 +142,12 @@ fn preallocation_recycles_concurrent_deletes_before_reuse() {
         workers.push(thread::spawn(move || {
             gate.wait();
             let item = ty.rt_new().unwrap();
-            ty.rt_delete(item);
+            // `rt_delete` hands the instance back when the bounded manager
+            // queue rejects the delete, which would leave it unrecycled.
+            assert!(
+                ty.rt_delete(item).is_none(),
+                "the deferred delete was rejected by the manager queue"
+            );
         }));
     }
     gate.wait();

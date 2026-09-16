@@ -52,8 +52,23 @@ impl SoftwareSurface {
     pub fn clear(&mut self, color: Color) {
         self.pixels.fill(color.packed());
     }
+    /// Restrict drawing to a rectangle.
+    ///
+    /// The rectangle is normalized and clamped to the surface, so a negative
+    /// size becomes an explicit empty clip (`right == left`) instead of an
+    /// unchecked range, and every `put_pixel` can rely on the invariant
+    /// `0 <= left <= right <= width`.
     pub fn set_clip(&mut self, clip: Option<(i32, i32, i32, i32)>) {
-        self.clip = clip.map(|(x, y, w, h)| (x, y, x.saturating_add(w), y.saturating_add(h)));
+        self.clip = clip.map(|(x, y, w, h)| {
+            let left = x.max(0).min(self.width);
+            let top = y.max(0).min(self.height);
+            (
+                left,
+                top,
+                x.saturating_add(w.max(0)).clamp(left, self.width),
+                y.saturating_add(h.max(0)).clamp(top, self.height),
+            )
+        });
     }
     pub fn rgba_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.pixels.len() * 4);
@@ -84,6 +99,11 @@ impl SoftwareSurface {
         *pixel = color;
     }
 
+    /// Blit an RGBA source with source-over blending.
+    ///
+    /// Note the alpha contract differs from the vector primitives: this path
+    /// blends (see `blend`), while `put_pixel`/`hline_rgba`/boxes write the
+    /// packed RGBA value raw for C++ parity.
     pub fn blit_rgba(
         &mut self,
         source: &[u8],
@@ -203,8 +223,12 @@ impl SoftwareSurface {
         if rad < 0 {
             return;
         }
+        // Squared distances run in i64: `rad * rad` overflows i32 above radius
+        // ~46340 and would wrap (or panic in debug builds).
+        let radius_squared = i64::from(rad) * i64::from(rad);
         for dy in -rad..=rad {
-            let span = ((rad * rad - dy * dy) as f64).sqrt() as i32;
+            let offset = i64::from(dy) * i64::from(dy);
+            let span = ((radius_squared - offset).max(0) as f64).sqrt() as i32;
             self.hline_rgba(x - span, x + span, y + dy, color);
         }
     }
@@ -212,9 +236,15 @@ impl SoftwareSurface {
         if rad < 0 {
             return;
         }
+        // Same i64 reasoning as `filled_circle_rgba`, and the inner scan is
+        // restricted to the row's span: the bounding box would call `atan2`
+        // for every pixel outside the circle too.
+        let radius_squared = i64::from(rad) * i64::from(rad);
         for dy in -rad..=rad {
-            for dx in -rad..=rad {
-                if dx * dx + dy * dy <= rad * rad
+            let offset = i64::from(dy) * i64::from(dy);
+            let span = ((radius_squared - offset).max(0) as f64).sqrt() as i32;
+            for dx in -span..=span {
+                if i64::from(dx) * i64::from(dx) + offset <= radius_squared
                     && angle_within_range(
                         (-dy as f64).atan2(dx as f64).to_degrees(),
                         start as f64,

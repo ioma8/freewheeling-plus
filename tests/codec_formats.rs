@@ -3,6 +3,14 @@ use freewheeling_plus::file_codecs::{IFileDecoder, IFileEncoder, SndFileDecoder,
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
+/// Sample round-trip tolerance.
+///
+/// FLAC quantizes to 24-bit fixed point (about 6e-8 per sample) and AU to
+/// 32-bit, so 1e-6 is comfortably above the worst case while still catching a
+/// real regression (a 16-bit encoder would need ~3e-5, and this bound would
+/// have to change with it).
+const ROUND_TRIP_TOLERANCE: f32 = 1e-6;
+
 fn encode(format: Codec, stereo: bool, left: &[f32], right: Option<&[f32]>) -> Vec<u8> {
     let bytes = Arc::new(Mutex::new(Cursor::new(Vec::new())));
     let mut encoder = SndFileEncoder::new(48_000, stereo, format).unwrap();
@@ -29,7 +37,7 @@ fn round_trip(format: Codec, stereo: bool) {
             .samples
             .iter()
             .zip(left.iter())
-            .all(|(a, b)| (a - b).abs() < 1e-6)
+            .all(|(a, b)| (a - b).abs() < ROUND_TRIP_TOLERANCE)
     );
     if stereo {
         assert!(
@@ -40,7 +48,7 @@ fn round_trip(format: Codec, stereo: bool) {
                 .samples
                 .iter()
                 .zip(right.iter())
-                .all(|(a, b)| (a - b).abs() < 1e-6)
+                .all(|(a, b)| (a - b).abs() < ROUND_TRIP_TOLERANCE)
         );
     }
 }
@@ -70,7 +78,9 @@ impl std::io::Write for SharedWriter {
         self.0.lock().unwrap().write(bytes)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+        // Forward the sink's result: this double stands in for a real
+        // `Write + Seek`, so swallowing a flush failure would hide it.
+        self.0.lock().unwrap().flush()
     }
 }
 impl std::io::Seek for SharedWriter {

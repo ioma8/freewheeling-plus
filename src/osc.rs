@@ -30,6 +30,16 @@ impl OscMessage {
         if !path.starts_with('/') || path.contains('\0') {
             return Err(OscError::InvalidPath(path));
         }
+        for arg in &args {
+            if let OscType::String(value) = arg
+                && value.contains('\0')
+            {
+                // The NUL is the string terminator on the wire, so an interior
+                // one truncates the value and turns the rest of the packet into
+                // padding for every following argument.
+                return Err(OscError::InvalidStringArgument(value.clone()));
+            }
+        }
         Ok(Self { path, args })
     }
 
@@ -86,7 +96,12 @@ impl OscMessage {
 #[derive(Debug)]
 pub enum OscError {
     InvalidPath(String),
+    /// A string argument contained an interior NUL byte (see `OscMessage::new`).
+    InvalidStringArgument(String),
+    /// The socket is not open yet.
     NotConnected,
+    /// The configured host did not resolve to any address.
+    ResolutionFailed(String),
     Io(io::Error),
     Poisoned,
     InvalidPacket(&'static str),
@@ -96,7 +111,13 @@ impl std::fmt::Display for OscError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OscError::InvalidPath(path) => write!(f, "invalid OSC path '{path}'"),
+            OscError::InvalidStringArgument(value) => {
+                write!(f, "invalid OSC string argument '{value}'")
+            }
             OscError::NotConnected => write!(f, "OSC not connected"),
+            OscError::ResolutionFailed(host) => {
+                write!(f, "OSC host '{host}' did not resolve to any address")
+            }
             OscError::Io(e) => write!(f, "OSC I/O error: {e}"),
             OscError::Poisoned => write!(f, "OSC mutex poisoned"),
             OscError::InvalidPacket(reason) => write!(f, "invalid OSC packet: {reason}"),
@@ -128,20 +149,38 @@ impl UdpBackend {
         let destination = (host, port)
             .to_socket_addrs()?
             .next()
-            .ok_or(OscError::NotConnected)?;
+            .ok_or_else(|| OscError::ResolutionFailed(host.to_string()))?;
         Ok(Self {
             destination,
             socket: None,
         })
     }
     pub fn open(&mut self) -> Result<(), OscError> {
-        self.socket = Some(UdpSocket::bind("0.0.0.0:0")?);
+        // The socket family has to match the resolved destination: binding an
+        // IPv4 wildcard to send to an IPv6 address fails at runtime with
+        // EAFNOSUPPORT even though resolution succeeded.
+        let bind_address = if self.destination.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        self.socket = Some(UdpSocket::bind(bind_address)?);
         Ok(())
     }
-    fn send(&mut self, message: &OscMessage) -> Result<(), OscError> {
-        let socket = self.socket.as_ref().ok_or(OscError::NotConnected)?;
-        socket.send_to(&message.encode(), self.destination)?;
-        Ok(())
+    /// A duplicate of the open socket, so a batch can be written without
+    /// holding the backend lock across the (potentially blocking) writes.
+    ///
+    /// `try_clone` duplicates the handle rather than the buffer: both handles
+    /// refer to the same socket, and `send_to` stays atomic per datagram.
+    fn try_clone_socket(&self) -> Result<Option<UdpSocket>, OscError> {
+        self.socket
+            .as_ref()
+            .map(UdpSocket::try_clone)
+            .transpose()
+            .map_err(OscError::Io)
+    }
+    fn destination(&self) -> SocketAddr {
+        self.destination
     }
     fn close(&mut self) {
         self.socket = None;
@@ -181,16 +220,21 @@ impl OscClient {
             b.close();
         }
     }
+    /// Send the snapshot as a batch.
+    ///
+    /// The messages are encoded first and the socket taken afterwards, so the
+    /// backend lock is not held across the (potentially blocking) UDP writes;
+    /// another thread can still open/close or send while this batch runs.
     pub fn send_playing_loops(&self, snapshot: &PlayingLoops) -> Result<(), OscError> {
-        let mut b = self.backend.lock().map_err(|_| OscError::Poisoned)?;
+        let mut messages = Vec::new();
         if let Some((tempo, beats)) = snapshot.tempo {
-            b.send(&OscMessage::new(
+            messages.push(OscMessage::new(
                 "/SetGlobalTempo",
                 vec![OscType::Float(tempo), OscType::Int(beats)],
-            )?)?;
+            )?);
         }
         for l in &snapshot.loops {
-            b.send(&OscMessage::new(
+            messages.push(OscMessage::new(
                 "/AddAudioClipOnUniqueTrack",
                 vec![
                     OscType::Int(l.start),
@@ -200,12 +244,25 @@ impl OscClient {
                     OscType::Float(l.gain),
                     OscType::String(l.path.clone()),
                 ],
-            )?)?;
+            )?);
         }
-        b.send(&OscMessage::new(
+        messages.push(OscMessage::new(
             "/AdvanceLoopRange",
             vec![OscType::Int(0), OscType::Int(snapshot.range_end)],
-        )?)
+        )?);
+        let encoded = messages.iter().map(OscMessage::encode).collect::<Vec<_>>();
+        // A duplicate of the socket is taken and the lock released before the
+        // writes: `send_to` can block on a stalled peer or a full socket
+        // buffer, and `open`/`close`/other senders must not wait for it.
+        let (socket, destination) = {
+            let backend = self.backend.lock().map_err(|_| OscError::Poisoned)?;
+            (backend.try_clone_socket()?, backend.destination())
+        };
+        let socket = socket.ok_or(OscError::NotConnected)?;
+        for packet in &encoded {
+            socket.send_to(packet, destination)?;
+        }
+        Ok(())
     }
     pub fn receive_event(
         &self,
@@ -232,6 +289,7 @@ pub struct OscReceiver {
     receiver: mpsc::Receiver<OscMessage>,
     running: Arc<AtomicBool>,
     dropped: Arc<AtomicU64>,
+    malformed: Arc<AtomicU64>,
     worker: Option<JoinHandle<()>>,
     local_addr: SocketAddr,
 }
@@ -244,8 +302,10 @@ impl OscReceiver {
         let (sender, receiver) = mpsc::sync_channel(capacity.max(1));
         let running = Arc::new(AtomicBool::new(true));
         let dropped = Arc::new(AtomicU64::new(0));
+        let malformed = Arc::new(AtomicU64::new(0));
         let worker_running = Arc::clone(&running);
         let worker_dropped = Arc::clone(&dropped);
+        let worker_malformed = Arc::clone(&malformed);
         let worker = thread::Builder::new()
             .name("osc-receive".into())
             .spawn(move || {
@@ -253,10 +313,19 @@ impl OscReceiver {
                 while worker_running.load(Ordering::Acquire) {
                     match socket.recv_from(&mut packet) {
                         Ok((length, _)) => {
-                            if let Ok(message) = OscMessage::decode(&packet[..length])
-                                && sender.try_send(message).is_err()
-                            {
-                                worker_dropped.fetch_add(1, Ordering::Relaxed);
+                            // A decode failure is counted separately from a
+                            // full queue: protocol errors (bad type tags,
+                            // truncation, invalid UTF-8, embedded NULs) must
+                            // not look like ordinary packet loss.
+                            match OscMessage::decode(&packet[..length]) {
+                                Ok(message) => {
+                                    if sender.try_send(message).is_err() {
+                                        worker_dropped.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                                Err(_) => {
+                                    worker_malformed.fetch_add(1, Ordering::Relaxed);
+                                }
                             }
                         }
                         Err(error)
@@ -273,6 +342,7 @@ impl OscReceiver {
             receiver,
             running,
             dropped,
+            malformed,
             worker: Some(worker),
             local_addr,
         })
@@ -284,8 +354,15 @@ impl OscReceiver {
     pub fn try_receive(&self) -> Option<OscMessage> {
         self.receiver.try_recv().ok()
     }
+    /// Packets dropped because the consumer queue was full.
     pub fn dropped_messages(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// Packets rejected as malformed (bad type tags, truncation, invalid
+    /// UTF-8, embedded NULs). Counted separately from queue drops.
+    pub fn malformed_packets(&self) -> u64 {
+        self.malformed.load(Ordering::Relaxed)
     }
     pub fn shutdown(&mut self) {
         self.running.store(false, Ordering::Release);
@@ -304,7 +381,7 @@ impl Drop for OscReceiver {
 fn padded_string(out: &mut Vec<u8>, value: &str) {
     out.extend(value.as_bytes());
     out.push(0);
-    while out.len() % 4 != 0 {
+    while !out.len().is_multiple_of(4) {
         out.push(0);
     }
 }
@@ -314,7 +391,7 @@ fn read_four(packet: &[u8], offset: &mut usize) -> Result<[u8; 4], OscError> {
         .get(*offset..*offset + 4)
         .ok_or(OscError::InvalidPacket("truncated argument"))?;
     *offset += 4;
-    Ok(bytes.try_into().expect("four byte slice"))
+    <[u8; 4]>::try_from(bytes).map_err(|_| OscError::InvalidPacket("truncated argument"))
 }
 
 fn read_padded_string(packet: &[u8], offset: &mut usize) -> Result<String, OscError> {

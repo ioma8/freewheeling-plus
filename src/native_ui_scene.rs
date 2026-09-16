@@ -5,9 +5,11 @@
 //! declared order: it is part of FreeWheeling's overdraw behaviour.
 
 use super::{DisplayScene, FrameRenderer, PlatformRenderer, SoftwareRgbaRenderer};
-use crate::video_layout::{FloLayout, FloLayoutBox, FloLayoutElement};
+use crate::video_layout::{
+    DEFAULT_ELEMENT_FONT_SIZE, FloLayout, FloLayoutBox, FloLayoutElement,
+};
 use crate::videoio_displays::{
-    BrowserHit, Color, Display, DrawOp, FloDisplay, Orientation, RenderMetrics, Renderer,
+    BrowserHit, Color, DrawOp, FloDisplay, Orientation, RenderMetrics, Renderer, SceneDisplay,
 };
 use fontdue::{Font, FontSettings};
 use roxmltree::{Document, Node};
@@ -65,10 +67,51 @@ pub struct LayoutSceneState {
     pub loopids: (i32, i32),
 }
 
+/// Everything one display draws in a frame, copied out of the shared scene
+/// state while its lock is held.
+///
+/// The guard is dropped before the first draw call: the runtime publishes new
+/// values from the audio/binding side, and holding the read lock across
+/// renderer callbacks would make that writer wait for the whole frame.
+struct DisplayFrame {
+    value: f32,
+    /// `Bar`: whether the switched variable reads back as zero.
+    switched_reads_zero: bool,
+    /// `Snapshots`: `(local row, absolute index, name)` for the current page.
+    snapshot_rows: Vec<(usize, usize, Option<String>)>,
+    /// `ParamSet`: the parameter set of this display, if any.
+    paramset: Option<crate::paramset::FloDisplayParamSet>,
+    /// `Browser`: the rows to draw around the selection.
+    browser: Option<BrowserFrame>,
+}
+
+struct BrowserFrame {
+    expanded: bool,
+    selected: usize,
+    /// The selection plus the neighbours the expanded view draws, as
+    /// `(index, text)`, already bounded to the rows that fit.
+    rows: Vec<(usize, String)>,
+    /// `BROWSE_loop_tray` data: the rows are scopes, not browser items.
+    tray: Option<TrayFrame>,
+}
+
+/// `LoopTray::Draw` inputs, extracted from the browser and loop-scope state.
+struct TrayFrame {
+    limiter: f32,
+    rows: Vec<TrayRow>,
+}
+
+struct TrayRow {
+    name: Option<String>,
+    scope: Option<LoopScopeState>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoopScopeState {
-    pub peaks: Vec<f32>,
-    pub averages: Vec<f32>,
+    /// Shared with the frame that draws it: the renderer clones the `Arc`
+    /// instead of copying the vectors every frame.
+    pub peaks: std::sync::Arc<[f32]>,
+    pub averages: std::sync::Arc<[f32]>,
     pub position_column: u16,
     pub chunk_count: u16,
     pub current_peak: f32,
@@ -81,11 +124,69 @@ pub struct LoopScopeState {
     pub name: Option<String>,
 }
 
+/// Per-element render data captured while the scene lock was held.
+///
+/// The layout renderer snapshots the frame and releases the lock before it
+/// draws: holding the read lock across renderer callbacks would stall (or
+/// deadlock) a writer publishing values from the audio/binding side.
+#[derive(Clone, Debug)]
+struct LayoutElementFrame {
+    magnitude: f32,
+    selected: bool,
+    toggled: bool,
+    palette: [Color; 4],
+    scope: Option<LoopScopeFrame>,
+}
+
+impl Default for LayoutElementFrame {
+    fn default() -> Self {
+        Self {
+            magnitude: 0.0,
+            selected: false,
+            toggled: false,
+            palette: [Color(0, 0, 0, 0); 4],
+            scope: None,
+        }
+    }
+}
+
+/// Owned copy of one loop's scope data for a frame.
+#[derive(Clone, Debug)]
+struct LoopScopeFrame {
+    gain: f32,
+    trigger_gain: f32,
+    gain_delta: f32,
+    mode: crate::native_dsp_graph::LoopMode,
+    position_column: u16,
+    chunk_count: u16,
+    peaks: std::sync::Arc<[f32]>,
+    averages: std::sync::Arc<[f32]>,
+    name: Option<String>,
+    recent_rank: Option<u8>,
+}
+
+impl Default for LoopScopeFrame {
+    fn default() -> Self {
+        Self {
+            gain: 1.0,
+            trigger_gain: 1.0,
+            gain_delta: 1.0,
+            mode: crate::native_dsp_graph::LoopMode::Empty,
+            position_column: 0,
+            chunk_count: 0,
+            peaks: std::sync::Arc::from([]),
+            averages: std::sync::Arc::from([]),
+            name: None,
+            recent_rank: None,
+        }
+    }
+}
+
 impl Default for LoopScopeState {
     fn default() -> Self {
         Self {
-            peaks: Vec::new(),
-            averages: Vec::new(),
+            peaks: std::sync::Arc::from([]),
+            averages: std::sync::Arc::from([]),
             position_column: 0,
             chunk_count: 0,
             current_peak: 0.0,
@@ -191,6 +292,26 @@ struct LayoutContent {
     toggle_states: HashMap<i32, bool>,
 }
 
+/// Whether an interface's own layouts and displays belong on screen now.
+///
+/// `start-interface` fires for *every* loaded interface (C++
+/// `FloConfig::StartInterfaces` parity) and `video-switch-interface` only hides
+/// the other interfaces' layouts, so a layout an interface arms for itself
+/// would otherwise be drawn while a different interface is selected - the
+/// mobile touch grid used to appear on the desktop that way. Interface 0 holds
+/// the shared layouts, and ids >= 1000 are the non-switchable interfaces
+/// (`interfaces.xml` marks them "always visible - never switched"), so both
+/// stay eligible.
+fn interface_is_selected(state: &UiSceneState, interface: i32) -> bool {
+    if interface <= 0 || interface >= 1000 {
+        return true;
+    }
+    state
+        .values
+        .get("SYSTEM_cur_switchable_interface")
+        .is_some_and(|current| *current as i32 == interface)
+}
+
 /// `VideoIO` owns `curpeakidx`, `lastpeakidx`, and `oldpeak` on the video
 /// thread.  Keeping this state alongside each rendered layout makes Rust use
 /// the same update cadence instead of treating UI-snapshot delivery as an
@@ -222,7 +343,7 @@ struct LogoOverlay {
     base: FloDisplay,
     width: u32,
     height: u32,
-    pixels: Vec<u8>,
+    pixels: std::sync::Arc<Vec<u8>>,
     started: Instant,
     version_width: i32,
     version_height: i32,
@@ -292,7 +413,7 @@ struct PulseOverlay {
     state: SharedUiSceneState,
 }
 
-impl Display for PulseOverlay {
+impl SceneDisplay for PulseOverlay {
     fn base(&self) -> &FloDisplay {
         &self.base
     }
@@ -302,30 +423,28 @@ impl Display for PulseOverlay {
     }
 
     fn render(&mut self, renderer: &mut dyn Renderer, metrics: &RenderMetrics) {
-        let state = self.state.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.values.get("pulse-active").copied().unwrap_or(0.0) == 0.0 {
+        // Snapshot the pulse values, then release the lock before drawing:
+        // the scene lock must not be held across renderer callbacks.
+        let (active, frames, position, long_count, long_length) = {
+            let state = self
+                .state
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let value = |name: &str, default: f32| {
+                state.values.get(name).copied().unwrap_or(default)
+            };
+            (
+                value("pulse-active", 0.0),
+                value("pulse-frames", 1.0).max(1.0),
+                value("pulse-position", 0.0),
+                value("pulse-long-count", 0.0).max(0.0) as u32,
+                value("pulse-long-length", 1.0).max(1.0) as u32,
+            )
+        };
+        if active == 0.0 {
             return;
         }
-        let frames = state
-            .values
-            .get("pulse-frames")
-            .copied()
-            .unwrap_or(1.0)
-            .max(1.0);
-        let position = state.values.get("pulse-position").copied().unwrap_or(0.0);
         let end = (360.0 * (position / frames).clamp(0.0, 1.0)) as i32;
-        let long_count = state
-            .values
-            .get("pulse-long-count")
-            .copied()
-            .unwrap_or(0.0)
-            .max(0.0) as u32;
-        let long_length = state
-            .values
-            .get("pulse-long-length")
-            .copied()
-            .unwrap_or(1.0)
-            .max(1.0) as u32;
         // Exact logical geometry from VideoIO::video_event_loop: pulse zero is
         // at (600,30), and the selected pulse is twice the 10-pixel base size.
         let x = metrics.x(600);
@@ -372,7 +491,7 @@ impl Display for PulseOverlay {
     }
 }
 
-impl Display for StaticStatusOverlay {
+impl SceneDisplay for StaticStatusOverlay {
     fn base(&self) -> &FloDisplay {
         &self.base
     }
@@ -380,14 +499,24 @@ impl Display for StaticStatusOverlay {
         &mut self.base
     }
     fn render(&mut self, renderer: &mut dyn Renderer, metrics: &RenderMetrics) {
-        let state = self.state.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let streaming = state.values.get("streaming").copied().unwrap_or(0.0) != 0.0;
-        let stream_bytes = state.values.get("stream-bytes").copied().unwrap_or(0.0);
+        // Snapshot what this frame needs, then release the lock before
+        // drawing: the scene lock must not be held across renderer callbacks.
+        let (streaming, stream_bytes, stream_output_name) = {
+            let state = self
+                .state
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                state.values.get("streaming").copied().unwrap_or(0.0) != 0.0,
+                state.values.get("stream-bytes").copied().unwrap_or(0.0),
+                state.stream_output_name.clone(),
+            )
+        };
         let status = if streaming {
-            let name = if state.stream_output_name.is_empty() {
+            let name = if stream_output_name.is_empty() {
                 "stream"
             } else {
-                state.stream_output_name.as_str()
+                stream_output_name.as_str()
             };
             format!(
                 "{name}   {:.1} mb  (1 streams)",
@@ -423,7 +552,7 @@ impl Display for StaticStatusOverlay {
     }
 }
 
-impl Display for LogoOverlay {
+impl SceneDisplay for LogoOverlay {
     fn base(&self) -> &FloDisplay {
         &self.base
     }
@@ -439,7 +568,7 @@ impl Display for LogoOverlay {
         let elapsed = self.started.elapsed().as_secs_f32();
         let y = cpp_logo_y(metrics.drawable_height, height, elapsed);
         renderer.draw(DrawOp::Image(
-            self.pixels.clone(),
+            std::sync::Arc::clone(&self.pixels),
             self.width,
             self.height,
             metrics.drawable_width - width,
@@ -467,7 +596,7 @@ impl Display for LogoOverlay {
     }
 }
 
-impl Display for HelpOverlay {
+impl SceneDisplay for HelpOverlay {
     fn base(&self) -> &FloDisplay {
         &self.base
     }
@@ -502,7 +631,7 @@ impl Display for HelpOverlay {
     }
 }
 
-impl Display for LayoutContent {
+impl SceneDisplay for LayoutContent {
     fn base(&self) -> &FloDisplay {
         &self.base
     }
@@ -510,12 +639,6 @@ impl Display for LayoutContent {
         &mut self.base
     }
     fn render(&mut self, renderer: &mut dyn Renderer, metrics: &RenderMetrics) {
-        let state = self.state.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let layout_state = state.layouts.get(&(self.layout.iid, self.layout.id));
-        if !layout_state.map_or(self.layout.show, |layout| layout.show) {
-            return;
-        }
-        let loop_base = layout_state.map_or(self.layout.loopids.0, |layout| layout.loopids.0);
         const LOOP_COLORS: [[Color; 4]; 4] = [
             [
                 Color(0x5f, 0x7c, 0x2b, 255),
@@ -543,11 +666,91 @@ impl Display for LayoutContent {
             ],
         ];
         const SELECTED: [Color; 4] = [
-            Color(0xf9, 0xe6, 0x13, 255),
-            Color(0x62, 0x62, 0x62, 255),
+            Color(0xff, 0x3b, 0x30, 255),
+            Color(0xff, 0x8a, 0x80, 255),
             Color(0xff, 0xff, 0xff, 255),
-            Color(0xe0, 0xda, 0xd5, 255),
+            Color(0xff, 0xd5, 0xd2, 255),
         ];
+        // Everything this frame needs is copied out while the lock is held,
+        // which is then released before any draw call or log happens: holding
+        // the read lock across renderer callbacks would stall (or deadlock) a
+        // writer publishing values from the audio/binding side.
+        let (show, loop_base, limiter_gain, loop_scopes_empty, mut frames) = {
+            let state = self
+                .state
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let layout_state = state.layouts.get(&(self.layout.iid, self.layout.id));
+            let show = layout_state.map_or(self.layout.show, |layout| layout.show)
+                && interface_is_selected(&state, self.layout.iid);
+            let loop_base = layout_state.map_or(self.layout.loopids.0, |layout| layout.loopids.0);
+            // The progress pie is attenuated by AutoLimitProcessor's shared
+            // gain (`lvol`); the audio snapshot publishes the same variable.
+            let limiter_gain = state
+                .values
+                .get("SYSTEM_cur_limiter_gain")
+                .copied()
+                .unwrap_or(1.0)
+                .max(0.0);
+            let frames = self
+                .layout
+                .elements
+                .iter()
+                .map(|element| {
+                    let loop_id = loop_base + element.id;
+                    let visual = state.loop_scopes.get(&loop_id);
+                    let selected = visual.is_some_and(|loop_state| loop_state.selected);
+                    // A `toggle="key"` element lights up (bright red fill)
+                    // while the named state value is nonzero: REC while
+                    // streaming, CLEAR while erase mode is armed, PULSE while a
+                    // pulse is selected. An optional `togglemax` bounds it
+                    // (e.g. SAVE flashes for a short window after each scene
+                    // save via `scene-save-age`).
+                    let toggle_value = element
+                        .toggle
+                        .as_deref()
+                        .and_then(|name| state.values.get(name))
+                        .copied()
+                        .unwrap_or(0.0);
+                    let toggled = toggle_value > 0.0
+                        && element.togglemax.is_none_or(|max| toggle_value < max);
+                    LayoutElementFrame {
+                        magnitude: visual
+                            .map(|loop_state| (0.5 + loop_state.trigger_gain).min(1.0))
+                            .unwrap_or(0.5),
+                        selected,
+                        toggled,
+                        palette: if selected {
+                            SELECTED
+                        } else {
+                            LOOP_COLORS[loop_id.rem_euclid(4) as usize]
+                        },
+                        scope: visual.map(|scope| LoopScopeFrame {
+                            gain: scope.gain,
+                            trigger_gain: scope.trigger_gain,
+                            gain_delta: scope.gain_delta,
+                            mode: scope.mode,
+                            position_column: scope.position_column,
+                            chunk_count: scope.chunk_count,
+                            peaks: scope.peaks.clone(),
+                            averages: scope.averages.clone(),
+                            name: scope.name.clone(),
+                            recent_rank: scope.recent_rank,
+                        }),
+                    }
+                })
+                .collect::<Vec<_>>();
+            (
+                show,
+                loop_base,
+                limiter_gain,
+                state.loop_scopes.is_empty(),
+                frames,
+            )
+        };
+        if !show {
+            return;
+        }
         let scaled = |color: Color, magnitude: f32, alpha: u8| {
             Color(
                 (color.0 as f32 * magnitude) as u8,
@@ -556,37 +759,11 @@ impl Display for LayoutContent {
                 alpha,
             )
         };
-        // `VideoIO::DrawLoop` attenuates both the mapped scope and its
-        // progress pie by AutoLimitProcessor's current shared gain (`lvol`).
-        // The audio snapshot publishes the same system variable.
-        let limiter_gain = state
-            .values
-            .get("SYSTEM_cur_limiter_gain")
-            .copied()
-            .unwrap_or(1.0)
-            .max(0.0);
-        for element in &self.layout.elements {
+        for (element, frame) in self.layout.elements.iter().zip(frames.iter_mut()) {
             let loop_id = loop_base + element.id;
-            let visual = state.loop_scopes.get(&loop_id);
-            let magnitude = visual
-                .map(|loop_state| (0.5 + loop_state.trigger_gain).min(1.0))
-                .unwrap_or(0.5);
-            let palette = visual
-                .filter(|loop_state| loop_state.selected)
-                .map_or(&LOOP_COLORS[loop_id.rem_euclid(4) as usize], |_| &SELECTED);
-            // A `toggle="key"` element lights up (bright red fill) while the
-            // named state value is nonzero: REC while streaming, CLEAR while
-            // erase mode is armed, PULSE while a pulse is selected. An
-            // optional `togglemax` bounds it (e.g. SAVE flashes for a short
-            // window after each scene save via `scene-save-age`).
-            let toggle_value = element
-                .toggle
-                .as_deref()
-                .and_then(|name| state.values.get(name))
-                .copied()
-                .unwrap_or(0.0);
-            let toggled = toggle_value > 0.0
-                && element.togglemax.map_or(true, |max| toggle_value < max);
+            let magnitude = frame.magnitude;
+            let palette = &frame.palette;
+            let toggled = frame.toggled;
             if let Some(toggle) = element.toggle.as_deref() {
                 let previous = self.toggle_states.entry(element.id).or_insert(false);
                 if *previous != toggled {
@@ -599,10 +776,7 @@ impl Display for LayoutContent {
             }
             let color = if toggled {
                 Color(0xff, 0x3b, 0x30, 255)
-            } else if visual
-                .filter(|loop_state| loop_state.selected)
-                .is_some()
-            {
+            } else if frame.selected {
                 SELECTED[0]
             } else {
                 scaled(palette[0], magnitude, 255)
@@ -610,7 +784,7 @@ impl Display for LayoutContent {
             for geometry in &element.geometry {
                 geometry.render(renderer, metrics, color);
             }
-            if let Some(scope) = visual {
+            if let Some(scope) = frame.scope.as_mut() {
                 let size = metrics.x(element.loopsize).max(2);
                 let x = metrics.x(element.loopx) - size / 2;
                 let y = metrics.y(element.loopy) - size / 2;
@@ -637,10 +811,18 @@ impl Display for LayoutContent {
                 };
                 let pulse_magnitude = current_peak;
                 let waveform_magnitude = limiter_gain * scope.gain * 20.0 * pulse_magnitude;
-                let chunks = usize::from(scope.chunk_count).min(scope.peaks.len());
+                // Both vectors are independently sized: clamping only against
+                // `peaks` would panic once `averages` is shorter.
+                // The vectors are shared, not copied: the frame only draws the
+                // prefix `chunk_count` asks for.
+                let chunks = usize::from(scope.chunk_count)
+                    .min(scope.peaks.len())
+                    .min(scope.averages.len());
+                let peaks = std::sync::Arc::from(&scope.peaks[..chunks]);
+                let averages = std::sync::Arc::from(&scope.averages[..chunks]);
                 renderer.draw(DrawOp::LoopScope(
-                    scope.peaks[..chunks].to_vec(),
-                    scope.averages[..chunks].to_vec(),
+                    peaks,
+                    averages,
                     scope.position_column,
                     x,
                     y,
@@ -723,7 +905,8 @@ impl Display for LayoutContent {
             if self.layout.showelabel
                 && let Some(name) = &element.name
             {
-                let font_size = element.efontsize.unwrap_or(20.0) * metrics.scale_y;
+                let font_size =
+                    element.efontsize.unwrap_or(DEFAULT_ELEMENT_FONT_SIZE) * metrics.scale_y;
                 if element.labelcenter
                     && let Some(bbox) = element.geometry.first()
                 {
@@ -780,12 +963,12 @@ impl Display for LayoutContent {
         // stays well inside the screen at any scale_y, unlike a proportionally
         // scaled size which overflows the phone width.
         if let Some(hint) = self.layout.emptyhint.as_deref()
-            && state.loop_scopes.is_empty()
+            && loop_scopes_empty
         {
             let font_size = 14.0 * metrics.scale_y;
             let approx_w = font_size * 0.62 * hint.chars().count() as f32;
             let cx = (metrics.x(self.layout.xpos)
-                + metrics.x(self.layout.xpos + metrics.logical_width as i32))
+                + metrics.x(self.layout.xpos + metrics.logical_width))
                 / 2
                 - approx_w as i32 / 2;
             // Center vertically within the loop grid, not the whole screen
@@ -825,19 +1008,142 @@ impl XmlDisplay {
             0,
         ));
     }
-    fn render_at(&mut self, r: &mut dyn Renderer, m: &RenderMetrics, offset: (i32, i32)) {
-        let x = m.x(offset.0 + self.base.xpos);
-        let y = m.y(offset.1 + self.base.ypos);
-        let guard = self.state.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let show = guard
+    /// Copy the data this display draws from the shared state.
+    ///
+    /// Returns `None` when the display is not visible. See [`DisplayFrame`] for
+    /// why the lock is not held while drawing.
+    fn frame(&self) -> Option<DisplayFrame> {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let show = state
             .displays
             .get(&(self.base.iid, self.base.id))
             .copied()
-            .unwrap_or(self.base.show);
+            .unwrap_or(self.base.show)
+            && interface_is_selected(&state, self.base.iid);
         if !show && !self.base.forceshow {
-            return;
+            return None;
         }
-        let value = self.value(&guard);
+        let value = self.value(&state);
+        let switched_reads_zero = match &self.kind {
+            WidgetKind::Bar {
+                switched,
+                switch_variable,
+            } => {
+                *switched
+                    && switch_variable
+                        .as_ref()
+                        .map_or(value == 0.0, |name| evaluate(name, &state.values) == 0.0)
+            }
+            _ => false,
+        };
+        let snapshot_rows = match &self.kind {
+            WidgetKind::Snapshots { .. } => {
+                let key = (self.base.iid, self.base.id);
+                let page = state.snapshot_pages.get(&key).copied().unwrap_or(0);
+                let count = state
+                    .snapshot_display_counts
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(state.snapshots.len())
+                    .max(1);
+                (0..count)
+                    .map(|local| {
+                        let index = page * count + local;
+                        (local, index, state.snapshots.get(index).cloned().flatten())
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        let paramset = match &self.kind {
+            WidgetKind::ParamSet { .. } => state
+                .paramsets
+                .get(&(self.base.iid, self.base.id))
+                .cloned(),
+            _ => None,
+        };
+        let browser = match &self.kind {
+            WidgetKind::Browser {
+                browse_type,
+                expand,
+                ..
+            } => state.browsers.get(browse_type).map(|browser| {
+                if browse_type == "BROWSE_loop_tray" {
+                    return BrowserFrame {
+                        expanded: browser.expanded,
+                        selected: browser.selected,
+                        rows: Vec::new(),
+                        tray: Some(TrayFrame {
+                            limiter: state
+                                .values
+                                .get("SYSTEM_cur_limiter_gain")
+                                .copied()
+                                .unwrap_or(1.0)
+                                .max(0.0),
+                            rows: browser
+                                .loop_ids
+                                .iter()
+                                .enumerate()
+                                .map(|(index, loop_id)| TrayRow {
+                                    name: browser.items.get(index).cloned(),
+                                    scope: state.loop_scopes.get(loop_id).cloned(),
+                                })
+                                .collect(),
+                        }),
+                    };
+                }
+                // `Browser::Draw` centers the selection and walks one
+                // `font_size * 1.2` line per row outward.
+                let line_height = (self.font_size * 1.2).round().max(1.0) as i32;
+                let center = (expand.1 + expand.3) / 2;
+                let spread = if browser.expanded {
+                    (((center - expand.1).min(expand.3 - center) / line_height.max(1)).max(0)
+                        as usize)
+                        + 1
+                } else {
+                    1
+                };
+                let last = browser.items.len().saturating_sub(1);
+                let selected = browser.selected.min(last);
+                let rows = if browser.items.is_empty() {
+                    Vec::new()
+                } else {
+                    let start = selected.saturating_sub(spread);
+                    let end = selected.saturating_add(spread).min(last);
+                    browser.items[start..=end]
+                        .iter()
+                        .enumerate()
+                        .map(|(offset, text)| (start + offset, text.clone()))
+                        .collect()
+                };
+                BrowserFrame {
+                    expanded: browser.expanded,
+                    selected,
+                    rows,
+                    tray: None,
+                }
+            }),
+            _ => None,
+        };
+        Some(DisplayFrame {
+            value,
+            switched_reads_zero,
+            snapshot_rows,
+            paramset,
+            browser,
+        })
+    }
+
+    fn render_at(&mut self, r: &mut dyn Renderer, m: &RenderMetrics, offset: (i32, i32)) {
+        let x = m.x(offset.0 + self.base.xpos);
+        let y = m.y(offset.1 + self.base.ypos);
+        let Some(frame) = self.frame() else {
+            return;
+        };
+        let value = frame.value;
         match &self.kind {
             WidgetKind::Text => {
                 let text = format_value(value);
@@ -887,11 +1193,8 @@ impl XmlDisplay {
                     value.clamp(0.0, 1.0)
                 };
                 let length = (self.bar_scale as f32 * normalized) as i32;
-                let color = if *switched
-                    && switch_variable
-                        .as_ref()
-                        .map_or(value == 0.0, |name| evaluate(name, &guard.values) == 0.0)
-                {
+                let _ = (switched, switch_variable);
+                let color = if frame.switched_reads_zero {
                     Color(HOT.0, HOT.1, HOT.2, 127)
                 } else {
                     HOT
@@ -1019,18 +1322,8 @@ impl XmlDisplay {
                     (x + m.x(size.0), y + m.y(size.1)),
                     border,
                 ));
-                let key = (self.base.iid, self.base.id);
-                let page = guard.snapshot_pages.get(&key).copied().unwrap_or(0);
-                let count = guard
-                    .snapshot_display_counts
-                    .get(&key)
-                    .copied()
-                    .unwrap_or(guard.snapshots.len())
-                    .max(1);
-                for local_index in 0..count {
-                    let index = page * count + local_index;
-                    let name = guard.snapshots.get(index).cloned().flatten();
-                    let row = y + m.y(*margin + local_index as i32 * (self.font_size as i32 + 2));
+                for (local_index, index, name) in &frame.snapshot_rows {
+                    let row = y + m.y(*margin + *local_index as i32 * (self.font_size as i32 + 2));
                     if row > y + m.y(size.1) {
                         break;
                     }
@@ -1072,8 +1365,7 @@ impl XmlDisplay {
                     (x + m.x(size.0), y + m.y(size.1)),
                     border,
                 ));
-                let key = (self.base.iid, self.base.id);
-                if let Some(paramset) = guard.paramsets.get(&key) {
+                if let Some(paramset) = &frame.paramset {
                     if let Some(title) = &self.base.title {
                         self.text(
                             r,
@@ -1130,18 +1422,16 @@ impl XmlDisplay {
                 }
             }
             WidgetKind::Browser {
-                browse_type,
                 expand,
                 loop_size,
+                ..
             } => {
-                let browser = guard.browsers.get(browse_type);
-                if let Some(browser) = browser {
-                    if browse_type == "BROWSE_loop_tray" {
+                if let Some(browser) = &frame.browser {
+                    if let Some(tray) = &browser.tray {
                         render_loop_tray(
                             r,
                             m,
-                            &guard,
-                            browser,
+                            tray,
                             *expand,
                             *loop_size,
                             x,
@@ -1190,57 +1480,37 @@ impl XmlDisplay {
                                 m.y(center + line_height),
                                 Color(127, 0, 0, 255),
                             ));
-                            if let Some(current) = browser.items.get(browser.selected) {
-                                // `Browser::Draw` starts at `cur`, then
-                                // walks `prev` upward and `next` downward.
-                                self.text(
-                                    r,
-                                    current.clone(),
-                                    m.x(expand.0),
-                                    m.y(center),
-                                    FG,
-                                    m.scale_y,
-                                );
-                                let spread = ((center - expand.1).min(expand.3 - center)
-                                    / line_height.max(1))
-                                .max(0) as usize;
-                                for distance in 1..=spread {
-                                    let Some(index) = browser.selected.checked_sub(distance) else {
-                                        break;
-                                    };
-                                    self.text(
-                                        r,
-                                        browser.items[index].clone(),
-                                        m.x(expand.0),
-                                        m.y(center - distance as i32 * line_height),
-                                        FG,
-                                        m.scale_y,
-                                    );
-                                }
-                                for distance in 1..spread {
-                                    let index = browser.selected + distance;
-                                    let Some(item) = browser.items.get(index) else {
-                                        break;
-                                    };
-                                    self.text(
-                                        r,
-                                        item.clone(),
-                                        m.x(expand.0),
-                                        m.y(center + distance as i32 * line_height),
-                                        FG,
-                                        m.scale_y,
-                                    );
-                                }
+                            // `Browser::Draw` starts at `cur`, then walks
+                            // `prev` upward (distances 1..=spread) and `next`
+                            // downward (1..spread).
+                            let spread = ((center - expand.1).min(expand.3 - center)
+                                / line_height.max(1))
+                            .max(0) as usize;
+                            for (index, text) in &browser.rows {
+                                let distance = index.abs_diff(browser.selected);
+                                let row = if distance == 0 {
+                                    center
+                                } else if *index < browser.selected && distance <= spread {
+                                    center - distance as i32 * line_height
+                                } else if *index > browser.selected && distance < spread {
+                                    center + distance as i32 * line_height
+                                } else {
+                                    continue;
+                                };
+                                self.text(r, text.clone(), m.x(expand.0), m.y(row), FG, m.scale_y);
                             }
                         }
-                        if let Some(item) = browser.items.get(browser.selected) {
+                        if let Some((_, item)) = browser
+                            .rows
+                            .iter()
+                            .find(|(index, _)| *index == browser.selected)
+                        {
                             self.text(r, item.clone(), x, y, FG, m.scale_y);
                         }
                     }
                 }
             }
         }
-        drop(guard);
         let child_offset = (offset.0 + self.base.xpos, offset.1 + self.base.ypos);
         for child in &mut self.children {
             child.render_at(r, m, child_offset);
@@ -1255,8 +1525,7 @@ impl XmlDisplay {
 fn render_loop_tray(
     r: &mut dyn Renderer,
     m: &RenderMetrics,
-    state: &UiSceneState,
-    browser: &BrowserSceneState,
+    tray: &TrayFrame,
     expand: (i32, i32, i32, i32),
     loop_size: i32,
     x: i32,
@@ -1296,9 +1565,6 @@ fn render_loop_tray(
         icon * 3 / 8,
         OUTLINE,
     ));
-    if !browser.expanded {
-        return;
-    }
 
     let (left, top, right, bottom) = (m.x(expand.0), m.y(expand.1), m.x(expand.2), m.y(expand.3));
     // LoopTray::Setup uses XCvt(0.016), 10 pixels at 640px.
@@ -1325,20 +1591,15 @@ fn render_loop_tray(
     let height = expand.3 - expand.1;
     let mut item_x = 10;
     let mut item_y = 10;
-    let limiter = state
-        .values
-        .get("SYSTEM_cur_limiter_gain")
-        .copied()
-        .unwrap_or(1.0)
-        .max(0.0);
-    for (index, loop_id) in browser.loop_ids.iter().copied().enumerate() {
+    let limiter = tray.limiter;
+    for row in &tray.rows {
         // C++ stops at the first item that cannot fit in the fixed grid.
         if item_x >= width - jump || item_y >= height - jump {
             break;
         }
         let draw_x = left + m.x(item_x);
         let draw_y = top + m.y(item_y);
-        if let Some(scope) = state.loop_scopes.get(&loop_id) {
+        if let Some(scope) = &row.scope {
             let colormag = (0.5 + scope.trigger_gain).min(1.0);
             let scaled = |color: Color, alpha: u8| {
                 Color(
@@ -1348,10 +1609,12 @@ fn render_loop_tray(
                     alpha,
                 )
             };
-            let chunks = usize::from(scope.chunk_count).min(scope.peaks.len());
+            let chunks = usize::from(scope.chunk_count)
+        .min(scope.peaks.len())
+        .min(scope.averages.len());
             r.draw(DrawOp::LoopScope(
-                scope.peaks[..chunks].to_vec(),
-                scope.averages[..chunks].to_vec(),
+                std::sync::Arc::from(&scope.peaks[..chunks]),
+                std::sync::Arc::from(&scope.averages[..chunks]),
                 scope.position_column,
                 draw_x,
                 draw_y,
@@ -1363,7 +1626,7 @@ fn render_loop_tray(
                 m.x(320),
                 m.y(30),
             ));
-            if let Some(name) = browser.items.get(index) {
+            if let Some(name) = &row.name {
                 r.draw(DrawOp::StyledText(
                     name.clone(),
                     font.into(),
@@ -1384,7 +1647,7 @@ fn render_loop_tray(
     }
 }
 
-impl Display for XmlDisplay {
+impl SceneDisplay for XmlDisplay {
     fn base(&self) -> &FloDisplay {
         &self.base
     }
@@ -1466,11 +1729,20 @@ pub fn load_production_scene_at(
         .and_then(|n| n.attribute("resolution"))
         .map(|v| parse_pair_u32(v, (640, 480)))
         .unwrap_or((640, 480));
+    // `resolution` and `videodelay` are read from the *first* `<var>` element
+    // (see `data/graphics.xml`); the delay is clamped like the config loader
+    // does, so a hand-edited value cannot spin the render loop or freeze the UI.
     let delay = graphics_doc
         .descendants()
         .find(|n| n.has_tag_name("var"))
         .and_then(|n| n.attribute("videodelay"))
-        .and_then(|v| v.parse().ok())
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|delay| {
+            delay.clamp(
+                crate::config::VIDEO_DELAY_MIN_MS,
+                crate::config::VIDEO_DELAY_MAX_MS,
+            )
+        })
         .unwrap_or(40);
     let mut font_specs = BTreeMap::new();
     for node in graphics_doc
@@ -1485,6 +1757,7 @@ pub fn load_production_scene_at(
     let mut docs = vec![(0, graphics_path, graphics)];
     let mut next_switchable_id = 1;
     let mut next_non_switchable_id = 1000;
+    let mut first_switchable_id = None;
     for node in interfaces_doc
         .descendants()
         .filter(|n| n.has_tag_name("interface"))
@@ -1499,14 +1772,29 @@ pub fn load_production_scene_at(
         } else {
             let id = next_switchable_id;
             next_switchable_id += 1;
+            first_switchable_id.get_or_insert(id);
             id
         };
-        let path = data_dir.join(setup);
+        let path = resolve_asset(data_dir, setup);
         docs.push((interface_id, path.clone(), read_xml(&path)?));
     }
     let state = Arc::new(RwLock::new(UiSceneState::default()));
+    // The renderer draws an interface's own layouts and displays only while it
+    // is selected, so the state carries the initial selection before the
+    // runtime publishes the live value: the desktop starts on the first
+    // switchable interface (`data/coreinterface.xml` switches to
+    // `VAR_showinterface`, whose init is 1, and `NativeRuntime` starts with the
+    // same id).
+    state
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values
+        .insert(
+            "SYSTEM_cur_switchable_interface".into(),
+            first_switchable_id.unwrap_or(0) as f32,
+        );
     let mut scene = DisplayScene::new();
-    let mut layout_displays: Vec<Box<dyn Display>> = Vec::new();
+    let mut layout_displays: Vec<Box<dyn SceneDisplay>> = Vec::new();
     let mut kinds = BTreeMap::new();
     let mut display_ids = HashMap::new();
     for (_, path, text) in &docs {
@@ -1561,7 +1849,7 @@ pub fn load_production_scene_at(
                         &font_specs,
                         Arc::clone(&state),
                         &mut kinds,
-                        &display_ids,
+                        &mut display_ids,
                     )?;
                     scene.displays.push(Box::new(widget));
                 }
@@ -1569,6 +1857,8 @@ pub fn load_production_scene_at(
         }
     }
     seed_browser_data(data_dir, &mut state.write().unwrap_or_else(std::sync::PoisonError::into_inner))?;
+    // The layout displays are `Send` like every other scene entry, so the
+    // scene can move to the video worker.
     layout_displays.append(&mut scene.displays);
     scene.displays = layout_displays;
     scene.displays.push(Box::new(HelpOverlay {
@@ -1595,14 +1885,26 @@ pub fn load_production_scene_at(
         match image::open(&logo_path) {
             Ok(image) => {
                 let image = image.into_rgba8();
-                Some((image.width(), image.height(), image.into_raw()))
+                Some((
+                    image.width(),
+                    image.height(),
+                    std::sync::Arc::new(image.into_raw()),
+                ))
             }
             Err(error) => {
+                // No bundle PNG is shipped, so fall back to the compiled logo
+                // (the same surface the other platforms use) instead of drawing
+                // no logo at all: the reference screenshot has one.
                 eprintln!(
-                    "VIDEO: Warning: Couldn't load logo image from '{}': {error}",
+                    "VIDEO: Warning: Couldn't load logo image from '{}': {error}; \
+                     using the compiled logo surface",
                     logo_path.display()
                 );
-                None
+                Some((
+                    crate::logo::WIDTH as u32,
+                    crate::logo::HEIGHT as u32,
+                    std::sync::Arc::new(crate::logo::pixels().to_vec()),
+                ))
             }
         }
     };
@@ -1610,9 +1912,7 @@ pub fn load_production_scene_at(
     let logo = Some((
         crate::logo::WIDTH as u32,
         crate::logo::HEIGHT as u32,
-        crate::logo::PIXEL_DATA
-            [..crate::logo::WIDTH * crate::logo::HEIGHT * crate::logo::BYTES_PER_PIXEL]
-            .to_vec(),
+        std::sync::Arc::new(crate::logo::pixels().to_vec()),
     ));
     if let Some((width, height, pixels)) = logo {
         let (main_font_path, main_font_size) = font_specs
@@ -1641,7 +1941,7 @@ pub fn load_production_scene_at(
     }
     let manifest = SceneManifest {
         logical_size,
-        frame_delay: Duration::from_millis(delay),
+        frame_delay: Duration::from_millis(u64::from(delay)),
         fonts: font_specs,
         interface_files: docs.iter().skip(1).map(|(_, p, _)| p.clone()).collect(),
         display_kinds: kinds,
@@ -1700,6 +2000,7 @@ pub fn production_renderer(
             mouse_down: false,
             beep_pending: false,
             prev_mouse_down: false,
+            press_inside_button: false,
         },
     }
 }
@@ -1711,7 +2012,7 @@ fn parse_display(
     fonts: &BTreeMap<String, (PathBuf, u32)>,
     state: SharedUiSceneState,
     kinds: &mut BTreeMap<String, usize>,
-    display_ids: &HashMap<String, i32>,
+    display_ids: &mut HashMap<String, i32>,
 ) -> Result<XmlDisplay, String> {
     let iid = node
         .attribute("interfaceid")
@@ -1727,7 +2028,20 @@ fn parse_display(
                 .ok()
                 .or_else(|| display_ids.get(value).copied())
         })
-        .unwrap_or_else(|| node.attribute("id").map_or(-1, stable_id));
+        .unwrap_or_else(|| {
+            // A display without a usable `id` still needs a key that belongs
+            // to it alone: sharing a sentinel let one element overwrite
+            // another's visibility and snapshot page. The generated id is
+            // registered like a named one so it stays unique across the
+            // interface.
+            let mut candidate = display_ids.len() as i32;
+            let key = format!("__auto{name}{candidate}");
+            while display_ids.values().any(|id| *id == candidate) {
+                candidate += 1;
+            }
+            display_ids.insert(key, candidate);
+            candidate
+        });
     let pos = parse_normalized(node.attribute("pos").unwrap_or("0,0"), size);
     let font = node.attribute("font").unwrap_or("main").to_string();
     let font_size = fonts.get(&font).map_or(12, |v| v.1) as f32;
@@ -1873,7 +2187,7 @@ fn parse_display(
             fonts,
             Arc::clone(&display.state),
             kinds,
-            display_ids,
+            &mut *display_ids,
         )?);
     }
     Ok(display)
@@ -1957,8 +2271,10 @@ fn parse_layout(node: Node<'_, '_>, iid: i32, size: (u32, u32)) -> Result<FloLay
 fn seed_browser_data(data: &Path, state: &mut UiSceneState) -> Result<(), String> {
     let mut patches = Vec::new();
     let path = data.join("patches-channels.xml");
-    let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let doc = Document::parse(&text).map_err(|e| e.to_string())?;
+    let text =
+        fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let doc =
+        Document::parse(&text).map_err(|error| format!("{}: {error}", path.display()))?;
     for n in doc.descendants().filter(|n| n.has_tag_name("patch")) {
         if let Some(name) = n.attribute("name") {
             let channel = attr_i32(n, "channel", patches.len() as i32);
@@ -1983,16 +2299,33 @@ fn seed_browser_data(data: &Path, state: &mut UiSceneState) -> Result<(), String
     Ok(())
 }
 
+/// Names already reported as unresolvable, so a per-frame expression does not
+/// flood the diagnostics.
+fn unresolved_expressions() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Evaluate a configuration expression.
+///
+/// The C++ evaluator folds strictly left to right (no operator precedence) and
+/// treats an unknown identifier as zero. An identifier that resolves to
+/// neither a number nor a published value is reported once under
+/// `FWEELIN_DIAGNOSTICS`, so a typo in `var`/`switchvar` is not silently inert.
 fn evaluate(expression: &str, values: &HashMap<String, f32>) -> f32 {
     let mut result = 0.0;
     let mut op = '+';
     for token in expression.split_inclusive(['+', '-', '*', '/']) {
         let trimmed = token.trim_end_matches(['+', '-', '*', '/']);
-        let value = trimmed
-            .parse()
-            .ok()
-            .or_else(|| values.get(trimmed).copied())
-            .unwrap_or(0.0);
+        let parsed = trimmed.parse().ok();
+        let value = match parsed.or_else(|| values.get(trimmed).copied()) {
+            Some(value) => value,
+            None => {
+                report_unresolved_name(trimmed);
+                0.0
+            }
+        };
         result = match op {
             '+' => result + value,
             '-' => result - value,
@@ -2008,6 +2341,19 @@ fn evaluate(expression: &str, values: &HashMap<String, f32>) -> f32 {
     }
     result
 }
+fn report_unresolved_name(name: &str) {
+    if name.is_empty() || std::env::var_os("FWEELIN_DIAGNOSTICS").is_none() {
+        return;
+    }
+    let seen = unresolved_expressions()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(name.to_string());
+    if seen {
+        eprintln!("VIDEO: scene expression references unknown variable '{name}'");
+    }
+}
+
 fn format_value(v: f32) -> String {
     if v.fract().abs() < f32::EPSILON {
         format!("{}", v as i64)
@@ -2018,20 +2364,25 @@ fn format_value(v: f32) -> String {
 fn read_xml(path: &Path) -> Result<String, String> {
     fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
 }
+/// Resolve an XML-supplied asset path inside `data`.
+///
+/// Absolute paths and parent-directory components are rejected: a tampered or
+/// incorrect XML file must not make the loader read files outside the data
+/// directory. The fallback keeps working for legacy entries that name a file
+/// in another directory (`../fonts/x.ttf` resolves to `data/x.ttf`).
 fn resolve_asset(data: &Path, requested: &str) -> PathBuf {
-    let direct = data.join(requested);
-    if direct.exists() {
-        direct
-    } else {
-        data.join(Path::new(requested).file_name().unwrap_or_default())
+    let requested_path = Path::new(requested);
+    let confined = requested_path.is_absolute()
+        || requested_path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir));
+    if !confined {
+        let direct = data.join(requested_path);
+        if direct.exists() {
+            return direct;
+        }
     }
-}
-fn stable_id(value: &str) -> i32 {
-    value.parse().unwrap_or_else(|_| {
-        value.bytes().fold(0x811c9dc5u32, |h, b| {
-            (h ^ b as u32).wrapping_mul(0x01000193)
-        }) as i32
-    })
+    data.join(requested_path.file_name().unwrap_or_default())
 }
 fn attr_i32(n: Node<'_, '_>, k: &str, d: i32) -> i32 {
     n.attribute(k).and_then(|v| v.parse().ok()).unwrap_or(d)
@@ -2208,8 +2559,8 @@ mod tests {
         state.write().unwrap().loop_scopes.insert(
             0,
             LoopScopeState {
-                peaks: vec![0.5; crate::native_dsp_graph::LOOP_SCOPE_COLUMNS],
-                averages: vec![0.25; crate::native_dsp_graph::LOOP_SCOPE_COLUMNS],
+                peaks: vec![0.5; crate::native_dsp_graph::LOOP_SCOPE_COLUMNS].into(),
+                averages: vec![0.25; crate::native_dsp_graph::LOOP_SCOPE_COLUMNS].into(),
                 position_column: 80,
                 chunk_count: crate::native_dsp_graph::LOOP_SCOPE_COLUMNS as u16,
                 current_peak: 0.75,
@@ -2424,8 +2775,8 @@ mod tests {
         state.loop_scopes.insert(
             7,
             LoopScopeState {
-                peaks: vec![0.75],
-                averages: vec![0.25],
+                peaks: vec![0.75].into(),
+                averages: vec![0.25].into(),
                 position_column: 1,
                 chunk_count: 1,
                 current_peak: 0.5,
@@ -2440,13 +2791,30 @@ mod tests {
             expanded: true,
             ..Default::default()
         };
+        // Same extraction the renderer performs while it holds the read lock.
+        let tray = TrayFrame {
+            limiter: state
+                .values
+                .get("SYSTEM_cur_limiter_gain")
+                .copied()
+                .unwrap_or(1.0)
+                .max(0.0),
+            rows: browser
+                .loop_ids
+                .iter()
+                .enumerate()
+                .map(|(index, loop_id)| TrayRow {
+                    name: browser.items.get(index).cloned(),
+                    scope: state.loop_scopes.get(loop_id).cloned(),
+                })
+                .collect(),
+        };
         let metrics = RenderMetrics::new(640, 480, 640, 480);
         let mut renderer = RecordingRenderer::default();
         render_loop_tray(
             &mut renderer,
             &metrics,
-            &state,
-            &browser,
+            &tray,
             (32, 288, 608, 432),
             32,
             10,
@@ -2457,7 +2825,7 @@ mod tests {
         assert!(renderer.0.iter().any(|op| matches!(
             op,
             DrawOp::LoopScope(peaks, averages, 1, 42, 298, 32, ..)
-                if peaks == &vec![0.75] && averages == &vec![0.25]
+                if peaks.as_ref() == [0.75] && averages.as_ref() == [0.25]
         )));
         assert!(
             renderer
@@ -2549,7 +2917,7 @@ mod tests {
             base: FloDisplay::new(0),
             width: 223,
             height: 42,
-            pixels: vec![0; 223 * 42 * 4],
+            pixels: std::sync::Arc::new(vec![0; 223 * 42 * 4]),
             started: Instant::now() - Duration::from_secs(2),
             version_width: 16,
             version_height: 12,

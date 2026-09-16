@@ -1,7 +1,21 @@
 [permissions]
-allow = ["Bash=git -C /Users/jakubkolcar/projects/customs/freewheeling-ng/freewheeling-plus log --oneline -10 2>/dev/null; echo \"---\"; git -C /Users/jakubkolcar/projects/customs/freewheeling-ng/freewheeling-plus status 2>/dev/null | head -30", "Bash=export PATH=\"$PATH:$HOME/Library/Android/sdk/platform-tools\" 2>/dev/null; adb devices 2>/dev/null; adb shell getprop sys.boot_completed 2>/dev/null; echo \"---\"; adb shell pm list packages 2>/dev/null | grep -i freewheel"]
+# Narrow, single-command grants. Chained command lines (`;`, `|`) act as
+# prefix patterns and let an appended command run with the same grant, so each
+# entry below is one command with no shell operators and no stderr suppression
+# (a failure must be visible instead of looking like an empty result).
+allow = [
+    "Bash=git log --oneline -10",
+    "Bash=git status",
+    "Bash=adb devices",
+    "Bash=adb shell getprop sys.boot_completed",
+]
 
+# Destructive operations stay denied even if a broader grant is added later.
+deny = [
+    "Bash=rm -rf",
+    "Bash=git push",
+    "Bash=git reset --hard",
+]
 
 [ui]
 show_reasoning = true
-

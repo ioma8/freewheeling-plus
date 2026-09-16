@@ -45,6 +45,26 @@ fn txt(
     ));
 }
 
+/// Whether a logical point is inside a logical rect (inclusive edges).
+fn within((x1, y1, x2, y2): (i32, i32, i32, i32), (x, y): (i32, i32)) -> bool {
+    x >= x1 && x <= x2 && y >= y1 && y <= y2
+}
+
+/// Truncate `text` with an ellipsis so it fits into `width` logical pixels.
+fn elide_to_width(text: &str, width: i32, scale_x: f32) -> String {
+    // The microui text path uses the "main" font at 14 logical pixels; 0.6 em
+    // per character is the same approximation used for label metrics.
+    let char_width = (14.0 * 0.6 * scale_x.max(0.01)).max(1.0);
+    let max_chars = (width as f32 / char_width).floor().max(0.0) as usize;
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut elided: String = text.chars().take(keep).collect();
+    elided.push_str("...");
+    elided
+}
+
 // ── widgets ───────────────────────────────────────────────────────
 
 /// Screen-filling dark overlay (dims the scene behind).
@@ -52,11 +72,15 @@ fn backdrop(r: &mut dyn Renderer, m: &RenderMetrics) {
     r.draw(DrawOp::Box(0, 0, m.x(m.logical_width), m.y(m.logical_height), BACKDROP));
 }
 
-/// Panel: dark filled rect + 1px border.
+/// Panel: 1px border with the fill inset by one pixel.
+///
+/// `DrawOp::Box` fills its whole rectangle, so drawing the fill and then the
+/// border at the same coordinates would paint the panel flat; the border is
+/// drawn first and the fill is inset.
 fn panel(r: &mut dyn Renderer, m: &RenderMetrics, x: i32, y: i32, w: i32, h: i32) {
     let (x1, y1, x2, y2) = (m.x(x), m.y(y), m.x(x + w), m.y(y + h));
-    r.draw(DrawOp::Box(x1, y1, x2, y2, WIN_BG));
     r.draw(DrawOp::Box(x1, y1, x2, y2, BORDER));
+    r.draw(DrawOp::Box(x1 + 1, y1 + 1, (x2 - 1).max(x1 + 1), (y2 - 1).max(y1 + 1), WIN_BG));
 }
 
 /// Title-bar strip at the top of the panel.
@@ -106,6 +130,7 @@ pub fn settings_overlay(
     stream_path: &str,
     mouse_logical: (i32, i32),
     mouse_down: bool,
+    press_inside: &mut bool,
     prev_mouse_down: &mut bool,
 ) -> bool {
     let (mx, my) = mouse_logical;
@@ -132,15 +157,22 @@ pub fn settings_overlay(
     } else {
         stream_path
     };
-    txt(r, path, m.x(px + 8), m.y(cy + 18), TEXT, -1, -1, m);
+    // Elide to the panel's content width: an unclipped path would spill across
+    // the title bar, the backdrop and past the drawable edges.
+    let path = elide_to_width(path, pw - 16, m.scale_x);
+    txt(r, &path, m.x(px + 8), m.y(cy + 18), TEXT, -1, -1, m);
 
     // Test Beep button
     let btn_x = px + 8;
     let btn_y = cy + 46;
     let btn_w = 120;
     let btn_h = 28;
-    let hover = mx >= btn_x && mx <= btn_x + btn_w && my >= btn_y && my <= btn_y + btn_h;
-    let _ = button(r, m, btn_x, btn_y, btn_w, btn_h, "Test Beep", hover);
+    // One logical rect drives the hover state, the drawn geometry (checked by
+    // the debug assertion below) and the click test, so they cannot drift.
+    let btn_rect = (btn_x, btn_y, btn_x + btn_w, btn_y + btn_h);
+    let hover = within(btn_rect, mouse_logical);
+    let rect = button(r, m, btn_x, btn_y, btn_w, btn_h, "Test Beep", hover);
+    debug_assert_eq!(rect, btn_rect, "button hit-rect must match its geometry");
 
     // Hint
     txt(
@@ -154,9 +186,14 @@ pub fn settings_overlay(
         m,
     );
 
-    // Click detection — only on the release edge (mouse *was* down, now up)
-    let inside = mx >= btn_x && mx <= btn_x + btn_w && my >= btn_y && my <= btn_y + btn_h;
-    let clicked = inside && *prev_mouse_down && !mouse_down;
+    // Click detection — only on the release edge (mouse *was* down, now up),
+    // and only when the press started inside the button: dragging in from
+    // outside must not fire it.
+    let (hx1, hy1, hx2, hy2) = rect;
+    let inside = mx >= hx1 && mx <= hx2 && my >= hy1 && my <= hy2;
+    let pressed_inside = inside && mouse_down;
+    let clicked = inside && *press_inside && *prev_mouse_down && !mouse_down;
+    *press_inside = if mouse_down { pressed_inside } else { false };
     *prev_mouse_down = mouse_down;
     clicked
 }

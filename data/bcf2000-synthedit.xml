@@ -54,9 +54,26 @@
      output1="paramset-set-param" parameters1="interfaceid=VAR_synthedit_interfaceid and displayid=DISPLAY_synthedit and value=param2 and paramidx=param1"
      output2="paramset-get-absolute-param-index" parameters2="interfaceid=VAR_synthedit_interfaceid and displayid=DISPLAY_synthedit and absidx=VAR_bcf2000_se_idx and paramidx=param1"
      output3="split-variable-msb-lsb" parameters3="var=VAR_bcf2000_se_idx and msb=VAR_bcf2000_se_idx_msb and lsb=VAR_bcf2000_se_idx_lsb"
-     output4="midicontroller" parameters4="midichannel=VAR_synthedit_midichannel and controlnum=99 and controlval=VAR_bcf2000_se_idx_msb"
-     output5="midicontroller" parameters5="midichannel=VAR_synthedit_midichannel and controlnum=98 and controlval=VAR_bcf2000_se_idx_lsb"
-     output6="midicontroller" parameters6="midichannel=VAR_synthedit_midichannel and controlnum=6 and controlval=param2"/>
+     output4="midicontroller" parameters4="outport=VAR_bcf2000_outport and midichannel=VAR_synthedit_midichannel and controlnum=99 and controlval=VAR_bcf2000_se_idx_msb"
+     output5="midicontroller" parameters5="outport=VAR_bcf2000_outport and midichannel=VAR_synthedit_midichannel and controlnum=98 and controlval=VAR_bcf2000_se_idx_lsb"
+     output6="midicontroller" parameters6="outport=VAR_bcf2000_outport and midichannel=VAR_synthedit_midichannel and controlnum=6 and controlval=param2/128"
+     output7="midicontroller" parameters7="outport=VAR_bcf2000_outport and midichannel=VAR_synthedit_midichannel and controlnum=38 and controlval=param2-param2/128*128"/>
+
+    <!-- INVARIANT: the eight fader bindings below pair `param1=<n>` with
+         `VAR_bcf2000fadercc+<n>` for n = 0..7, and the refresh outputs in sub
+         1010 enumerate the same eight controllers. Adding, removing or
+         reordering a fader in one of the two places silently maps a physical
+         fader to a different parameter, so keep both lists in step.
+
+         NOTE: the fader inputs carry no `controlval` guard, so anything that
+         reaches this channel on one of those CCs is taken as a fader move. The
+         refresh itself only runs on an explicit bank/page/toggle action (sub
+         1010 has no automatic trigger), so the worst case is one redundant,
+         idempotent parameter write per echoed refresh. Suppressing that echo
+         would need "value differs from the one just sent", which the condition
+         language cannot express (`controlval` compares against a variable, and
+         there is no negation), so do not route this interface's output back to
+         its own input. -->
 
     <!-- (SynthEdit) Prev/Next bank of parameters on screen -->
     <binding input="midicontroller"
@@ -130,10 +147,14 @@
                  controlnum=VAR_bcf2000fadercc+7" 
      output1="go-sub" parameters1="sub=1011 and param1=7 and param2=controlval"/>
     
-    <!-- Toggle synthedit display -->    
+    <!-- Toggle synthedit display. Guarded on the "on" value so the binding is
+         a momentary button by construction rather than by first-match order
+         (it already shows `controlval` as the new visibility, which only makes
+         sense for a press). -->
     <binding input="midicontroller"
      conditions="midichannel=VAR_bcf2000_synthedit_channel and 
-                 controlnum=VAR_bcf2000_se_toggle_midicontrol"        
+                 controlnum=VAR_bcf2000_se_toggle_midicontrol and
+                 controlval=VAR_switch_on"        
      output1="video-show-display" parameters1="interfaceid=VAR_synthedit_interfaceid and 
                                                displayid=DISPLAY_synthedit and
                                                show=controlval"

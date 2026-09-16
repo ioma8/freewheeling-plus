@@ -22,7 +22,26 @@ use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=data/sdl-jni-symbols.txt");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("android") {
+        return;
+    }
+    // The application id is a property of three files at once: the manifest the
+    // APK is built from, the cargo-apk metadata, and the constant the runtime
+    // derives its storage paths from. A build is the only place all three are
+    // visible together, so the mismatch is caught here instead of as a
+    // `/data/data/...` path that does not exist at runtime.
+    println!("cargo:rerun-if-changed=android/AndroidManifest.xml");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-changed=src/native_startup.rs");
+    check_android_package_id();
+    // Only the statically linked SDL needs these: with a dynamic (or absent)
+    // SDL the forced-undefined symbols have no definition and the link fails,
+    // and the flags would otherwise be emitted for every Android build.
+    if env::var_os("CARGO_FEATURE_BUNDLED").is_none() {
+        println!(
+            "cargo:warning=SDL is not statically bundled; skipping the Android JNI export glue"
+        );
         return;
     }
 
@@ -101,30 +120,107 @@ fn main() {
     let mut symbols = Vec::new();
     for (class, functions) in GLUE {
         for function in functions {
-            let symbol = format!("{class}_{function}");
-            // Keep the defining SDL object in the link despite gc-sections.
-            println!("cargo:rustc-link-arg=-Wl,--undefined={symbol}");
-            symbols.push(symbol);
+            symbols.push(format!("{class}_{function}"));
         }
+    }
+
+    // The table mirrors the `SDL_JAVA_*_INTERFACE` macro expansions in the SDL
+    // version that is compiled. Nothing else checks it, so a checked-in list
+    // is compared here: a rename or removal in SDL fails the build instead of
+    // surfacing later as a runtime `UnsatisfiedLinkError`.
+    let expected: Vec<String> = fs::read_to_string("data/sdl-jni-symbols.txt")
+        .expect("read data/sdl-jni-symbols.txt")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        symbols.len(),
+        expected.len(),
+        "SDL Android JNI symbol table drifted: {} entries here vs {} in data/sdl-jni-symbols.txt",
+        symbols.len(),
+        expected.len()
+    );
+    for (symbol, expected) in symbols.iter().zip(&expected) {
+        assert_eq!(
+            symbol, expected,
+            "SDL Android JNI symbol table drifted at {symbol:?} (expected {expected:?})"
+        );
+    }
+
+    for symbol in &symbols {
+        // Keep the defining SDL object in the link despite gc-sections. Scoped
+        // to the cdylib: `rustc-link-arg` would apply to every target of this
+        // package, where the symbol has no definition.
+        println!("cargo:rustc-link-arg-cdylib=-Wl,--undefined={symbol}");
     }
 
     // Export them from the cdylib. A merged version script is the only
     // mechanism that beats rustc's own `local: *` script on ld.lld;
     // `--export-dynamic-symbol` is overridden by the version script.
+    //
+    // The script adds `global:` entries only: rustc's own script already
+    // performs the `local: *` hiding, and a second `local: *` would hide every
+    // symbol rustc exports if the linker merge is not a pure union.
     let mut script = String::from("{\n  global:\n");
     for symbol in &symbols {
         let _ = writeln!(script, "    {symbol};");
     }
-    script.push_str("  local:\n    *;\n};\n");
+    script.push_str("};\n");
     let out: PathBuf = env::var_os("OUT_DIR").expect("OUT_DIR set").into();
     let path = out.join("sdl-jni-exports.map");
     fs::write(&path, script).expect("write sdl-jni-exports.map");
-    println!(
-        "cargo:rustc-link-arg=-Wl,--version-script={}",
-        path.display()
-    );
+    let map_path = path
+        .to_str()
+        .expect("OUT_DIR is valid UTF-8; the linker argument cannot carry a lossy path");
+    println!("cargo:rustc-link-arg-cdylib=-Wl,--version-script={map_path}");
     println!(
         "cargo:warning=keeping {} SDL Android JNI symbols in the cdylib",
         symbols.len()
+    );
+}
+
+/// Assert that the manifest, the cargo-apk metadata and the runtime constant
+/// name the same Android application id.
+fn check_android_package_id() {
+    /// The quoted value that follows `marker` in `text`.
+    fn quoted_after(text: &str, marker: &str, file: &str) -> String {
+        let start = text
+            .find(marker)
+            .unwrap_or_else(|| panic!("{file}: cannot find {marker:?}"));
+        let rest = &text[start + marker.len()..];
+        let open = rest
+            .find('"')
+            .unwrap_or_else(|| panic!("{file}: no quoted value after {marker:?}"));
+        let close = rest[open + 1..]
+            .find('"')
+            .unwrap_or_else(|| panic!("{file}: unterminated value after {marker:?}"));
+        rest[open + 1..open + 1 + close].to_owned()
+    }
+
+    let manifest = fs::read_to_string("android/AndroidManifest.xml").expect("AndroidManifest.xml");
+    let cargo = fs::read_to_string("Cargo.toml").expect("Cargo.toml");
+    let startup = fs::read_to_string("src/native_startup.rs").expect("src/native_startup.rs");
+    let manifest_id = quoted_after(&manifest, "package=", "android/AndroidManifest.xml");
+    // Scoped to the cargo-apk section: `Cargo.toml` also declares the crate
+    // name and other quoted values above it.
+    let metadata_section = cargo
+        .split_once("[package.metadata.android]")
+        .expect("Cargo.toml: [package.metadata.android] section")
+        .1;
+    let metadata_id = quoted_after(metadata_section, "package =", "Cargo.toml");
+    let constant_id = quoted_after(
+        &startup,
+        "ANDROID_PACKAGE_ID: &str =",
+        "src/native_startup.rs",
+    );
+    assert_eq!(
+        metadata_id, constant_id,
+        "Cargo.toml [package.metadata.android].package ({metadata_id}) does not match ANDROID_PACKAGE_ID ({constant_id})"
+    );
+    assert_eq!(
+        manifest_id, constant_id,
+        "android/AndroidManifest.xml package= ({manifest_id}) does not match ANDROID_PACKAGE_ID ({constant_id})"
     );
 }

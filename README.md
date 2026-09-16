@@ -109,8 +109,13 @@ override; that path uses separate capture and playback streams on independent
 clocks and is labeled *split-clock fallback* in diagnostics.
 
 ```sh
-cargo run --release -- --smoke-test
+cargo run --release --features smoke-test -- --smoke-test
 ```
+
+The harness is behind the `smoke-test` feature: a binary built without it
+rejects the flag instead of silently running a no-op startup. A build *with*
+the flag and without the feature keeps the no-op core path out of shipped
+binaries.
 
 ## Startup audio latency calibration
 
@@ -154,4 +159,5 @@ Disk-stream recordings are saved as `stream-<number>.<format>` in
 
 ## License
 
-GPL-2.0 — same as the original FreeWheeling.
+GPL-2.0-or-later, same as the original FreeWheeling (the per-file headers grant
+"either version 2 of the License, or (at your option) any later version").

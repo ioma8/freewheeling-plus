@@ -1,3 +1,14 @@
+FreeWheeling+ is distributed under the GNU General Public License, version 2 or
+(at your option) any later version (SPDX: GPL-2.0-or-later), matching the
+per-file grant in the source headers (e.g. src/datatypes.rs). The license text
+below is the verbatim GNU GPL version 2 as published by the Free Software
+Foundation and must not be modified.
+
+The FSF postal address in that text is the one from the original release; the
+current contact points are
+https://www.gnu.org/licenses/old-licenses/gpl-2.0.html and
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
 		    GNU GENERAL PUBLIC LICENSE
 		       Version 2, June 1991
 

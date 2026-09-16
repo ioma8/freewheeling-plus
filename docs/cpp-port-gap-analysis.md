@@ -830,7 +830,7 @@ pub mod linux_native;   // unchanged, DirectAlsaMixerBackend stays
 | Test | What to verify |
 |------|----------------|
 | `cargo test --features jack` | Unit tests for `JackOptions`, `TransportState`, `Timebase` |
-| Acceptance test with JACK | `cargo run -- --smoke-test` with `FWEELIN_AUDIO_BACKEND=jack` |
+| Acceptance test with JACK | `cargo run --features smoke-test -- --smoke-test` with `FWEELIN_AUDIO_BACKEND=jack` |
 | Audio callback rate | Correct `JackPosition.frame` and `nframes` delivered to DSP |
 | MIDI I/O | Events written to `midi_in` ports appear in `receive_midi()` output |
 | Transport commands | `transport(TransportCommand::Start)` triggers JACK transport |

@@ -1,8 +1,12 @@
 <interface>
-  <!-- Mobile (Android touch) layout set: a 4x3 loop grid in the upper screen,
-       five function buttons beneath it, and a saved-sessions panel.
+  <!-- Mobile (Android touch) layout set: a 4x3 loop grid in the upper screen
+       and five function buttons beneath it.
        The layout is the default on Android (see native_runtime start_session);
-       on desktop it is available as an extra switchable interface.
+       on desktop it is available as an extra switchable interface. The
+       `start-interface` binding below arms the layout (`show=1`), which is what
+       makes it appear when this interface is selected; the renderer draws an
+       interface's layouts only while it is the selected one, so the grid does
+       not leak onto the desktop screen.
 
        Loop grid (layout 0): 12 large square cells, elements 'a'..'l'
        (ids 97..108). Gestures per cell:
@@ -13,8 +17,9 @@
        Cells are square on a phone screen (0.25 of the width wide and 0.1217
        of the height tall); the loop scope is centered at 0.20 of the width.
 
-       Buttons (ids 130..134; the slot system only accepts loop ids below
-       256, so the F-key keycodes 282/285/288 cannot be used as element ids):
+       Buttons (ids 130..134; the runtime's loop address space only covers
+       0..MAX_RUNTIME_LOOPS, so the F-key keycodes 282/285/288 cannot be used
+       as element ids):
          PULSE (130): create/select the pulse. While CLEAR is armed, deletes
            the pulse instead.
          CLEAR (131): latches erase mode (VAR_mobile_clear). While armed,
@@ -22,35 +27,56 @@
            both actions disarm afterwards.
          REC (132): start/stop stream recording to disk.
          SAVE (133): save the current scene.
-         LOAD (134): open the saved-sessions panel (layout 1).
+         LOAD (134): open the saved-sessions list (the scene browser display).
 
-       Sessions panel (layout 1): the five most recent saved scenes (by
-       modification time) plus CLOSE. Tapping a row loads that session.
+       Saved sessions: LOAD opens the scene browser display
+       (DISPLAY_browser_scene from browsers.xml), which lists the saved scenes
+       by modification time; tapping a row loads that session and tapping
+       outside dismisses it. There is no separate layout for it.
 
-       The button/gesture/session bindings live in coreinterface.xml before
-       the generic loop-clicked trigger so they take precedence; the gesture
-       button codes 2/6 are unreachable on desktop. -->
+       The button/gesture bindings live in coreinterface.xml before the
+       generic loop-clicked trigger so they take precedence. Their button
+       codes (2 = SDL middle button, 6) are gated on the selected interface
+       (SYSTEM_cur_switchable_interface), because desktop mouse events use the
+       same numbers. -->
 
   <bindings>
     <declare var="VAR_mobile_clear" type="char" init="0"/>
+
     <!-- Loops are shown from base 0, so a layout element's id IS its loop
          id: cells 97..108 map to loops 97..108 (the same ids the PC keyboard
          interface uses), and the buttons use 130..134. -->
     <declare var="VAR_mobilerange" type="range" init="0>322"/>
+    <!-- This interface's own id, captured from `start-interface` below the way
+         bcf2000.xml does it: coreinterface.xml gates the touch gestures on
+         `SYSTEM_cur_switchable_interface=VAR_mobile_interfaceid`, so nothing
+         depends on this file's position in interfaces.xml. -->
+    <declare var="VAR_mobile_interfaceid" type="int" init="0"/>
 
-    <!-- Startup: show the mobile grid and its loops. -->
+    <!-- Startup: record this interface's id, then arm the mobile grid and its
+         loops. `video-show-layout` only sets the layout's show flag (the
+         renderer still requires this interface to be the selected one), so
+         this does not draw the grid while another interface is active. The id
+         is captured first because chained outputs are re-evaluated in order. -->
     <binding input="start-interface"
-     output1="video-show-loop"
-     parameters1="layoutid=0 and loopid=VAR_mobilerange"
-     output2="video-show-layout"
-     parameters2="interfaceid=5 and layoutid=0 and show=1 and hideothers=0"/>
+     output1="set-variable"
+     parameters1="var=VAR_mobile_interfaceid and value=interfaceid"
+     output2="video-show-loop"
+     parameters2="layoutid=0 and loopid=VAR_mobilerange"
+     output3="video-show-layout"
+     parameters3="interfaceid=VAR_mobile_interfaceid and layoutid=0 and show=1 and hideothers=0"/>
   </bindings>
 
   <graphics>
     <layout id="0" name="Mobile Loops" scale="1.0,1.0" pos="0.00,0.00"
      label="0" elabel="1" show="0" emptyhint="tap a cell to record">
-      <!-- 4 x 3 loop grid. Each cell is 1/4 of the width and 1/4 of the
-           width in height (square on a phone screen): 0.25 x 0.1217. -->
+      <!-- 4 x 3 loop grid, tuned for a 20:9 phone screen (e.g. 1080 x 2400):
+           each cell is 0.25 of the width wide and 0.1217 of the height tall,
+           i.e. 0.25 * W x 0.1217 * H, which is square only while
+           H/W ~= 2.05. On a shorter screen the cells become wider than tall,
+           and the loop scope (0.20 of min(W,H)) grows taller than its row, so
+           rows can overlap: adjust the bases/pitch when targeting a device
+           with a different aspect ratio. -->
       <element id="97" name="A" base="0.0000,0.0400" looppos="0.1250,0.0608" loopsize="0.20" namepos="0.008,0.005">
         <box outline="TBLR" pos="0.00,0.00, 0.25,0.1217"/>
       </element>
@@ -90,7 +116,8 @@
 
       <!-- Function buttons, between the grid and the input/output meters
            (which occupy the bottom 20% on Android). Square in screen pixels:
-           0.16 of the width wide and 0.16 * aspect tall (~173 px). -->
+           0.18 of the width wide and 0.0888 of the height tall, i.e. the same
+           reference aspect as the grid above (square on a 20:9 screen). -->
       <element id="130" name="PULSE" base="0.0100,0.5200" toggle="pulse-active" labelcenter="1" efontsize="8">
         <box outline="TBLR" pos="0.00,0.00, 0.18,0.0888"/>
       </element>

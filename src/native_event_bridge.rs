@@ -45,12 +45,15 @@ pub fn input_event(event: InputEvent) -> Result<Event, CoreEvent> {
             unicode,
             presslen: 0,
         }),
-        // The legacy event API has room for one Unicode scalar only. Keep
-        // this adapter for existing callers; new integration should use
-        // `text_input_events` so no committed text is discarded.
+        // The legacy event API has room for one Unicode scalar only, and
+        // `input_event` is lossy by design: it keeps just the first scalar
+        // (empty text yields a zero keysym, i.e. no character). Use
+        // `input_events`/`text_input_events` so no committed text is
+        // discarded.
         InputEvent::Text(text) => {
-            let keysym = text.chars().next().map_or(0, |ch| ch as i32);
-            let unicode = text.chars().next().map_or(0, |ch| ch as i32);
+            let first = text.chars().next();
+            let keysym = first.map_or(0, |ch| ch as i32);
+            let unicode = keysym;
             Ok(Event::KeyInput {
                 down: true,
                 keysym,
@@ -93,7 +96,12 @@ pub fn midi_event(event: MidiPortMessage) -> Option<Event> {
     // input-port index is not an output route (and C++ treats outport as
     // one-based), so forwarding the zero-based capture port here previously
     // produced an invalid route for the first input device.
-    let outport = 1;
+    //
+    // Public contract: every native MIDI input is echoed to output port 1, and
+    // `MidiPortMessage::port` (the capture device) is deliberately not used as
+    // the route.
+    const DEFAULT_OUTPORT: i32 = 1;
+    let outport = DEFAULT_OUTPORT;
     match event.message {
         MidiMessage::NoteOn {
             channel,
@@ -203,33 +211,54 @@ pub struct NativeEventBridge {
 }
 
 impl NativeEventBridge {
-    pub fn new(manager: Arc<EventManager>, capacity: usize) -> Self {
+    /// Start the bridge worker.
+    ///
+    /// Returns an error when the OS refuses to spawn the worker thread (e.g.
+    /// `EAGAIN` under thread pressure): that is recoverable, so it must not
+    /// abort the process.
+    pub fn new(manager: Arc<EventManager>, capacity: usize) -> std::io::Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(capacity.max(1));
         let dropped = Arc::new(AtomicU64::new(0));
         let running = Arc::new(AtomicBool::new(true));
         let worker_running = Arc::clone(&running);
+        let worker_dropped = Arc::clone(&dropped);
         let worker = thread::Builder::new()
             .name("native-event-bridge".into())
             .spawn(move || {
-                while worker_running.load(Ordering::Acquire) {
+                loop {
                     match receiver.recv_timeout(std::time::Duration::from_millis(20)) {
                         Ok(message) => {
-                            if let Some(event) = midi_event(message) {
-                                let _ = manager.try_post_event(event);
+                            if let Some(event) = midi_event(message)
+                                && manager.try_post_event(event).is_err()
+                            {
+                                // The manager queue is full: count the loss
+                                // here too, so `dropped_events` reports it.
+                                worker_dropped.fetch_add(1, Ordering::Relaxed);
                             }
                         }
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        // Buffered messages are still delivered before
+                        // `Disconnected`, so shutdown drains them.
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            if !worker_running.load(Ordering::Acquire) {
+                                break;
+                            }
+                        }
                     }
                 }
             })
-            .expect("native event bridge thread");
-        Self {
+            .map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("cannot spawn native event bridge thread: {error}"),
+                )
+            })?;
+        Ok(Self {
             sender: Some(sender),
             dropped,
             running,
             worker: Some(worker),
-        }
+        })
     }
 
     pub fn dropped_events(&self) -> u64 {
@@ -237,8 +266,10 @@ impl NativeEventBridge {
     }
 
     pub fn shutdown(&mut self) {
-        self.running.store(false, Ordering::Release);
+        // Disconnect first: the worker drains what is already buffered and
+        // then exits on `Disconnected`. The flag remains as a fallback.
         self.sender.take();
+        self.running.store(false, Ordering::Release);
         if let Some(worker) = self.worker.take() {
             crate::event::join_with_timeout(worker);
         }

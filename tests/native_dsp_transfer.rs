@@ -29,6 +29,9 @@ impl FluidSynthBackend for SilentSynth {
 }
 
 fn process(processor: &mut impl AudioProcessor, frames: usize) -> ([f32; 4], [f32; 4]) {
+    // The buffers are stack-allocated (this helper runs inside a callback
+    // window in one test, where a heap allocation would be counted).
+    assert!(frames <= 4, "process helper only supports up to 4 frames");
     let input = [0.0; 4];
     let mut left = [0.0; 4];
     let mut right = [0.0; 4];

@@ -64,6 +64,10 @@ struct FlacEncoder {
     samples: Vec<i32>,
     frame_number: usize,
     channels: usize,
+    /// Length of the placeholder stream header written by `new`. The frames
+    /// follow it directly, so `finish` may only rewrite a header of exactly
+    /// this size.
+    header_len: usize,
 }
 
 impl FlacEncoder {
@@ -74,10 +78,11 @@ impl FlacEncoder {
             .into_verified()
             .map_err(|(_, error)| ioerr(format!("{error:?}")))?;
         let info =
-            flacenc::component::StreamInfo::new(rate as usize, channels, 24).map_err(ioerr)?;
+            flacenc::component::StreamInfo::new(rate as usize, channels, 24).map_err(|error| ioerr_chain(&error))?;
         let stream = flacenc::component::Stream::with_stream_info(info.clone());
         let mut sink = flacenc::bitsink::ByteSink::new();
-        stream.write(&mut sink).map_err(ioerr)?;
+        stream.write(&mut sink).map_err(|error| ioerr_chain(&error))?;
+        let header_len = sink.as_slice().len();
         out.write_all(sink.as_slice())?;
         Ok(Self {
             out,
@@ -85,10 +90,11 @@ impl FlacEncoder {
             info,
             context: flacenc::source::Context::new(24, channels),
             frame: flacenc::source::FrameBuf::with_size(channels, FLAC_BLOCK_SIZE)
-                .map_err(ioerr)?,
+                .map_err(|error| ioerr_chain(&error))?,
             samples: Vec::with_capacity(FLAC_BLOCK_SIZE * channels),
             frame_number: 0,
             channels,
+            header_len,
         })
     }
 
@@ -111,20 +117,20 @@ impl FlacEncoder {
         if self.samples.is_empty() {
             return Ok(());
         }
-        self.frame.fill_interleaved(&self.samples).map_err(ioerr)?;
+        self.frame.fill_interleaved(&self.samples).map_err(|error| ioerr_chain(&error))?;
         self.context
             .fill_interleaved(&self.samples)
-            .map_err(ioerr)?;
+            .map_err(|error| ioerr_chain(&error))?;
         let encoded = flacenc::encode_fixed_size_frame(
             &self.config,
             &self.frame,
             self.frame_number,
             &self.info,
         )
-        .map_err(ioerr)?;
+        .map_err(|error| ioerr_chain(&error))?;
         self.info.update_frame_info(&encoded);
         let mut sink = flacenc::bitsink::ByteSink::new();
-        encoded.write(&mut sink).map_err(ioerr)?;
+        encoded.write(&mut sink).map_err(|error| ioerr_chain(&error))?;
         self.out.write_all(sink.as_slice())?;
         self.samples.clear();
         self.frame_number += 1;
@@ -137,7 +143,13 @@ impl FlacEncoder {
         self.info.set_md5_digest(&self.context.md5_digest());
         let stream = flacenc::component::Stream::with_stream_info(self.info);
         let mut sink = flacenc::bitsink::ByteSink::new();
-        stream.write(&mut sink).map_err(ioerr)?;
+        stream.write(&mut sink).map_err(|error| ioerr_chain(&error))?;
+        if sink.as_slice().len() != self.header_len {
+            // The frames were appended directly after the placeholder header:
+            // rewriting a header of a different length would overwrite the
+            // first frame or leave a stale tail that reads as frame data.
+            return Err(invalid("FLAC stream header changed size"));
+        }
         self.out.seek(SeekFrom::Start(0))?;
         self.out.write_all(sink.as_slice())?;
         self.out.flush()
@@ -212,17 +224,22 @@ impl IFileEncoder for SndFileEncoder {
                         sample_format: hound::SampleFormat::Float,
                     },
                 )
-                .map_err(ioerr)?,
+                .map_err(|error| ioerr_chain(&error))?,
             ),
             Codec::Vorbis => EncoderOutput::Vorbis(Box::new(
                 vorbis_rs::VorbisEncoderBuilder::new(
-                    NonZeroU32::new(self.sample_rate).unwrap(),
+                    NonZeroU32::new(self.sample_rate).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "invalid sample rate for Vorbis encoder",
+                        )
+                    })?,
                     NonZeroU8::new(if self.stereo { 2 } else { 1 }).unwrap(),
                     out,
                 )
-                .map_err(ioerr)?
+                .map_err(|error| ioerr_chain(&error))?
                 .build()
-                .map_err(ioerr)?,
+                .map_err(|error| ioerr_chain(&error))?,
             )),
             Codec::Flac => EncoderOutput::Flac(Box::new(FlacEncoder::new(
                 out,
@@ -261,9 +278,9 @@ impl IFileEncoder for SndFileEncoder {
         {
             EncoderOutput::Wav(writer) => {
                 for (i, &l) in left[..n].iter().enumerate() {
-                    writer.write_sample(l).map_err(ioerr)?;
+                    writer.write_sample(l).map_err(|error| ioerr_chain(&error))?;
                     if let Some(r) = right {
-                        writer.write_sample(r[i]).map_err(ioerr)?;
+                        writer.write_sample(r[i]).map_err(|error| ioerr_chain(&error))?;
                     }
                 }
             }
@@ -271,9 +288,9 @@ impl IFileEncoder for SndFileEncoder {
                 if let Some(r) = right {
                     encoder
                         .encode_audio_block([&left[..n], &r[..n]])
-                        .map_err(ioerr)?
+                        .map_err(|error| ioerr_chain(&error))?
                 } else {
-                    encoder.encode_audio_block([&left[..n]]).map_err(ioerr)?
+                    encoder.encode_audio_block([&left[..n]]).map_err(|error| ioerr_chain(&error))?
                 }
             }
             EncoderOutput::Flac(encoder) => encoder.push(&left[..n], right.map(|r| &r[..n]))?,
@@ -303,8 +320,8 @@ impl IFileEncoder for SndFileEncoder {
             .take()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "encoder is not open"))?
         {
-            EncoderOutput::Wav(writer) => writer.finalize().map_err(ioerr),
-            EncoderOutput::Vorbis(encoder) => (*encoder).finish().map(|_| ()).map_err(ioerr),
+            EncoderOutput::Wav(writer) => writer.finalize().map_err(|error| ioerr_chain(&error)),
+            EncoderOutput::Vorbis(encoder) => (*encoder).finish().map(|_| ()).map_err(|error| ioerr_chain(&error)),
             EncoderOutput::Flac(encoder) => (*encoder).finish(),
             EncoderOutput::Au { mut out, data_len } => {
                 out.seek(SeekFrom::Start(8))?;
@@ -372,7 +389,7 @@ impl IFileDecoder for SndFileDecoder {
         let mut input: Box<dyn ReadSeek> = Box::new(input);
         self.input = Some(match self.format {
             Codec::Wav => {
-                let reader = hound::WavReader::new(input).map_err(ioerr)?;
+                let reader = hound::WavReader::new(input).map_err(|error| ioerr_chain(&error))?;
                 let spec = reader.spec();
                 if spec.sample_rate != self.sample_rate
                     || !(spec.channels == 1 || spec.channels == 2)
@@ -385,7 +402,7 @@ impl IFileDecoder for SndFileDecoder {
                 DecoderInput::Wav(reader)
             }
             Codec::Vorbis => {
-                let decoder = vorbis_rs::VorbisDecoder::new(input).map_err(ioerr)?;
+                let decoder = vorbis_rs::VorbisDecoder::new(input).map_err(|error| ioerr_chain(&error))?;
                 if decoder.sampling_frequency().get() != self.sample_rate
                     || !(decoder.channels().get() == 1 || decoder.channels().get() == 2)
                 {
@@ -399,7 +416,7 @@ impl IFileDecoder for SndFileDecoder {
                 }
             }
             Codec::Flac => {
-                let reader = claxon::FlacReader::new(input).map_err(ioerr)?;
+                let reader = claxon::FlacReader::new(input).map_err(|error| ioerr_chain(&error))?;
                 let info = reader.streaminfo();
                 if info.sample_rate != self.sample_rate
                     || !(info.channels == 1 || info.channels == 2)
@@ -422,7 +439,7 @@ impl IFileDecoder for SndFileDecoder {
                 input.read_exact(&mut magic)?;
                 input.seek(SeekFrom::Start(0))?;
                 if &magic == b"RIFF" {
-                    let reader = hound::WavReader::new(input).map_err(ioerr)?;
+                    let reader = hound::WavReader::new(input).map_err(|error| ioerr_chain(&error))?;
                     let spec = reader.spec();
                     if spec.sample_rate != self.sample_rate
                         || !(spec.channels == 1 || spec.channels == 2)
@@ -438,11 +455,17 @@ impl IFileDecoder for SndFileDecoder {
                     };
                 }
                 let (offset, size, channels) = read_au_header(&mut input, self.sample_rate)?;
+                // Some `.snd` producers store the size including the header, or
+                // the whole file length. The declared payload is therefore
+                // clamped to what the file actually holds, so header bytes can
+                // never be decoded as audio.
+                let available = input.seek(SeekFrom::End(0))?.saturating_sub(offset);
+                let remaining = (size != u32::MAX).then(|| u64::from(size).min(available));
                 input.seek(SeekFrom::Start(offset))?;
                 self.stereo = channels == 2;
                 DecoderInput::Au {
                     input,
-                    remaining: (size != u32::MAX).then_some(size as u64),
+                    remaining,
                     channels: channels as usize,
                 }
             }
@@ -477,13 +500,13 @@ impl IFileDecoder for SndFileDecoder {
                 let mut samples = reader.samples::<f32>();
                 for _ in 0..capacity {
                     let Some(left) = samples.next() else { break };
-                    self.left.push(left.map_err(ioerr)?);
+                    self.left.push(left.map_err(|error| ioerr_chain(&error))?);
                     if channels == 2 {
                         self.right.push(
                             samples
                                 .next()
                                 .ok_or_else(|| invalid("truncated WAV frame"))?
-                                .map_err(ioerr)?,
+                                .map_err(|error| ioerr_chain(&error))?,
                         );
                     }
                 }
@@ -498,10 +521,15 @@ impl IFileDecoder for SndFileDecoder {
                         let Some(block) = reader
                             .blocks()
                             .read_next_or_eof(Vec::new())
-                            .map_err(ioerr)?
+                            .map_err(|error| ioerr_chain(&error))?
                         else {
                             break;
                         };
+                        if block.channel(0).is_empty() {
+                            // A zero-length block would leave `n == 0` and
+                            // spin this loop forever; read the next one.
+                            continue;
+                        }
                         pending[0].clear();
                         pending[0].extend(
                             block
@@ -535,10 +563,16 @@ impl IFileDecoder for SndFileDecoder {
             } => {
                 while self.left.len() < capacity {
                     if *pos == pending[0].len() {
-                        let Some(block) = decoder.decode_audio_block().map_err(ioerr)? else {
+                        let Some(block) = decoder.decode_audio_block().map_err(|error| ioerr_chain(&error))? else {
                             break;
                         };
                         let samples = block.samples();
+                        if samples[0].is_empty() {
+                            // Progress guard: an empty block would make the
+                            // drain loop below copy nothing and re-decode the
+                            // same position forever.
+                            continue;
+                        }
                         pending[0].clear();
                         pending[0].extend_from_slice(samples[0]);
                         pending[1].clear();
@@ -569,15 +603,25 @@ impl IFileDecoder for SndFileDecoder {
                         }
                         break;
                     }
-                    match input.read_exact(&mut frame[..frame_bytes]) {
-                        Ok(()) => {}
-                        Err(error)
-                            if error.kind() == io::ErrorKind::UnexpectedEof
-                                && remaining.is_none() =>
-                        {
-                            break;
+                    // `read_exact` cannot tell a clean end of stream from a
+                    // truncated final frame, so the frame is filled
+                    // explicitly: a partial frame is corruption, not EOF.
+                    let mut filled = 0;
+                    while filled < frame_bytes {
+                        match input.read(&mut frame[filled..frame_bytes]) {
+                            Ok(0) => break,
+                            Ok(read) => filled += read,
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                                continue;
+                            }
+                            Err(error) => return Err(error),
                         }
-                        Err(error) => return Err(error),
+                    }
+                    if filled == 0 {
+                        break;
+                    }
+                    if filled < frame_bytes {
+                        return Err(invalid("truncated AU frame"));
                     }
                     self.left.push(
                         i32::from_be_bytes(frame[..4].try_into().unwrap()) as f32 / 2_147_483_648.0,
@@ -617,7 +661,24 @@ impl IFileDecoder for SndFileDecoder {
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
+/// Report a third-party error as malformed data.
 fn ioerr<E: std::fmt::Display>(error: E) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+}
+
+/// Report a third-party error, keeping the I/O kind it wraps.
+///
+/// `hound`, `vorbis_rs` and `claxon` surface an `io::Error` for disk and
+/// truncation failures; collapsing those into `InvalidData` would hide e.g. a
+/// full disk behind "malformed data".
+fn ioerr_chain(error: &(dyn std::error::Error + 'static)) -> io::Error {
+    let mut source = Some(error);
+    while let Some(current) = source {
+        if let Some(io_error) = current.downcast_ref::<io::Error>() {
+            return io::Error::new(io_error.kind(), error.to_string());
+        }
+        source = current.source();
+    }
     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
 }
 fn float_to_i24(sample: f32) -> i32 {
@@ -644,15 +705,16 @@ fn read_au_header(input: &mut dyn Read, rate: u32) -> io::Result<(u64, u32, u32)
     }
     let word = |at| u32::from_be_bytes(header[at..at + 4].try_into().unwrap());
     let offset = word(4);
-    let size = word(8);
     let encoding = word(12);
     let sample_rate = word(16);
     let channels = word(20);
+    // `0xFFFFFFFF` and `0` both mean "size unknown" in the wild.
+    let declared = word(8);
+    let size = if declared == 0 { u32::MAX } else { declared };
     if offset < 24
         || encoding != 5
         || sample_rate != rate
         || !(channels == 1 || channels == 2)
-        || (size != u32::MAX && size % (channels * 4) != 0)
     {
         return Err(invalid("unsupported AU format"));
     }

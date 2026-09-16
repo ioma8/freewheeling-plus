@@ -15,4 +15,31 @@
 *.ogg binary
 *.wav binary
 *.au binary
-fixtures/** binary
+# Additional binary formats used by the project (git's content heuristic would
+# otherwise decide, which makes -diff/-merge behaviour unpredictable).
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.mp3 binary
+*.mp4 binary
+*.woff binary
+*.woff2 binary
+*.midi binary
+*.sf3 binary
+*.sfz binary
+
+# The fixtures tree also holds *text* fixtures (MANIFEST.sha256, *.log, *.tsv,
+# *.xml, *.meta, *.json, *.md). Those must stay LF-normalized: a CRLF copy on
+# one platform would change every recorded digest, which is exactly what the
+# rules above exist to prevent.
+fixtures/**/*.sha256 text eol=lf
+fixtures/**/*.md text eol=lf
+fixtures/**/*.tsv text eol=lf
+fixtures/**/*.log text eol=lf
+fixtures/**/*.xml text eol=lf
+fixtures/**/*.meta text eol=lf
+fixtures/**/*.json text eol=lf
+fixtures/**/*.txt text eol=lf
+fixtures/**/*.csv text eol=lf

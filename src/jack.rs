@@ -1,4 +1,4 @@
-//! JACK audio/MIDI/transport backend for Linux and macOS.
+//! JACK audio/MIDI/transport backend for Linux, macOS and Windows.
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use crate::audioio::{
@@ -12,7 +12,7 @@ use crate::realtime_guard::RealtimeMetrics;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use jack::{
     AsyncClient, AudioIn, AudioOut, Client, ClientOptions, Control, MidiIn, MidiOut,
-    NotificationHandler, Port, ProcessHandler, ProcessScope, RawMidi,
+    NotificationHandler, Port, PortFlags, ProcessHandler, ProcessScope, RawMidi,
     TransportState as JackTransportState,
 };
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -26,14 +26,21 @@ use std::time::Instant;
 
 /// Configuration options for opening a JACK client.
 ///
-/// This struct is platform-agnostic and can be constructed on any target.
+/// This struct is platform-agnostic and can be constructed on any target; the
+/// backend that consumes it is only built on Linux, macOS and Windows.
+///
+/// JACK schedules the process thread of an active client itself, and the
+/// `jack` crate exposes no client option for it, so this struct deliberately
+/// has no realtime flag: schedule the server instead.
 pub struct JackOptions {
     pub midi_inputs: usize,
     pub midi_outputs: usize,
+    /// Client name. When empty, the name passed to `AudioBackend::open` wins.
     pub client_name: String,
+    /// Connect the audio ports to the physical capture/playback ports.
     pub connect_audio: bool,
+    /// Connect the MIDI ports to the physical MIDI ports.
     pub connect_midi: bool,
-    pub realtime: bool,
 }
 
 impl Default for JackOptions {
@@ -44,7 +51,6 @@ impl Default for JackOptions {
             client_name: "FreeWheeling".into(),
             connect_audio: true,
             connect_midi: true,
-            realtime: true,
         }
     }
 }
@@ -56,6 +62,30 @@ const MIDI_INLINE_BYTES: usize = 256;
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 const DEFAULT_QUEUE_CAPACITY: usize = 1_024;
+
+/// JACK port type of the audio ports (`jack::PortSpec` for `AudioIn`/`AudioOut`).
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+const AUDIO_PORT_TYPE: &str = jack::jack_sys::FLOAT_MONO_AUDIO;
+
+/// JACK port type of the MIDI ports (`jack::PortSpec` for `MidiIn`/`MidiOut`).
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+const MIDI_PORT_TYPE: &str = jack::jack_sys::RAW_MIDI_TYPE;
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+const AUDIO_INPUT_PORTS: [&str; NUM_CHANNELS] = ["audio_in_l", "audio_in_r"];
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+const AUDIO_OUTPUT_PORTS: [&str; NUM_CHANNELS] = ["audio_out_l", "audio_out_r"];
+
+/// Name of the `index`-th registered MIDI port in the given direction.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn midi_port_name(input: bool, index: usize) -> String {
+    if input {
+        format!("midi_in_{index}")
+    } else {
+        format!("midi_out_{index}")
+    }
+}
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,6 +140,11 @@ impl Timebase {
             return Err("sample_rate must be non-zero".into());
         }
         let frames_per_beat = (60.0 / self.beats_per_minute * sample_rate as f64) as u64;
+        // A tempo high enough to truncate to zero frames per beat would make
+        // every derived value (ticks, bar, beat) meaningless.
+        if frames_per_beat == 0 {
+            return Err("beats_per_minute is too high for the given sample rate".into());
+        }
         let ticks_per_frame = self.ticks_per_beat as f64 / frames_per_beat as f64;
         let total_ticks = (frame as f64 * ticks_per_frame) as i32;
         let frames_per_bar = (frames_per_beat as f64 * self.beats_per_bar as f64) as u64;
@@ -150,15 +185,35 @@ struct InlineMidi {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+/// Why an inline MIDI message could not be built.
+///
+/// Deliberately a `Copy` enum rather than a `String`: `InlineMidi::new` runs on
+/// the realtime JACK process thread, where formatting would allocate.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InlineMidiError {
+    PortOutOfRange,
+    LengthOutOfRange,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+impl InlineMidiError {
+    fn message(self) -> &'static str {
+        match self {
+            Self::PortOutOfRange => "JACK MIDI port index is out of range",
+            Self::LengthOutOfRange => "JACK MIDI message length is out of range",
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl InlineMidi {
-    fn new(port: usize, frame_offset: u32, bytes: &[u8]) -> Result<Self, String> {
+    fn new(port: usize, frame_offset: u32, bytes: &[u8]) -> Result<Self, InlineMidiError> {
         if port > usize::from(u16::MAX) {
-            return Err("JACK MIDI port index is out of range".into());
+            return Err(InlineMidiError::PortOutOfRange);
         }
         if bytes.is_empty() || bytes.len() > MIDI_INLINE_BYTES {
-            return Err(format!(
-                "JACK MIDI message must contain 1..={MIDI_INLINE_BYTES} bytes"
-            ));
+            return Err(InlineMidiError::LengthOutOfRange);
         }
         let mut inline = Self {
             port: port as u16,
@@ -273,10 +328,17 @@ impl ProcessHandler for JackProcess {
 
         for (port_index, port) in self.midi_in.iter().enumerate() {
             for event in port.iter(ps) {
-                if let Ok(message) = InlineMidi::new(port_index, event.time, event.bytes)
-                    && self.midi_rx.push(message).is_err()
-                {
-                    self.shared.midi_input_drops.fetch_add(1, Ordering::Relaxed);
+                // A message that cannot be queued (malformed length or a full
+                // queue) is counted as an input drop so the loss is visible.
+                match InlineMidi::new(port_index, event.time, event.bytes) {
+                    Ok(message) => {
+                        if self.midi_rx.push(message).is_err() {
+                            self.shared.midi_input_drops.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    Err(_) => {
+                        self.shared.midi_input_drops.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }
@@ -351,8 +413,7 @@ pub struct JackAudioMidiBackend {
     midi_output: Option<Producer<InlineMidi>>,
     transport_output: Option<Producer<TransportCommand>>,
     pending: Option<PendingQueues>,
-    midi_inputs: usize,
-    midi_outputs: usize,
+    options: JackOptions,
     shared: Arc<Shared>,
     realtime_metrics: Option<Arc<RealtimeMetrics>>,
 }
@@ -360,6 +421,15 @@ pub struct JackAudioMidiBackend {
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl JackAudioMidiBackend {
     pub fn new(midi_inputs: usize, midi_outputs: usize) -> Self {
+        Self::from_options(JackOptions {
+            midi_inputs,
+            midi_outputs,
+            ..JackOptions::default()
+        })
+    }
+
+    /// Create a JACK backend from a `JackOptions` config struct.
+    pub fn from_options(options: JackOptions) -> Self {
         Self {
             client: None,
             active: None,
@@ -368,16 +438,49 @@ impl JackAudioMidiBackend {
             midi_output: None,
             transport_output: None,
             pending: None,
-            midi_inputs,
-            midi_outputs,
+            options,
             shared: Arc::new(Shared::default()),
             realtime_metrics: None,
         }
     }
 
-    /// Create a JACK backend from a `JackOptions` config struct.
-    pub fn from_options(opts: JackOptions) -> Self {
-        Self::new(opts.midi_inputs, opts.midi_outputs)
+    /// Connect the registered ports to the physical ports named by the
+    /// options. Returns the failures; a host without a physical capture port
+    /// must still be able to run, so this is never fatal.
+    fn connect_physical_ports(&self, client: &Client) -> Vec<String> {
+        let mut failures = Vec::new();
+        let local = |name: &str| format!("{}:{name}", client.name());
+        let mut connect = |source: &str, destination: &str| {
+            if let Err(error) = client.connect_ports_by_name(source, destination) {
+                failures.push(format!("{source} -> {destination}: {error}"));
+            }
+        };
+        if self.options.connect_audio {
+            // Physical outputs are the hardware capture ports.
+            let capture = client.ports(None, Some(AUDIO_PORT_TYPE), PortFlags::IS_OUTPUT);
+            for (index, source) in capture.iter().enumerate().take(NUM_CHANNELS) {
+                let destination = local(AUDIO_INPUT_PORTS[index]);
+                connect(source, &destination);
+            }
+            let playback = client.ports(None, Some(AUDIO_PORT_TYPE), PortFlags::IS_INPUT);
+            for (index, destination) in playback.iter().enumerate().take(NUM_CHANNELS) {
+                let source = local(AUDIO_OUTPUT_PORTS[index]);
+                connect(&source, destination);
+            }
+        }
+        if self.options.connect_midi {
+            let capture = client.ports(None, Some(MIDI_PORT_TYPE), PortFlags::IS_OUTPUT);
+            for (index, source) in capture.iter().enumerate().take(self.options.midi_inputs) {
+                let destination = local(&midi_port_name(true, index));
+                connect(source, &destination);
+            }
+            let playback = client.ports(None, Some(MIDI_PORT_TYPE), PortFlags::IS_INPUT);
+            for (index, destination) in playback.iter().enumerate().take(self.options.midi_outputs) {
+                let source = local(&midi_port_name(false, index));
+                connect(&source, destination);
+            }
+        }
+        failures
     }
 
     /// Attach acceptance instrumentation before activating the client.
@@ -405,15 +508,21 @@ impl Default for JackAudioMidiBackend {
 impl AudioBackend for JackAudioMidiBackend {
     fn open(&mut self, client_name: &str) -> Result<BackendInfo, String> {
         self.close();
+        // A configured name is authoritative; the trait's name is the fallback
+        // for backends built with `new`.
+        let client_name = match self.options.client_name.as_str() {
+            "" => client_name,
+            configured => configured,
+        };
         let (client, _) = Client::new(client_name, ClientOptions::NO_START_SERVER)
             .map_err(|error| format!("cannot open JACK client: {error}"))?;
         let audio_in = [
-            client.register_port("audio_in_l", AudioIn::default()),
-            client.register_port("audio_in_r", AudioIn::default()),
+            client.register_port(AUDIO_INPUT_PORTS[0], AudioIn::default()),
+            client.register_port(AUDIO_INPUT_PORTS[1], AudioIn::default()),
         ];
         let audio_out = [
-            client.register_port("audio_out_l", AudioOut::default()),
-            client.register_port("audio_out_r", AudioOut::default()),
+            client.register_port(AUDIO_OUTPUT_PORTS[0], AudioOut::default()),
+            client.register_port(AUDIO_OUTPUT_PORTS[1], AudioOut::default()),
         ];
         let audio_in = audio_in
             .map(|port| port.map_err(|e| format!("cannot register JACK audio input: {e}")))
@@ -427,17 +536,17 @@ impl AudioBackend for JackAudioMidiBackend {
             .collect::<Result<Vec<_>, _>>()?
             .try_into()
             .map_err(|_| "invalid JACK output port count")?;
-        let midi_in = (0..self.midi_inputs)
+        let midi_in = (0..self.options.midi_inputs)
             .map(|i| {
                 client
-                    .register_port(&format!("midi_in_{i}"), MidiIn::default())
+                    .register_port(&midi_port_name(true, i), MidiIn::default())
                     .map_err(|e| format!("cannot register JACK MIDI input: {e}"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let midi_out = (0..self.midi_outputs)
+        let midi_out = (0..self.options.midi_outputs)
             .map(|i| {
                 client
-                    .register_port(&format!("midi_out_{i}"), MidiOut::default())
+                    .register_port(&midi_port_name(false, i), MidiOut::default())
                     .map_err(|e| format!("cannot register JACK MIDI output: {e}"))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -448,16 +557,22 @@ impl AudioBackend for JackAudioMidiBackend {
         self.midi_output = Some(midi_tx_producer);
         self.transport_output = Some(transport_producer);
         self.ports = Some((audio_in, audio_out, midi_in, midi_out));
-        self.client = Some(client);
         // Producers/consumers crossing into the callback are installed at activation.
         self.pending = Some((midi_rx_producer, midi_tx_consumer, transport_consumer));
-        Ok(BackendInfo {
-            sample_rate: self.client.as_ref().unwrap().sample_rate(),
-            buffer_size: self.client.as_ref().unwrap().buffer_size(),
-        })
+        let info = BackendInfo {
+            sample_rate: client.sample_rate(),
+            buffer_size: client.buffer_size(),
+        };
+        self.client = Some(client);
+        Ok(info)
     }
 
     fn activate(&mut self, callback: AudioCallbackFn) -> Result<(), String> {
+        // Validate before taking ownership, so a failure cannot leave the
+        // backend half-open with queues nobody drains.
+        if self.client.is_none() || self.ports.is_none() || self.pending.is_none() {
+            return Err("JACK backend must be opened before activation".into());
+        }
         let client = self
             .client
             .take()
@@ -478,17 +593,27 @@ impl AudioBackend for JackAudioMidiBackend {
             shared: Arc::clone(&self.shared),
             realtime_metrics: self.realtime_metrics.clone(),
         };
-        self.active = Some(
-            client
-                .activate_async(
-                    Notifications {
-                        shared: Arc::clone(&self.shared),
-                        realtime_metrics: self.realtime_metrics.clone(),
-                    },
-                    process,
-                )
-                .map_err(|e| format!("cannot activate JACK client: {e}"))?,
-        );
+        let active = match client.activate_async(
+            Notifications {
+                shared: Arc::clone(&self.shared),
+                realtime_metrics: self.realtime_metrics.clone(),
+            },
+            process,
+        ) {
+            Ok(active) => active,
+            Err(error) => {
+                // The client and the callback-side queue endpoints are gone;
+                // drop the app-side halves too so callers cannot keep pushing
+                // into queues that nobody drains.
+                self.close();
+                return Err(format!("cannot activate JACK client: {error}"));
+            }
+        };
+        // Ports can only be connected once the client is active.
+        for failure in self.connect_physical_ports(active.as_client()) {
+            eprintln!("FreeWheeling: JACK port connection failed: {failure}");
+        }
+        self.active = Some(active);
         Ok(())
     }
 
@@ -505,7 +630,11 @@ impl AudioBackend for JackAudioMidiBackend {
     }
 
     fn relocate(&mut self, frame: NFrames) {
-        let _ = self.transport_push(TransportCommand::Relocate(frame));
+        // A relocation that cannot be queued (backend closed or queue full) is
+        // recorded so the loss is observable instead of silent.
+        if self.transport_push(TransportCommand::Relocate(frame)).is_err() {
+            self.shared.stream_errors.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn metrics(&self) -> AudioMetrics {
@@ -531,12 +660,24 @@ impl AudioBackend for JackAudioMidiBackend {
         }
     }
 
+    /// JACK is the one backend that can be driven by an external transport.
+    fn supports_transport(&self) -> bool {
+        true
+    }
+
     fn receive_midi(&mut self) -> Option<MidiPortMessage> {
-        let event = self.midi_input.as_mut()?.pop().ok()?;
-        decode(event.bytes()).map(|message| MidiPortMessage {
-            port: usize::from(event.port),
-            message,
-        })
+        loop {
+            let event = self.midi_input.as_mut()?.pop().ok()?;
+            if let Some(message) = decode(event.bytes()) {
+                return Some(MidiPortMessage {
+                    port: usize::from(event.port),
+                    message,
+                });
+            }
+            // Undecodable message: count it and keep draining instead of
+            // reporting an empty queue.
+            self.shared.midi_input_drops.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn send_midi(
@@ -545,11 +686,57 @@ impl AudioBackend for JackAudioMidiBackend {
         frame_offset: NFrames,
     ) -> Result<(), String> {
         let bytes = encode(&event.message);
-        let event = InlineMidi::new(event.port, frame_offset, &bytes)?;
+        let event =
+            InlineMidi::new(event.port, frame_offset, &bytes).map_err(|error| error.message())?;
         self.midi_output
             .as_mut()
             .ok_or("JACK backend is not open")?
             .push(event)
             .map_err(|_| "JACK MIDI output queue is full".to_string())
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timebase_position_derives_bar_beat_and_tick() {
+        let timebase = Timebase {
+            ticks_per_beat: 1920,
+            ..Timebase::default()
+        };
+        // 120 bpm at 48 kHz is one beat every 24_000 frames, so one second in
+        // is the third beat of the first bar.
+        let position = timebase.position(48_000, 48_000).unwrap();
+        assert_eq!((position.bar, position.beat, position.tick), (1, 3, 0));
+        assert_eq!(position.frame_rate, 48_000);
+    }
+
+    #[test]
+    fn timebase_rejects_a_tempo_without_frames_per_beat() {
+        let timebase = Timebase {
+            beats_per_minute: 1e7,
+            ..Timebase::default()
+        };
+        let error = timebase.position(0, 48_000).unwrap_err();
+        assert!(error.contains("beats_per_minute"), "{error}");
+    }
+
+    #[test]
+    fn inline_midi_rejects_bad_lengths_without_formatting() {
+        assert_eq!(
+            InlineMidi::new(0, 0, &[]),
+            Err(InlineMidiError::LengthOutOfRange)
+        );
+        assert_eq!(
+            InlineMidi::new(0, 0, &[0u8; MIDI_INLINE_BYTES + 1]),
+            Err(InlineMidiError::LengthOutOfRange)
+        );
+        assert_eq!(
+            InlineMidi::new(usize::from(u16::MAX) + 1, 0, &[0x90, 60, 64]),
+            Err(InlineMidiError::PortOutOfRange)
+        );
+        assert!(InlineMidi::new(0, 0, &[0x90, 60, 64]).is_ok());
     }
 }

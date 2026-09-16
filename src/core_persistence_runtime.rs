@@ -9,7 +9,6 @@ use crate::core_persistence::{
     saveable_stub, scene_xml, split_filename,
 };
 use crate::core_persistence_parse::{SceneLoad, parse_loop_metadata_xml, parse_scene_xml};
-use std::collections::VecDeque;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -52,7 +51,13 @@ impl PersistenceFileSystem for OsPersistenceFileSystem {
             .collect()
     }
     fn exists(&self, p: &Path) -> io::Result<bool> {
-        Ok(p.exists())
+        // `Path::exists` reports `false` for every failure, which would make a
+        // permission or I/O error look like a missing file.
+        match fs::metadata(p) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
     }
     fn read(&self, p: &Path) -> io::Result<Vec<u8>> {
         fs::read(p)
@@ -95,22 +100,15 @@ pub struct LoadRequest {
 pub struct PersistenceRuntime<F, E> {
     pub filesystem: F,
     pub events: E,
-    saves: VecDeque<i32>,
-    loads: VecDeque<LoadRequest>,
 }
 
 impl<F: PersistenceFileSystem, E: PersistenceEvents> PersistenceRuntime<F, E> {
     pub fn new(filesystem: F, events: E) -> Self {
-        Self {
-            filesystem,
-            events,
-            saves: VecDeque::new(),
-            loads: VecDeque::new(),
-        }
+        Self { filesystem, events }
     }
 
+    /// Hand a save request to the event sink.
     pub fn queue_save(&mut self, index: i32) {
-        self.saves.push_back(index);
         self.events.queue_save(index);
     }
     pub fn queue_load(&mut self, filename: impl Into<String>, index: i32, volume: f32) {
@@ -119,7 +117,6 @@ impl<F: PersistenceFileSystem, E: PersistenceEvents> PersistenceRuntime<F, E> {
             index,
             volume,
         };
-        self.loads.push_back(request.clone());
         self.events.queue_load(request.filename, index, volume);
     }
 
@@ -130,11 +127,12 @@ impl<F: PersistenceFileSystem, E: PersistenceEvents> PersistenceRuntime<F, E> {
         prefix: &str,
         extension: &str,
     ) -> Result<(), String> {
-        browser.clear();
+        // Read first: a failed scan must not leave the caller's browser empty.
         let mut entries = self
             .filesystem
             .entries(directory)
             .map_err(|e| e.to_string())?;
+        browser.clear();
         entries.retain(|entry| {
             entry.is_file
                 && entry
@@ -158,6 +156,22 @@ impl<F: PersistenceFileSystem, E: PersistenceEvents> PersistenceRuntime<F, E> {
         Ok(())
     }
 
+    /// Remove every path a failed save may have created.
+    ///
+    /// Returns one message per removal that failed for a reason other than the
+    /// file already being absent.
+    fn rollback_files(&self, paths: &[&Path]) -> Vec<String> {
+        let mut failures = Vec::new();
+        for path in paths {
+            if let Err(error) = self.filesystem.remove(path)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                failures.push(format!("{}: {error}", path.display()));
+            }
+        }
+        failures
+    }
+
     pub fn save_loop<S: LoopSource>(
         &self,
         source: &mut S,
@@ -175,24 +189,46 @@ impl<F: PersistenceFileSystem, E: PersistenceEvents> PersistenceRuntime<F, E> {
         if self.filesystem.exists(&audio).map_err(|e| e.to_string())? {
             return Err("MD5 collision while saving loop- file exists!".into());
         }
-        self.filesystem
-            .write_new(&audio, source.audio_bytes())
-            .map_err(|e| format!("Couldn't open file: {e}"))?;
-        self.filesystem
-            .write_new(
-                &data,
-                loop_metadata_xml(source.nbeats(), source.pulse_length()).as_bytes(),
-            )
-            .map_err(|error| {
-                let rollback = self.filesystem.remove(&audio);
-                match rollback {
-                    Ok(()) => error.to_string(),
-                    Err(rollback) => format!(
-                        "{error}; additionally could not roll back '{}': {rollback}",
-                        audio.display()
-                    ),
-                }
-            })?;
+        if let Err(error) = self.filesystem.write_new(&audio, source.audio_bytes()) {
+            // A failed `write_all` leaves a truncated file behind; an
+            // already-existing file belongs to someone else and stays.
+            let mut failures = Vec::new();
+            if error.kind() != io::ErrorKind::AlreadyExists {
+                failures = self.rollback_files(&[audio.as_path()]);
+            }
+            let suffix = if failures.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; additionally could not roll back: {}",
+                    failures.join(", ")
+                )
+            };
+            return Err(format!(
+                "couldn't create loop audio '{}': {error}{suffix}",
+                audio.display()
+            ));
+        }
+        if let Err(error) = self.filesystem.write_new(
+            &data,
+            loop_metadata_xml(source.nbeats(), source.pulse_length()).as_bytes(),
+        ) {
+            // Both the audio and the partially written metadata are removed so
+            // the next attempt does not hit a leftover file.
+            let failures = self.rollback_files(&[data.as_path(), audio.as_path()]);
+            let suffix = if failures.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; additionally could not roll back: {}",
+                    failures.join(", ")
+                )
+            };
+            return Err(format!(
+                "couldn't create loop metadata '{}': {error}{suffix}",
+                data.display()
+            ));
+        }
         source.set_save_hash(hash);
         Ok((audio, data))
     }
@@ -212,16 +248,20 @@ impl<F: PersistenceFileSystem, E: PersistenceEvents> PersistenceRuntime<F, E> {
             .ok_or_else(|| format!("filename is not UTF-8: {}", stub.display()))?;
         let (base, hash, _) = split_filename(stub_text, base_len)?;
         let renamed = PathBuf::from(saveable_stub(&base, &hash, new_name, None));
-        let pairs: Vec<_> = extensions
-            .iter()
-            .map(|extension| {
-                (
-                    PathBuf::from(format!("{}{extension}", stub.display())),
-                    PathBuf::from(format!("{}{extension}", renamed.display())),
-                )
-            })
-            .filter(|(from, _)| self.filesystem.exists(from).unwrap_or(false))
-            .collect();
+        let mut pairs = Vec::new();
+        for extension in extensions {
+            let from = PathBuf::from(format!("{}{extension}", stub.display()));
+            let to = PathBuf::from(format!("{}{extension}", renamed.display()));
+            // A failed lookup (permission, I/O) is reported: treating it as
+            // "missing" would silently skip a companion file.
+            if self
+                .filesystem
+                .exists(&from)
+                .map_err(|error| error.to_string())?
+            {
+                pairs.push((from, to));
+            }
+        }
         if pairs.is_empty() {
             return Err(format!("no persisted files found for '{}'", stub.display()));
         }
@@ -235,6 +275,20 @@ impl<F: PersistenceFileSystem, E: PersistenceEvents> PersistenceRuntime<F, E> {
         }
         let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
         for (from, to) in &pairs {
+            // `rename` replaces an existing destination on Unix, so the
+            // destination is re-checked immediately before each move. A window
+            // remains in which another process can create the file, which is
+            // why the check above runs before anything is moved.
+            if self
+                .filesystem
+                .exists(to)
+                .map_err(|error| error.to_string())?
+            {
+                return Err(format!(
+                    "rename destination already exists: {}",
+                    to.display()
+                ));
+            }
             if let Err(error) = self.filesystem.rename(from, to) {
                 let mut rollback_errors = Vec::new();
                 for (old, new) in moved.iter().rev() {
@@ -288,7 +342,7 @@ impl<F: PersistenceFileSystem, E: PersistenceEvents> PersistenceRuntime<F, E> {
             default_loop_id,
         )?;
         if let Some(library) = library {
-            for item in &scene.loops {
+            for item in scene.loops() {
                 let filename = library
                     .join(saveable_stub("loop", &item.hash, None, None))
                     .to_string_lossy()
@@ -335,6 +389,21 @@ impl<E: PersistenceEvents> PersistenceRuntime<OsPersistenceFileSystem, E> {
             source.object_name(),
             Some(".xml"),
         ));
+        // Same MD5-collision guard as `save_loop`: without it the encoder
+        // would overwrite another loop's audio before the metadata write
+        // rejects the duplicate.
+        for existing in [&audio, &data] {
+            if self
+                .filesystem
+                .exists(existing)
+                .map_err(|error| error.to_string())?
+            {
+                return Err(format!(
+                    "MD5 collision while saving loop: '{}' already exists",
+                    existing.display()
+                ));
+            }
+        }
         crate::file_codecs::encode_audio_file(
             &audio,
             source.sample_rate(),
@@ -347,9 +416,19 @@ impl<E: PersistenceEvents> PersistenceRuntime<OsPersistenceFileSystem, E> {
             &data,
             loop_metadata_xml(source.nbeats(), source.pulse_length()).as_bytes(),
         ) {
-            let _ = self.filesystem.remove(&audio);
+            // The encoder already wrote the audio; both files are removed and
+            // a failed rollback is reported instead of swallowed.
+            let failures = self.rollback_files(&[data.as_path(), audio.as_path()]);
+            let suffix = if failures.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; additionally could not roll back: {}",
+                    failures.join(", ")
+                )
+            };
             return Err(format!(
-                "could not save loop metadata '{}': {error}",
+                "could not save loop metadata '{}': {error}{suffix}",
                 data.display()
             ));
         }
@@ -439,6 +518,146 @@ mod tests {
             12
         }
     }
+    /// Memory filesystem that fails the operations named in `failing`.
+    struct FailingMem {
+        files: std::cell::RefCell<std::collections::HashMap<PathBuf, Vec<u8>>>,
+        failing: std::collections::HashSet<std::io::ErrorKind>,
+        written: std::cell::RefCell<Vec<PathBuf>>,
+    }
+    impl PersistenceFileSystem for FailingMem {
+        fn entries(&self, _: &Path) -> io::Result<Vec<PersistenceFile>> {
+            if self.failing.contains(&io::ErrorKind::PermissionDenied) {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            Ok(Vec::new())
+        }
+        fn exists(&self, p: &Path) -> io::Result<bool> {
+            if self.failing.contains(&io::ErrorKind::InvalidInput) {
+                return Err(io::Error::from(io::ErrorKind::InvalidInput));
+            }
+            Ok(self.files.borrow().contains_key(p))
+        }
+        fn read(&self, p: &Path) -> io::Result<Vec<u8>> {
+            self.files
+                .borrow()
+                .get(p)
+                .cloned()
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+        }
+        fn write_new(&self, p: &Path, b: &[u8]) -> io::Result<()> {
+            if self.failing.contains(&io::ErrorKind::WriteZero) {
+                // Simulate a partial write: the file exists but is truncated.
+                self.files.borrow_mut().insert(p.into(), Vec::new());
+                self.written.borrow_mut().push(p.into());
+                return Err(io::Error::from(io::ErrorKind::WriteZero));
+            }
+            if self.exists(p)? {
+                return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+            }
+            self.files.borrow_mut().insert(p.into(), b.into());
+            self.written.borrow_mut().push(p.into());
+            Ok(())
+        }
+        fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+            let bytes = self
+                .files
+                .borrow_mut()
+                .remove(from)
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+            self.files.borrow_mut().insert(to.into(), bytes);
+            Ok(())
+        }
+        fn remove(&self, path: &Path) -> io::Result<()> {
+            self.files
+                .borrow_mut()
+                .remove(path)
+                .map(|_| ())
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+        }
+    }
+
+    #[test]
+    fn a_failed_scan_keeps_the_browser_contents() {
+        let runtime = PersistenceRuntime::new(
+            FailingMem {
+                files: Default::default(),
+                failing: [io::ErrorKind::PermissionDenied].into_iter().collect(),
+                written: Default::default(),
+            },
+            Ev,
+        );
+        let mut browser = RecordingBrowser {
+            cleared: 0,
+            added: 1,
+        };
+        assert!(
+            runtime
+                .scan_browser(&mut browser, Path::new("lib"), "loop-", ".wav")
+                .is_err()
+        );
+        // The caller's browser still shows what it showed before.
+        assert_eq!(browser.cleared, 0);
+        assert_eq!(browser.added, 1);
+    }
+
+    struct RecordingBrowser {
+        cleared: u32,
+        added: u32,
+    }
+    impl PersistenceBrowser for RecordingBrowser {
+        fn clear(&mut self) {
+            self.cleared += 1;
+            self.added = 0;
+        }
+        fn add(&mut self, _: PathBuf, _: Option<std::time::SystemTime>, _: bool) {
+            self.added += 1;
+        }
+        fn divisions(&mut self) {}
+    }
+
+    #[test]
+    fn a_failed_lookup_is_reported_instead_of_skipping_a_companion_file() {
+        let runtime = PersistenceRuntime::new(
+            FailingMem {
+                files: Default::default(),
+                failing: [io::ErrorKind::InvalidInput].into_iter().collect(),
+                written: Default::default(),
+            },
+            Ev,
+        );
+        let error = runtime
+            .rename_saveable(
+                Path::new("lib/loop-ABC"),
+                8,
+                Some("take"),
+                &[".wav", ".xml"],
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("InvalidInput") || error.contains("invalid"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_failed_audio_write_leaves_no_truncated_file() {
+        let runtime = PersistenceRuntime::new(
+            FailingMem {
+                files: Default::default(),
+                failing: [io::ErrorKind::WriteZero].into_iter().collect(),
+                written: Default::default(),
+            },
+            Ev,
+        );
+        let mut loop_source = L { hash: None };
+        let error = runtime
+            .save_loop(&mut loop_source, "lib", ".wav")
+            .unwrap_err();
+        assert!(error.contains("couldn't create loop audio"), "{error}");
+        assert!(runtime.filesystem.files.borrow().is_empty());
+        assert!(loop_source.hash.is_none());
+    }
+
     #[test]
     fn save_and_load_are_real_operations() {
         let r = PersistenceRuntime::new(

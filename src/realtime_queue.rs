@@ -3,6 +3,7 @@
 //! The endpoints allocate only when the queue is constructed.  `try_send` and
 //! `try_recv` are wait-free and make overload visible through shared counters.
 
+use std::fmt;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -34,6 +35,14 @@ impl QueueMetrics {
 #[derive(Debug, PartialEq, Eq)]
 pub struct QueueFull<T>(pub T);
 
+impl<T> fmt::Display for QueueFull<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("real-time queue is full")
+    }
+}
+
+impl<T: fmt::Debug> std::error::Error for QueueFull<T> {}
+
 pub struct RealtimeSender<T> {
     producer: Producer<T>,
     metrics: Arc<QueueMetrics>,
@@ -44,6 +53,13 @@ pub struct RealtimeReceiver<T> {
     metrics: Arc<QueueMetrics>,
 }
 
+/// Create a bounded queue with `capacity` slots.
+///
+/// # Panics
+///
+/// Panics if `capacity` is zero: a queue that can never accept an item would
+/// silently reject every command. Callers that size the queue from
+/// configuration should reject the value before calling this.
 pub fn bounded<T>(capacity: usize) -> (RealtimeSender<T>, RealtimeReceiver<T>) {
     assert!(capacity > 0, "real-time queue capacity must be non-zero");
     let (producer, consumer) = RingBuffer::new(capacity);
@@ -73,7 +89,7 @@ impl<T> RealtimeSender<T> {
         }
     }
 
-    pub fn metrics(&self) -> &Arc<QueueMetrics> {
+    pub fn metrics(&self) -> &QueueMetrics {
         &self.metrics
     }
 
@@ -93,7 +109,7 @@ impl<T> RealtimeReceiver<T> {
         }
     }
 
-    pub fn metrics(&self) -> &Arc<QueueMetrics> {
+    pub fn metrics(&self) -> &QueueMetrics {
         &self.metrics
     }
 

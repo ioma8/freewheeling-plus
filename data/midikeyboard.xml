@@ -7,9 +7,12 @@
 
     <declare var="VAR_loopid_pianostart" type="int" init="350"/>
     <declare var="VAR_piano_looppage" type="int" init="0"/>
+    <!-- Page bounds for the x/z shifts above: `next` may run while the page is
+         0 or 1 (so it lands on 1 or 2), `prev` while it is -1..2 (so it lands
+         on -2..1). -->
+    <declare var="VAR_piano_next_pages" type="range" init="0>1"/>
+    <declare var="VAR_piano_prev_pages" type="range" init="-1>2"/>
 
-    <declare var="VAR_pianocapture" type="int" init="0"/>
-    <declare var="VAR_pianocapture_set" type="char" init="0"/>
 
     <!-- Range of MIDI notes used to capture loops -->
     <declare var="VAR_noterange" type="range" init="36>47"/>
@@ -33,25 +36,15 @@
 
     <!-- Rest of the bindings... -->
 
-    <!-- Piano capture -
-         this allows you to specify any piano key for capturing loops.
-
-         First, you hit 'C' and then you hit the piano key.
-         From then on, that key triggers loops. -->
-    <!-- DISABLED-
-    <binding input="key" conditions="VAR_keyheld_space=1 and VAR_mercurymode=1 
-                                     and key=c"
-     output1="set-variable" parameters1="var=VAR_pianocapture_set and value=0"
-     output2="set-variable" parameters2="var=VAR_pianocapture and value=0"/>
-
-    <binding input="key" conditions="VAR_mercurymode=1 and key=c"
-     output="set-variable" parameters="var=VAR_pianocapture_set and value=1"/>
-      -->
-
-    <binding input="midikey" 
-     conditions="VAR_pianocapture_set=1 and keydown=1"
-     output1="set-variable" parameters1="var=VAR_pianocapture and value=notenum"
-     output2="set-variable" parameters2="var=VAR_pianocapture_set and value=0"/>
+    <!-- Piano capture (key 'C', then a piano key, so that key triggers loops)
+         is DISABLED. The two key bindings that armed it are commented out
+         upstream, so `VAR_pianocapture` always stayed at its declared 0, and
+         because the bindings that used it read `notenum=VAR_pianocapture`,
+         they matched *note 0 on any channel* instead: a stray C-1 erased or
+         triggered the footswitch loop. Those bindings and their variables are
+         removed rather than left inert. The note-range bindings below
+         (`midichannel=VAR_notechan and notenum=VAR_noterange`) are the live
+         path. -->
 
     <!-- Slide Loop Volumes -->
     <binding input="midikey"
@@ -81,11 +74,6 @@
 
     <!-- Erase Loops -->
     <binding input="midikey" 
-     conditions="VAR_keyheld_space=1 and notenum=VAR_pianocapture and keydown=1" 
-     output1="erase-loop" parameters1="loopid=VAR_loopid_footswitch"
-     output2="set-variable" parameters2="var=VAR_xferloop and value=0"/>
-
-    <binding input="midikey" 
      conditions="VAR_keyheld_space=1 and midichannel=VAR_notechan and 
                  notenum=VAR_noterange and keydown=1" 
      output="erase-loop" parameters="loopid=notenum+VAR_loopid_pianostart"/> 
@@ -100,15 +88,6 @@
 
     <!-- Overdub Loops -->
     <binding input="midikey"
-     conditions="VAR_overdubmode=1 and notenum=VAR_pianocapture and keydown=1"
-     output1="trigger-loop"
-     parameters1="overdub=1 and overdubfeedback=VAR_overdubfeedback and
-                  loopid=VAR_loopid_footswitch and vol=velocity/127"
-     output2="set-variable" parameters2="var=VAR_xferloop and value=1"
-     output3="set-variable" parameters3="var=VAR_xferidx and
-                                         value=VAR_loopid_footswitch"/>
-
-    <binding input="midikey"
      conditions="VAR_overdubmode=1 and midichannel=VAR_notechan and 
                  notenum=VAR_noterange and keydown=1"
      output="trigger-loop"
@@ -117,21 +96,19 @@
 
     <!-- Trigger Loops -->
     <binding input="midikey"
-     conditions="notenum=VAR_pianocapture and keydown=1"
-     output1="trigger-loop"
-     parameters1="loopid=VAR_loopid_footswitch and vol=velocity/127"
-     output2="set-variable" parameters2="var=VAR_xferloop and value=1"
-     output3="set-variable" parameters3="var=VAR_xferidx and
-                                         value=VAR_loopid_footswitch"/>
-
-    <binding input="midikey"
      conditions="midichannel=VAR_notechan and notenum=VAR_noterange and 
                  keydown=1"
      output="trigger-loop"
      parameters="loopid=notenum+VAR_loopid_pianostart and vol=velocity/127"/>
 
     <!-- z/x: Prev/Next page of loops on piano keyboard -->
-    <binding input="key" conditions="SYSTEM_cur_switchable_interface=VAR_midikeyboard_interfaceid and key=x and keydown=1" 
+    <!-- The page shifts are bounded by range membership (the condition
+         grammar has no `<`/`>` comparison operators, but a range variable on
+         the right-hand side is a membership test): the display declares
+         squares -2..2, and an unbounded base walks the derived ids out of the
+         runtime's loop address space, where the dispatch would reject them
+         (and abort the whole batch, including the video-show-loop output). -->
+    <binding input="key" conditions="SYSTEM_cur_switchable_interface=VAR_midikeyboard_interfaceid and VAR_piano_looppage=VAR_piano_next_pages and key=x and keydown=1" 
      output1="set-variable" parameters1="var=VAR_loopid_pianostart and 
                                          value=VAR_loopid_pianostart+
                                                VAR_noterangechange"
@@ -140,7 +117,7 @@
      output3="video-show-loop"
      parameters3="layoutid=0 and loopid=VAR_noterange+VAR_loopid_pianostart"/>
 
-    <binding input="key" conditions="SYSTEM_cur_switchable_interface=VAR_midikeyboard_interfaceid and key=z and keydown=1" 
+    <binding input="key" conditions="SYSTEM_cur_switchable_interface=VAR_midikeyboard_interfaceid and VAR_piano_looppage=VAR_piano_prev_pages and key=z and keydown=1" 
      output1="set-variable" 
      parameters1="var=VAR_loopid_pianostart and 
                   value=VAR_loopid_pianostart-VAR_noterangechange"

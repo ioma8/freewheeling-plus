@@ -50,8 +50,15 @@ impl Default for ProcessorCommand {
 // Raw pointers are handles only (ZST [u8; 0] — never dereferenced). The
 // queue merely stores and returns them; every access happens on the owning
 // thread after read_next transfers ownership of the command. C++ compat.
-// SAFETY: ProcessorCommand holds raw pointers that are never dereferenced
-// through the Send boundary — they are only accessed by the owning thread.
+//
+// SAFETY (Send): the handles are never dereferenced through the Send boundary
+// — they are only accessed by the owning thread after the command is consumed.
+//
+// Lifetime invariant (not expressible in the type system, relied upon by
+// every consumer that dereferences a popped handle): the `Processor` /
+// `ProcessorItem` a command points at is owned by the processor graph and MUST
+// outlive the queue and stay valid until the command is consumed and the
+// referenced object is released.
 unsafe impl Send for ProcessorCommand {}
 
 pub struct ProcessorCommandQueue {
@@ -112,9 +119,18 @@ impl ProcessorCommandQueue {
     /// `ReadNext`'s `pthread_mutex_trylock` behavior: contention produces an
     /// immediate false result and leaves the FIFO unchanged for a later audio
     /// callback.
+    ///
+    /// On `false` the FIFO is untouched and `command` is NOT written; callers
+    /// must check the return value before using it, or they may re-process a
+    /// stale command.
     pub fn read_next(&self, command: &mut ProcessorCommand) -> bool {
-        let Ok(mut commands) = self.commands.try_lock() else {
-            return false;
+        let mut commands = match self.commands.try_lock() {
+            Ok(guard) => guard,
+            // A panic while a producer held the lock must not silence the
+            // realtime reader forever; recover exactly like `enqueue` and
+            // `pending_count`, since C++ has no poison state.
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return false,
         };
         if let Some(next) = commands.pop_front() {
             *command = next;
@@ -169,6 +185,24 @@ mod tests {
         }
         assert!(!queue.enqueue_add(std::ptr::NonNull::<ProcessorItem>::dangling().as_ptr()));
         assert_eq!(queue.rejected_count(), 1);
+    }
+
+    #[test]
+    fn a_poisoned_mutex_still_drains_the_queue() {
+        let queue = std::sync::Arc::new(ProcessorCommandQueue::new());
+        assert!(queue.enqueue_add(std::ptr::NonNull::<ProcessorItem>::dangling().as_ptr()));
+        let poisoner = std::sync::Arc::clone(&queue);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.commands.lock().unwrap();
+            panic!("poison the queue");
+        })
+        .join();
+        // The realtime reader must keep draining instead of reporting false
+        // for the rest of the session.
+        let mut command = ProcessorCommand::default();
+        assert!(queue.read_next(&mut command));
+        assert_eq!(command.command_type, ProcessorCommandType::Add);
+        assert!(!queue.read_next(&mut command));
     }
 
     #[test]

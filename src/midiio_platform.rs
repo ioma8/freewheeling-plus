@@ -50,10 +50,15 @@ impl MidirMidiBackend {
             open: false,
         }
     }
+    /// Names of the physical MIDI inputs, in midir's enumeration order.
+    ///
+    /// Order and duplicates are preserved: `InputSelection::Index` addresses
+    /// this list, and two identically named devices must stay independently
+    /// selectable.
     pub fn discover_inputs() -> Result<Vec<String>, String> {
         let input = midir::MidiInput::new(CLIENT_NAME)
             .map_err(|e| format!("MIDI: input discovery failed: {e}"))?;
-        let mut names = input
+        let names = input
             .ports()
             .iter()
             .map(|p| {
@@ -62,14 +67,16 @@ impl MidirMidiBackend {
                     .map_err(|e| format!("MIDI: cannot read input name: {e}"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        names.sort();
-        names.dedup();
         Ok(names)
     }
     pub fn dropped_input_messages(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
-    fn selected_names(&self, available: &[String], count: usize) -> Result<Vec<String>, String> {
+    /// Raw indices of the inputs this backend should connect.
+    ///
+    /// Indices (not names) are returned so a duplicate device name cannot make
+    /// the per-port reconnect resolve to the wrong port.
+    fn selected_inputs(&self, available: &[String], count: usize) -> Result<Vec<usize>, String> {
         if count == 0 {
             return Ok(Vec::new());
         }
@@ -96,7 +103,7 @@ impl MidirMidiBackend {
         if first + count > available.len() {
             return Err("MIDI: not enough inputs after selected source".into());
         }
-        Ok(available[first..first + count].to_vec())
+        Ok((first..first + count).collect())
     }
 }
 
@@ -124,19 +131,28 @@ impl MidiBackend for MidirMidiBackend {
         if self.open {
             return Err("MIDI backend is already open".into());
         }
+        // Connections left behind by a failed activation are dropped first: a
+        // retry must not append a duplicate set (double delivery), and the
+        // leaked connections would keep counting into `dropped`.
+        self.inputs.clear();
+        self.outputs.clear();
+        self.receiver = None;
         let available = Self::discover_inputs()?;
-        let selected = self.selected_names(&available, input_count)?;
+        let selected = self.selected_inputs(&available, input_count)?;
         let (sender, receiver) = mpsc::sync_channel(self.queue_capacity);
         self.dropped.store(0, Ordering::Relaxed);
 
-        for (logical_port, wanted_name) in selected.into_iter().enumerate() {
+        for (logical_port, selected_index) in selected.into_iter().enumerate() {
+            let wanted_name = available
+                .get(selected_index)
+                .ok_or_else(|| format!("MIDI: input {selected_index} disappeared"))?;
             let mut input = midir::MidiInput::new(CLIENT_NAME)
                 .map_err(|e| format!("MIDI: cannot create input: {e}"))?;
             input.ignore(midir::Ignore::None);
             let port = input
                 .ports()
                 .into_iter()
-                .find(|p| input.port_name(p).ok().as_deref() == Some(wanted_name.as_str()))
+                .nth(selected_index)
                 .ok_or_else(|| {
                     format!("MIDI: input {wanted_name:?} disappeared during activation")
                 })?;
@@ -197,7 +213,10 @@ impl MidiBackend for MidirMidiBackend {
             return Err("MIDI backend is not open".into());
         }
         if self.outputs.is_empty() {
-            return Ok(());
+            // Outputs were requested but none could be created (e.g. a build
+            // where virtual outputs are unavailable); reporting success here
+            // would silently discard the message.
+            return Err("MIDI: no MIDI output connections are available".into());
         }
         let output = self
             .outputs
@@ -215,7 +234,7 @@ impl MidiBackend for MidirMidiBackend {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 fn create_virtual_output(
     output: midir::MidiOutput,
     name: &str,
@@ -287,14 +306,24 @@ impl MidiBackend for RegistryMidiBackend {
         s.opened = true;
         Ok(())
     }
+    /// Poll the registry queue.
+    ///
+    /// Waits up to ten milliseconds for a message, then reports `Ok(None)`
+    /// whether the wait timed out or the queue is simply empty (the two are
+    /// indistinguishable to a poller; use `dropped_messages` for loss).
     fn receive(&mut self) -> Result<Option<MidiPortMessage>, String> {
         let (lock, wake) = &*self.registry.state;
-        let mut s = lock.lock().unwrap();
+        let mut s = lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !s.opened {
             return Err("MIDI backend is not open".into());
         }
         if s.incoming.is_empty() {
-            s = wake.wait_timeout(s, Duration::from_millis(10)).unwrap().0;
+            s = wake
+                .wait_timeout(s, Duration::from_millis(10))
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
         }
         Ok(s.incoming.pop_front())
     }
@@ -331,12 +360,20 @@ mod tests {
         let b =
             MidirMidiBackend::with_queue_capacity(Some(InputSelection::ExactName("B".into())), 0);
         assert_eq!(b.queue_capacity, 1);
+        // Selections are raw indices into the discovery order.
         assert_eq!(
-            b.selected_names(&["A".into(), "B".into()], 1).unwrap(),
-            ["B"]
+            b.selected_inputs(&["A".into(), "B".into()], 1).unwrap(),
+            [1]
         );
-        assert!(b.selected_names(&["A".into()], 1).is_err());
-        assert!(b.selected_names(&[], 1).unwrap().is_empty());
+        assert!(b.selected_inputs(&["A".into()], 1).is_err());
+        assert!(b.selected_inputs(&[], 1).unwrap().is_empty());
+        // Duplicate device names stay independently selectable.
+        let b = MidirMidiBackend::new(Some(InputSelection::ExactName("B".into())));
+        assert_eq!(
+            b.selected_inputs(&["A".into(), "B".into(), "B".into()], 2)
+                .unwrap(),
+            [1, 2]
+        );
     }
     #[test]
     fn registry_routes_and_rejects_bad_ports() {

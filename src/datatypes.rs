@@ -81,13 +81,51 @@ impl Range {
 // UserVariable
 // ============================================================
 
-#[derive(Clone, PartialEq)]
 pub struct UserVariable {
     pub name: Option<String>,
     pub type_: CoreDataType,
     pub data: [u8; CFG_VAR_SIZE],
     pub is_system: bool,
     next: Option<Box<UserVariable>>,
+}
+
+/// Compares this variable's own state.
+///
+/// The private `next` chain is an implementation detail of the variable table,
+/// not part of a variable's identity: two variables with the same name, type
+/// and value are equal even when their chains differ.
+impl PartialEq for UserVariable {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.type_ == other.type_
+            && self.data == other.data
+            && self.is_system == other.is_system
+    }
+}
+
+/// Clones this variable's own state; the chain is not copied (see
+/// [`PartialEq`]).
+impl Clone for UserVariable {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            type_: self.type_,
+            data: self.data,
+            is_system: self.is_system,
+            next: None,
+        }
+    }
+}
+
+/// Drops a long variable chain iteratively: the derived recursive drop would
+/// overflow the stack for a deep list.
+impl Drop for UserVariable {
+    fn drop(&mut self) {
+        let mut next = self.next.take();
+        while let Some(mut node) = next {
+            next = node.next.take();
+        }
+    }
 }
 
 impl UserVariable {
@@ -154,7 +192,33 @@ impl UserVariable {
         }
     }
 
+    /// Copy `src` into this variable.
+    ///
+    /// The accessors return `0` for `Range`/`Variable`/`VariableRef`/`Invalid`
+    /// sources, so a mixed-type assignment would silently store a zero. Such an
+    /// assignment is rejected (with a diagnostic) instead.
     pub fn set_from(&mut self, src: &UserVariable) {
+        let scalar = |type_: CoreDataType| {
+            matches!(
+                type_,
+                CoreDataType::Char
+                    | CoreDataType::Int
+                    | CoreDataType::Long
+                    | CoreDataType::Float
+            )
+        };
+        let compatible = match (self.type_, src.get_type()) {
+            (CoreDataType::Range, CoreDataType::Range) => true,
+            (target, source) => scalar(target) && scalar(source),
+        };
+        if !compatible {
+            eprintln!(
+                "UserVariable: WARNING: Can't set {:?} from {:?} variable!",
+                self.type_,
+                src.get_type()
+            );
+            return;
+        }
         match self.type_ {
             CoreDataType::Char => self.set_char(src.as_char()),
             CoreDataType::Int => self.set_int(src.as_i32()),
@@ -281,49 +345,96 @@ impl UserVariable {
     /// Implements the C++ `+=`, `-=`, `*=`, and `/=` semantics without
     /// exposing a byte-backed value to callers.
     pub fn add_assign(&mut self, src: &UserVariable) {
-        self.apply_arithmetic(src, |a, b| a + b);
+        self.apply_arithmetic(src, i64::saturating_add, |a, b| a + b);
     }
     pub fn sub_assign(&mut self, src: &UserVariable) {
-        self.apply_arithmetic(src, |a, b| a - b);
+        self.apply_arithmetic(src, i64::saturating_sub, |a, b| a - b);
     }
     pub fn mul_assign(&mut self, src: &UserVariable) {
-        self.apply_arithmetic(src, |a, b| a * b);
+        self.apply_arithmetic(src, i64::saturating_mul, |a, b| a * b);
     }
-    pub fn div_assign(&mut self, src: &UserVariable) {
-        if self.type_ == CoreDataType::Range {
-            let r = src.as_range();
-            let mut own = self.as_range();
-            if r.lo != 0 {
-                own.lo /= r.lo;
+
+    /// Divide in place.
+    ///
+    /// Returns `false` when the divisor is zero, in which case the value is
+    /// left untouched. Integral operands keep their own type (a `Long` stays a
+    /// `Long`) instead of being promoted to `Float`.
+    pub fn div_assign(&mut self, src: &UserVariable) -> bool {
+        match self.type_ {
+            CoreDataType::Range => {
+                let divisor = src.as_range();
+                let mut own = self.as_range();
+                if divisor.lo == 0 || divisor.hi == 0 {
+                    return false;
+                }
+                own.lo /= divisor.lo;
+                own.hi /= divisor.hi;
+                self.set_range(own.lo, own.hi);
+                true
             }
-            if r.hi != 0 {
-                own.hi /= r.hi;
+            CoreDataType::Float => {
+                let divisor = src.as_f32();
+                if divisor == 0.0 {
+                    return false;
+                }
+                self.set_float(self.as_f32() / divisor);
+                true
             }
-            self.set_range(own.lo, own.hi);
-        } else if src.as_f32() != 0.0 {
-            self.set_float(self.as_f32() / src.as_f32());
+            CoreDataType::Char => {
+                let divisor = i64::from(src.as_char());
+                if divisor == 0 {
+                    return false;
+                }
+                self.set_char((i64::from(self.as_char()) / divisor) as i8);
+                true
+            }
+            CoreDataType::Int => {
+                let divisor = i64::from(src.as_i32());
+                if divisor == 0 {
+                    return false;
+                }
+                self.set_int((i64::from(self.as_i32()) / divisor) as i32);
+                true
+            }
+            CoreDataType::Long => {
+                let divisor = src.as_i64();
+                if divisor == 0 {
+                    return false;
+                }
+                self.set_long(self.as_i64() / divisor);
+                true
+            }
+            _ => false,
         }
     }
 
-    fn apply_arithmetic(&mut self, src: &UserVariable, op: impl Fn(f64, f64) -> f64) {
+    /// Apply `int_op` in the native integer type and `float_op` to floats.
+    ///
+    /// Funnelling integers through `f64` would lose the low bits of any value
+    /// above 2^53; the integer operation saturates at the type's bounds instead
+    /// of overflowing.
+    fn apply_arithmetic(
+        &mut self,
+        src: &UserVariable,
+        int_op: impl Fn(i64, i64) -> i64,
+        float_op: impl Fn(f32, f32) -> f32,
+    ) {
         self.raise_precision(src);
         match self.type_ {
-            CoreDataType::Char => {
-                self.set_char(op(self.as_char() as f64, src.as_char() as f64) as i8)
+            CoreDataType::Char => self.set_char(
+                int_op(i64::from(self.as_char()), i64::from(src.as_char())) as i8,
+            ),
+            CoreDataType::Int => {
+                self.set_int(int_op(i64::from(self.as_i32()), i64::from(src.as_i32())) as i32)
             }
-            CoreDataType::Int => self.set_int(op(self.as_i32() as f64, src.as_i32() as f64) as i32),
-            CoreDataType::Long => {
-                self.set_long(op(self.as_i64() as f64, src.as_i64() as f64) as i64)
-            }
-            CoreDataType::Float => {
-                self.set_float(op(self.as_f32() as f64, src.as_f32() as f64) as f32)
-            }
+            CoreDataType::Long => self.set_long(int_op(self.as_i64(), src.as_i64())),
+            CoreDataType::Float => self.set_float(float_op(self.as_f32(), src.as_f32())),
             CoreDataType::Range => {
                 let a = self.as_range();
                 let b = src.as_range();
                 self.set_range(
-                    op(a.lo as f64, b.lo as f64) as i32,
-                    op(a.hi as f64, b.hi as f64) as i32,
+                    int_op(i64::from(a.lo), i64::from(b.lo)) as i32,
+                    int_op(i64::from(a.hi), i64::from(b.hi)) as i32,
                 );
             }
             _ => {}
@@ -369,6 +480,79 @@ mod user_variable_tests {
     }
 
     #[test]
+    fn long_arithmetic_stays_exact() {
+        let mut value = UserVariable::new();
+        value.set_long(10_000_000_000_000_001);
+        let mut one = UserVariable::new();
+        one.set_long(1);
+        value.add_assign(&one);
+        assert_eq!(value.as_i64(), 10_000_000_000_000_002);
+        value.mul_assign(&one);
+        assert_eq!(value.as_i64(), 10_000_000_000_000_002);
+        // Saturation keeps a wrapped result out of the value.
+        let mut huge = UserVariable::new();
+        huge.set_long(i64::MAX);
+        huge.add_assign(&one);
+        assert_eq!(huge.as_i64(), i64::MAX);
+    }
+
+    #[test]
+    fn integral_division_keeps_its_type_and_reports_zero_divisors() {
+        let mut value = UserVariable::new();
+        value.set_long(9);
+        let mut three = UserVariable::new();
+        three.set_long(3);
+        assert!(value.div_assign(&three));
+        assert_eq!(value.get_type(), CoreDataType::Long);
+        assert_eq!(value.as_i64(), 3);
+
+        let mut zero = UserVariable::new();
+        zero.set_long(0);
+        assert!(!value.div_assign(&zero));
+        assert_eq!(value.as_i64(), 3);
+    }
+
+    #[test]
+    fn mixed_type_assignment_is_rejected() {
+        let mut range = UserVariable::new();
+        range.set_range(1, 9);
+        let mut integer = UserVariable::new();
+        integer.set_int(42);
+        // A range has no scalar accessor, so the copy must not silently zero.
+        integer.set_from(&range);
+        assert_eq!(integer.as_i32(), 42);
+        let mut target = UserVariable::new();
+        target.set_int(0);
+        target.set_from(&range);
+        assert_eq!(target.as_i32(), 0);
+        target.set_from(&integer);
+        assert_eq!(target.as_i32(), 42);
+    }
+
+    #[test]
+    fn clone_and_equality_ignore_the_private_chain() {
+        let mut value = UserVariable::new();
+        value.set_int(7);
+        let mut chained = value.clone();
+        chained.set_next(UserVariable::new());
+        assert!(chained.has_next());
+        assert_eq!(chained, value);
+        assert!(!value.clone().has_next());
+    }
+
+    #[test]
+    fn registration_reports_exhaustion_instead_of_panicking() {
+        RTRWThreads::init_all();
+        let index = RTRWThreads::register_reader_or_writer();
+        assert_eq!(index, Some(0));
+        assert_eq!(RTRWThreads::get_num_threads(), 1);
+        assert_eq!(RTRWThreads::get_thread_ids(), RTRWThreads::get_thread_ids());
+        RTRWThreads::close_all();
+        assert_eq!(RTRWThreads::get_num_threads(), 0);
+        assert!(RTRWThreads::get_thread_ids().is_empty());
+    }
+
+    #[test]
     fn print_uses_cpp_float_and_range_syntax() {
         let mut value = UserVariable::new();
         value.set_float(1.239);
@@ -389,6 +573,14 @@ fn get_thread_ids() -> &'static Mutex<Vec<std::thread::ThreadId>> {
     THREAD_IDS.get_or_init(|| Mutex::new(Vec::with_capacity(MAX_RW_THREADS)))
 }
 
+/// Lock the thread table, recovering a poisoned mutex (the table holds plain
+/// thread ids, so a panic while it was held left no invariant broken).
+fn lock_thread_ids() -> std::sync::MutexGuard<'static, Vec<std::thread::ThreadId>> {
+    get_thread_ids()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 pub struct RTRWThreads;
 
 impl RTRWThreads {
@@ -399,25 +591,27 @@ impl RTRWThreads {
         }
     }
 
-    pub fn register_reader_or_writer() -> usize {
+    /// Register the calling thread as a reader/writer.
+    ///
+    /// Returns the thread's index, or `None` when the table is full, so a
+    /// caller reports the condition instead of aborting the process. The count
+    /// is updated inside the lock so it can never disagree with the id list.
+    pub fn register_reader_or_writer() -> Option<usize> {
         let id = std::thread::current().id();
-        let mut ids = get_thread_ids().lock().unwrap();
-        let idx = ids.len();
-        assert!(
-            idx < MAX_RW_THREADS,
-            "Too many writer threads for Ring Buffer!"
-        );
+        let mut ids = lock_thread_ids();
+        if ids.len() >= MAX_RW_THREADS {
+            return None;
+        }
         ids.push(id);
-        let count = idx + 1;
-        NUM_RW_THREADS.store(count, Ordering::Release);
-        count
+        NUM_RW_THREADS.store(ids.len(), Ordering::Release);
+        Some(ids.len() - 1)
     }
 
     pub fn get_num_threads() -> usize {
         NUM_RW_THREADS.load(Ordering::Acquire)
     }
     pub fn get_thread_ids() -> Vec<std::thread::ThreadId> {
-        get_thread_ids().lock().unwrap().clone()
+        lock_thread_ids().clone()
     }
     pub fn close_all() {
         NUM_RW_THREADS.store(0, Ordering::SeqCst);

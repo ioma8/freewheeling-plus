@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 /// as in the original BrowserItem subclass.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoopTrayItem {
+    /// Persisted C++ loop id (the `loopid` attribute written into scenes),
+    /// not a runtime slot: see [`LoopSnapshot::slot`].
     pub loop_id: i32,
     pub name: String,
     pub default_name: bool,
@@ -48,7 +50,11 @@ pub enum LoopStatus {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoopSnapshot {
-    pub loop_id: usize,
+    /// Runtime loop slot the snapshot captured, `0..MAX_RUNTIME_LOOPS`. This is
+    /// a slot index rather than the persisted loop id
+    /// ([`LoopTrayItem::loop_id`]), so it is unsigned and wide enough for the
+    /// whole address space (`MAX_RUNTIME_LOOPS` is 512, which u8 cannot hold).
+    pub slot: u16,
     pub status: LoopStatus,
     pub loop_volume: f32,
     pub trigger_volume: f32,
@@ -73,6 +79,29 @@ pub enum StreamState {
     Writing,
 }
 
+/// Why [`Core::trigger_snapshot`] failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SnapshotError {
+    /// No snapshot is stored at the requested index (caller error).
+    Missing { index: usize },
+    /// The adapter could not restore an existing snapshot (recoverable
+    /// runtime/DSP failure).
+    Restore { index: usize, error: String },
+}
+
+impl std::fmt::Display for SnapshotError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing { index } => write!(f, "snapshot {index} does not exist"),
+            Self::Restore { index, error } => {
+                write!(f, "restore snapshot {index}: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SnapshotError {}
+
 /// Adapter for all resources which are not yet owned by this crate.
 pub trait CoreServices {
     fn setup(&mut self) -> Result<(), String>;
@@ -87,7 +116,12 @@ pub trait CoreServices {
     fn close_midi(&mut self);
     fn close_audio(&mut self);
     fn shutdown(&mut self);
-    fn rollback_setup(&mut self);
+    /// Undo a partially completed [`CoreServices::setup`].
+    ///
+    /// Post-condition: the adapter is back in a clean state, so a later
+    /// `setup` retry is safe. Implementations report a failure here instead of
+    /// assuming the undo succeeded.
+    fn rollback_setup(&mut self) -> Result<(), String>;
     fn snapshot_loops(&self) -> Vec<LoopSnapshot>;
     fn restore_snapshot(&mut self, snapshot: &Snapshot) -> Result<(), String>;
 }
@@ -127,9 +161,14 @@ impl<S: CoreServices> Core<S> {
     }
 
     pub fn setup(&mut self) -> Result<(), String> {
-        self.services.setup().inspect_err(|_| {
-            self.services.rollback_setup();
-        })?;
+        if let Err(error) = self.services.setup() {
+            // A failed rollback leaves the adapter in an unknown state, which
+            // is worth reporting next to the setup failure itself.
+            return match self.services.rollback_setup() {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(format!("{error}; rollback failed: {rollback}")),
+            };
+        }
         self.setup_complete = true;
         Ok(())
     }
@@ -141,16 +180,22 @@ impl<S: CoreServices> Core<S> {
             return Err("core is not set up".into());
         }
         self.running = true;
-        self.services.start_session()?;
-        self.services.start_interfaces()?;
-        while self.running {
-            match self.services.poll_event()? {
-                Some(event) => self.handle_event(event)?,
-                None => break,
+        // The run sequence is captured so shutdown always happens: leaving the
+        // session, interfaces or stream open after a mid-loop error would leak
+        // them (and `is_running` would keep reporting `true`).
+        let result = (|| -> Result<(), String> {
+            self.services.start_session()?;
+            self.services.start_interfaces()?;
+            while self.running {
+                match self.services.poll_event()? {
+                    Some(event) => self.handle_event(event)?,
+                    None => break,
+                }
             }
-        }
+            Ok(())
+        })();
         self.shutdown();
-        Ok(())
+        result
     }
 
     pub fn handle_event(&mut self, event: CoreEvent) -> Result<(), String> {
@@ -171,26 +216,36 @@ impl<S: CoreServices> Core<S> {
             self.stream_name.clear();
             self.write_sequence += 1;
         } else {
-            self.stream_name = format!("freewheeling-{:04}", self.write_sequence);
+            // Publish the name only after the adapter accepted the stream,
+            // otherwise `stream_name` would advertise a stream that is not
+            // being written.
             self.services.set_streaming(true, self.write_sequence)?;
+            self.stream_name = format!("freewheeling-{:04}", self.write_sequence);
         }
         Ok(())
     }
 
-    pub fn create_snapshot(&mut self, index: usize, name: impl Into<String>) {
+    /// Store a snapshot at `index`, returning the snapshot it replaced.
+    ///
+    /// The slot is overwritten, matching the C++ behaviour; the previous value
+    /// is returned so callers can detect the loss.
+    pub fn create_snapshot(&mut self, index: usize, name: impl Into<String>) -> Option<Snapshot> {
         self.snapshots.insert(
             index,
             Snapshot {
                 name: name.into(),
                 loops: self.services.snapshot_loops(),
             },
-        );
+        )
     }
-    pub fn trigger_snapshot(&mut self, index: usize) -> Result<(), String> {
-        self.snapshots
+    pub fn trigger_snapshot(&mut self, index: usize) -> Result<(), SnapshotError> {
+        let snapshot = self
+            .snapshots
             .get(&index)
-            .ok_or_else(|| "snapshot does not exist".into())
-            .and_then(|s| self.services.restore_snapshot(s))
+            .ok_or(SnapshotError::Missing { index })?;
+        self.services
+            .restore_snapshot(snapshot)
+            .map_err(|error| SnapshotError::Restore { index, error })
     }
     pub fn snapshot(&self, index: usize) -> Option<&Snapshot> {
         self.snapshots.get(&index)
@@ -267,7 +322,9 @@ mod tests {
         fn shutdown(&mut self) {
             self.closes += 1
         }
-        fn rollback_setup(&mut self) {}
+        fn rollback_setup(&mut self) -> Result<(), String> {
+            Ok(())
+        }
         fn snapshot_loops(&self) -> Vec<LoopSnapshot> {
             vec![]
         }

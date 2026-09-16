@@ -11,6 +11,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::fs;
 use std::io;
+use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LockResult, Mutex, MutexGuard, TryLockResult};
@@ -25,6 +26,9 @@ thread_local! {
 static CALLBACK_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static BLOCKING_LOCK_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 
+/// Reads a const-initialized, destructor-free thread-local, so this never
+/// allocates and never panics even when called from inside the global
+/// allocator. Keep `CALLBACK_DEPTH` free of any payload that needs `Drop`.
 fn in_callback() -> bool {
     CALLBACK_DEPTH.with(|depth| depth.get() != 0)
 }
@@ -77,10 +81,12 @@ impl<T> InstrumentedMutex<T> {
         self.0.lock()
     }
 
+    /// Non-blocking lock for callback paths.
+    ///
+    /// Not counted as a blocking attempt: `try_lock` never blocks, and
+    /// counting it would report the recommended non-blocking pattern as a
+    /// violation.
     pub fn try_lock(&self) -> TryLockResult<MutexGuard<'_, T>> {
-        if in_callback() {
-            BLOCKING_LOCK_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
-        }
         self.0.try_lock()
     }
 
@@ -92,6 +98,8 @@ impl<T> InstrumentedMutex<T> {
 /// Lock-free callback timing and xrun measurements shared with a control thread.
 pub struct RealtimeMetrics {
     started: Instant,
+    sample_rate_hz: u32,
+    buffer_frames: u32,
     callback_deadline_ns: u64,
     callbacks: AtomicU64,
     deadline_misses: AtomicU64,
@@ -112,6 +120,8 @@ impl RealtimeMetrics {
         let rss = resident_set_bytes()?;
         Ok(Self {
             started: Instant::now(),
+            sample_rate_hz,
+            buffer_frames,
             callback_deadline_ns: u64::from(buffer_frames) * 1_000_000_000
                 / u64::from(sample_rate_hz),
             callbacks: AtomicU64::new(0),
@@ -128,6 +138,7 @@ impl RealtimeMetrics {
         CallbackGuard {
             metrics: self,
             started: Instant::now(),
+            _not_send: PhantomData,
         }
     }
 
@@ -142,7 +153,11 @@ impl RealtimeMetrics {
         Ok(rss)
     }
 
-    pub fn snapshot(&self, sample_rate_hz: u32, buffer_frames: u32) -> PerformanceResult {
+    /// Take a report of everything measured so far.
+    ///
+    /// The stream format comes from the constructor, so the report cannot mix
+    /// a deadline derived from one format with fields from another.
+    pub fn snapshot(&self) -> PerformanceResult {
         let callbacks = self.callbacks.load(Ordering::Relaxed);
         let target = callbacks.saturating_mul(99).div_ceil(100);
         let mut cumulative = 0;
@@ -156,8 +171,8 @@ impl RealtimeMetrics {
         }
         PerformanceResult {
             schema_version: 1,
-            sample_rate_hz,
-            buffer_frames,
+            sample_rate_hz: self.sample_rate_hz,
+            buffer_frames: self.buffer_frames,
             duration_seconds: self.started.elapsed().as_secs_f64(),
             callback_p99_us: p99 as f64,
             callback_deadline_us: self.callback_deadline_ns as f64 / 1_000.0,
@@ -175,6 +190,11 @@ impl RealtimeMetrics {
 pub struct CallbackGuard<'a> {
     metrics: &'a RealtimeMetrics,
     started: Instant,
+    /// Pins the guard to the thread that called `enter_callback`: `Drop`
+    /// decrements *that* thread's `CALLBACK_DEPTH`. Moving it to another
+    /// thread (or leaking it with `mem::forget`) would leave the entering
+    /// thread flagged as "in callback" forever, corrupting the counters.
+    _not_send: PhantomData<*const ()>,
 }
 
 impl Drop for CallbackGuard<'_> {
@@ -212,11 +232,17 @@ pub struct PerformanceResult {
 
 impl PerformanceResult {
     pub fn write_json(&self, path: impl AsRef<Path>) -> io::Result<()> {
-        fs::write(path, self.to_json())
+        fs::write(path, self.to_json()?)
     }
 
-    pub fn to_json(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string()) + "\n"
+    /// Serialize the report.
+    ///
+    /// A serialization failure is returned: emitting `{}` instead would leave
+    /// an acceptance harness reading a well-formed but empty report.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        let mut json = serde_json::to_string_pretty(self)?;
+        json.push('\n');
+        Ok(json)
     }
 }
 
@@ -239,14 +265,50 @@ fn resident_set_bytes() -> io::Result<u64> {
     Ok(pages.saturating_mul(page_size as u64))
 }
 
+/// Current resident set size.
+///
+/// `getrusage` reports `ru_maxrss`, which is the *peak* and therefore not
+/// comparable with the Linux current-RSS value (the acceptance report compares
+/// the startup sample against later ones). `task_info` with `MACH_TASK_BASIC_INFO`
+/// gives the current footprint instead.
 #[cfg(target_os = "macos")]
 fn resident_set_bytes() -> io::Result<u64> {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
-    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
+    const MACH_TASK_BASIC_INFO: u32 = 20;
+    #[repr(C)]
+    struct MachTaskBasicInfo {
+        virtual_size: u64,
+        resident_size: u64,
+        resident_size_max: u64,
+        user_time: [u32; 2],
+        system_time: [u32; 2],
+        policy: i32,
+        suspend_count: i32,
     }
-    let bytes = unsafe { usage.assume_init() }.ru_maxrss as u64;
-    Ok(bytes)
+    let mut info = std::mem::MaybeUninit::<MachTaskBasicInfo>::zeroed();
+    let mut count = (std::mem::size_of::<MachTaskBasicInfo>() / std::mem::size_of::<u32>()) as u32;
+    // SAFETY: `mach_task_self()` is the calling task, and `info`/`count`
+    // describe a valid buffer of the requested size.
+    // `libc::mach_task_self` is deprecated in favour of the `mach2` crate; the
+    // port does not take that dependency, and the deprecated item is the same
+    // syscall, so the call is allowed locally rather than pulling in a crate
+    // for one function.
+    #[allow(deprecated)]
+    let task = unsafe { libc::mach_task_self() };
+    let result = unsafe {
+        libc::task_info(
+            task,
+            MACH_TASK_BASIC_INFO,
+            info.as_mut_ptr().cast(),
+            &mut count,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::other(format!(
+            "task_info failed with kern_return_t {result}"
+        )));
+    }
+    // SAFETY: the call above filled the buffer.
+    Ok(unsafe { info.assume_init() }.resident_size)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

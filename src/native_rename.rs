@@ -8,6 +8,17 @@ use std::collections::VecDeque;
 
 pub const MAX_NAME_BYTES: usize = 511;
 
+/// SDL1 keysyms used by the rename widget (`src/sdlio.rs` defines the same
+/// values for the event mapping).
+const KEYCODE_BACKSPACE: i32 = 8;
+const KEYCODE_RETURN: i32 = 13;
+const KEYCODE_ESCAPE: i32 = 27;
+const KEYCODE_KP_ENTER: i32 = 271;
+
+/// Cap on queued results. A consumer that stops draining must not grow this
+/// without bound; the oldest result is dropped and counted instead.
+pub const MAX_PENDING_RESULTS: usize = 64;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RenameTarget {
     Browser {
@@ -41,6 +52,7 @@ pub struct NativeRename {
     target: Option<RenameTarget>,
     name: String,
     results: VecDeque<RenameResult>,
+    dropped_results: u64,
 }
 
 impl NativeRename {
@@ -62,6 +74,12 @@ impl NativeRename {
         if self.is_active() {
             return false;
         }
+        // `append_text` truncates at the buffer limit. Starting a session from
+        // a longer persisted name would commit that truncated name, so such a
+        // session is rejected instead.
+        if old_name.is_some_and(|name| name.len() > MAX_NAME_BYTES) {
+            return false;
+        }
         self.target = Some(target);
         self.name.clear();
         if let Some(old_name) = old_name {
@@ -80,15 +98,15 @@ impl NativeRename {
                 true
             }
             RenameInput::KeyDown { keycode } => match keycode {
-                8 => {
+                KEYCODE_BACKSPACE => {
                     self.name.pop();
                     true
                 }
-                13 | 271 => {
+                KEYCODE_RETURN | KEYCODE_KP_ENTER => {
                     self.finish(true);
                     true
                 }
-                27 => {
+                KEYCODE_ESCAPE => {
                     self.finish(false);
                     true
                 }
@@ -102,7 +120,18 @@ impl NativeRename {
             return;
         }
         for ch in text.chars() {
-            if ch.is_control() {
+            // Control characters, plus invisible formatting/separator code
+            // points that would spoof the displayed or persisted name
+            // (zero-width space, bidi overrides, line separators, BOM).
+            if ch.is_control()
+                || matches!(
+                    ch,
+                    '\u{200b}'..='\u{200f}'
+                        | '\u{2028}'..='\u{202e}'
+                        | '\u{2066}'..='\u{2069}'
+                        | '\u{feff}'
+                )
+            {
                 continue;
             }
             let size = ch.len_utf8();
@@ -128,6 +157,12 @@ impl NativeRename {
         if !commit {
             self.name.clear();
         }
+        if self.results.len() >= MAX_PENDING_RESULTS {
+            // The consumer has stopped draining; drop the oldest result and
+            // count the loss instead of growing without bound.
+            self.results.pop_front();
+            self.dropped_results = self.dropped_results.saturating_add(1);
+        }
         self.results.push_back(RenameResult { target, name });
         true
     }
@@ -137,5 +172,9 @@ impl NativeRename {
     }
     pub fn pending_results(&self) -> usize {
         self.results.len()
+    }
+    /// Results dropped because the queue was full.
+    pub fn dropped_results(&self) -> u64 {
+        self.dropped_results
     }
 }

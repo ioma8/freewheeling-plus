@@ -13,6 +13,9 @@
 //    at /data/data/<package>/files/data, so we extract them there before the
 //    SDL thread (and thus SDL_main) starts.
 //
+//    The copy runs on a background thread and publishes sDataExtracted, which
+//    SDL_main waits for before reading files/data (and reports if it failed).
+//
 // 2. RECORD_AUDIO is a dangerous permission on Android 6+ and must be
 //    requested at runtime; declaring it in the manifest is not enough. The
 //    request is issued here, and the result is published in
@@ -27,7 +30,6 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
 import android.net.Uri;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.Settings;
@@ -50,15 +52,34 @@ public class FreeWheelingActivity extends SDLActivity {
     /** 1 when "all files access" is granted, else 0. Read from native code. */
     public static volatile int sExternalStorageGranted = 0;
 
+    /** 0 = extraction pending, 1 = data/ is complete, 2 = extraction failed.
+     *  Read from native code (SDL_main waits for it before loading the config). */
+    public static volatile int sDataExtracted = 0;
+
+    /** Supplies the delayed "all files access" prompt; kept so it can be
+     *  cancelled when the activity goes away. */
+    private android.os.Handler promptHandler;
+    /** Whether the prompt was already shown for this activity instance. */
+    private boolean promptedExternalStorageAccess = false;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        try {
-            extractDataAssets();
-        } catch (IOException error) {
-            Log.e(TAG, "extracting bundled data/ assets failed: " + error);
-        }
+        // The data/ tree holds several megabytes (soundfont, fonts, XML);
+        // copying it on the UI thread blocks the first launch of every APK
+        // update and can trip the ANR watchdog. It runs on a worker instead,
+        // and SDL_main waits for sDataExtracted before reading files/data.
+        Thread extractor = new Thread(() -> {
+            try {
+                extractDataAssets();
+                sDataExtracted = 1;
+            } catch (IOException error) {
+                Log.e(TAG, "extracting bundled data/ assets failed: " + error);
+                sDataExtracted = 2;
+            }
+        }, "fweelin-assets");
+        extractor.start();
 
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                 == PackageManager.PERMISSION_GRANTED) {
@@ -74,12 +95,40 @@ public class FreeWheelingActivity extends SDLActivity {
 
         // Prompting immediately in onCreate would background the app before
         // SDL has finished starting (the settings activity takes focus and
-        // SDL pauses the main thread). Ask a few seconds later instead.
-        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-            if (sExternalStorageGranted == 0) {
+        // SDL pauses the main thread). Ask a few seconds later instead, from a
+        // handler that is cancelled with the activity and only fires once per
+        // instance.
+        promptHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+        promptHandler.postDelayed(() -> {
+            if (isFinishing() || isDestroyed()) {
+                return;
+            }
+            if (!promptedExternalStorageAccess && sExternalStorageGranted == 0) {
+                promptedExternalStorageAccess = true;
                 promptExternalStorageAccess();
             }
         }, 3000);
+    }
+
+    @Override
+    protected void onDestroy() {
+        // The delayed prompt must not outlive the activity: starting an
+        // activity from a destroyed one throws (and leaks the intent).
+        if (promptHandler != null) {
+            promptHandler.removeCallbacksAndMessages(null);
+            promptHandler = null;
+        }
+        super.onDestroy();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        // Leaving the foreground cancels the pending prompt; the next resume
+        // of *this* instance can still show it if access was not granted.
+        if (promptHandler != null) {
+            promptHandler.removeCallbacksAndMessages(null);
+        }
     }
 
     @Override
@@ -92,11 +141,10 @@ public class FreeWheelingActivity extends SDLActivity {
 
     /** Update sExternalStorageGranted from the current system state. */
     private void refreshExternalStorageAccess() {
-        if (Build.VERSION.SDK_INT >= 30) {
-            sExternalStorageGranted = Environment.isExternalStorageManager() ? 1 : 0;
-        } else {
-            sExternalStorageGranted = 1;
-        }
+        // minSdkVersion is 30+ (see AndroidManifest.xml), so
+        // `Environment.isExternalStorageManager()` is always available: no
+        // version check is needed.
+        sExternalStorageGranted = Environment.isExternalStorageManager() ? 1 : 0;
     }
 
     /** Open Settings so the user can grant "all files access" for saving
@@ -128,7 +176,10 @@ public class FreeWheelingActivity extends SDLActivity {
     private void extractDataAssets() throws IOException {
         File target = new File(getFilesDir(), "data");
         File marker = new File(target, ".extracted-apk-mtime");
-        long apkTime = 0;
+        // -1 is a sentinel that no marker can contain: falling back to 0 made
+        // "lookup failed" look like a valid, matching timestamp, so a stale
+        // tree was accepted as up to date.
+        long apkTime = -1;
         try {
             apkTime = getPackageManager()
                     .getPackageInfo(getPackageName(), 0).lastUpdateTime;
@@ -145,7 +196,8 @@ public class FreeWheelingActivity extends SDLActivity {
                 extractedTime = -1;
             }
         }
-        if (new File(target, "fweelin.xml").isFile() && extractedTime == apkTime) {
+        if (apkTime >= 0 && new File(target, "fweelin.xml").isFile()
+                && extractedTime == apkTime) {
             return; // already extracted for this APK
         }
         copyAssetTree(getAssets(), "data", target);
@@ -156,24 +208,37 @@ public class FreeWheelingActivity extends SDLActivity {
 
     private static void copyAssetTree(AssetManager assets, String path, File out)
             throws IOException {
-        String[] entries = assets.list(path);
-        if (entries != null && entries.length > 0) {
-            // A directory.
-            if (!out.exists() && !out.mkdirs()) {
-                throw new IOException("cannot create directory " + out);
-            }
-            for (String entry : entries) {
-                copyAssetTree(assets, path + "/" + entry, new File(out, entry));
-            }
-        } else {
-            // A file (AssetManager.list on a file returns an empty array).
-            try (InputStream in = assets.open(path);
-                    OutputStream outStream = new FileOutputStream(out)) {
+        // `AssetManager.list` returns an empty array for a file *and* for an
+        // empty directory, so the two cannot be told apart from the listing.
+        // Trying to open the path answers the question: a file opens, a
+        // directory fails with FileNotFoundException.
+        try (InputStream in = assets.open(path)) {
+            try (OutputStream outStream = new FileOutputStream(out)) {
                 byte[] buffer = new byte[16 * 1024];
                 int read;
                 while ((read = in.read(buffer)) > 0) {
                     outStream.write(buffer, 0, read);
                 }
+            }
+            return;
+        } catch (java.io.FileNotFoundException notAFile) {
+            // A directory, handled below.
+        }
+        String[] entries = assets.list(path);
+        if (!out.exists() && !out.mkdirs()) {
+            throw new IOException("cannot create directory " + out);
+        }
+        if (entries == null) {
+            return; // an empty directory: created above, nothing to copy
+        }
+        for (String entry : entries) {
+            try {
+                copyAssetTree(assets, path + "/" + entry, new File(out, entry));
+            } catch (IOException error) {
+                // One unreadable entry must not abort the whole extraction:
+                // the remaining siblings still need to be written, and the
+                // caller records the failure.
+                Log.e(TAG, "cannot extract asset " + path + "/" + entry + ": " + error);
             }
         }
     }

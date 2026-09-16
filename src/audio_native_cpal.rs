@@ -811,7 +811,10 @@ fn common_buffer_limit(
             SupportedBufferSize::Range { min, max } => (*min, *max),
             SupportedBufferSize::Unknown => (1, MAX_CALLBACK_FRAMES as u32),
         })
-        .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
+        // Intersect, not union: the negotiated size has to be valid for every
+        // candidate range, otherwise the device rejects the fixed size at
+        // activation.
+        .reduce(|a, b| (a.0.max(b.0), a.1.min(b.1)))
 }
 
 fn choose_buffer_frames(
@@ -933,15 +936,14 @@ fn playback_callback(
     let mut frame_position = 0u64;
     let mut cpu_sample_count = 0u32;
     let mut cpu_sample_frames = 0u64;
-    let mut cpu_sample_start = None;
+    // Sum of the time actually spent inside the callbacks of the current
+    // window; the wall-clock span would just measure the callback spacing.
+    let mut cpu_sample_nanos = 0u64;
     move |data, _| {
         let _guard = realtime_metrics
             .as_ref()
             .map(|metrics| metrics.enter_callback());
         let started = Instant::now();
-        if cpu_sample_count == 0 {
-            cpu_sample_start = Some(started);
-        }
         if channels == 0 {
             data.fill(0.0);
             return;
@@ -1026,7 +1028,11 @@ fn playback_callback(
                 },
                 transport_rolling: false,
             };
-            (returned.callback.as_mut().expect("callback retained"))(&mut callback);
+            // Never panic on the realtime thread: without a retained processor
+            // the already-silent output buffers are simply left alone.
+            if let Some(processor) = returned.callback.as_mut() {
+                processor(&mut callback);
+            }
             for (frame, destination) in output.chunks_exact_mut(channels).enumerate() {
                 destination[0] = output_left[frame];
                 if channels > 1 {
@@ -1058,12 +1064,9 @@ fn playback_callback(
             .fetch_max(nanos, Ordering::Relaxed);
         cpu_sample_count += 1;
         cpu_sample_frames += frame_count as u64;
+        cpu_sample_nanos += nanos;
         if cpu_sample_count >= 16 {
-            let elapsed = cpu_sample_start
-                .take()
-                .expect("CPU window starts with its first callback")
-                .elapsed()
-                .as_nanos() as f64;
+            let elapsed = cpu_sample_nanos as f64;
             let period = cpu_sample_frames as f64 / sample_rate.max(1) as f64 * 1_000_000_000.0;
             if period > 0.0 {
                 metrics.cpu_load_bits.store(
@@ -1073,6 +1076,7 @@ fn playback_callback(
             }
             cpu_sample_count = 0;
             cpu_sample_frames = 0;
+            cpu_sample_nanos = 0;
         }
     }
 }
@@ -1115,6 +1119,42 @@ mod tests {
     }
 
     #[test]
+    fn buffer_limits_intersect_instead_of_unioning() {
+        let range = |min: u32, max: u32| {
+            cpal::SupportedStreamConfigRange::new(
+                1,
+                48_000,
+                48_000,
+                SupportedBufferSize::Range { min, max },
+                cpal::SampleFormat::F32,
+            )
+        };
+        // Stereo 128..256 plus mono 16..64 share 128..64: no valid size, so
+        // negotiation must fail rather than propose 64 (outside the stereo
+        // range) or 256 (outside the mono range).
+        let stereo = [range(128, 256)];
+        let mono = [range(16, 64)];
+        assert_eq!(
+            choose_buffer_frames(
+                128,
+                common_buffer_limit(&stereo, 48_000),
+                common_buffer_limit(&mono, 48_000)
+            ),
+            None
+        );
+        let stereo = [range(128, 256)];
+        let other = [range(64, 512)];
+        assert_eq!(
+            choose_buffer_frames(
+                64,
+                common_buffer_limit(&stereo, 48_000),
+                common_buffer_limit(&other, 48_000)
+            ),
+            Some(128)
+        );
+    }
+
+    #[test]
     fn capture_overrun_is_bounded_and_observable() {
         let (mut producer, mut consumer) = RingBuffer::new(1);
         let metrics = SharedMetrics::default();
@@ -1152,7 +1192,7 @@ mod tests {
             }),
         );
         assert_eq!(output, [0.25, -0.25]);
-        assert_eq!(realtime.snapshot(48_000, 1).callback_count, 1);
+        assert_eq!(realtime.snapshot().callback_count, 1);
         drop(callback);
         assert!(callback_return.pop().is_ok());
     }
@@ -1194,6 +1234,6 @@ mod tests {
         let realtime = Arc::new(RealtimeMetrics::new(48_000, 256).unwrap());
         let mut callback = stream_error_callback(metrics, Some(Arc::clone(&realtime)));
         callback(cpal::Error::with_message(ErrorKind::Xrun, "test xrun"));
-        assert_eq!(realtime.snapshot(48_000, 256).unexplained_xruns, 1);
+        assert_eq!(realtime.snapshot().unexplained_xruns, 1);
     }
 }

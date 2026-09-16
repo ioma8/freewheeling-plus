@@ -250,6 +250,17 @@ impl Browser {
         }
     }
 
+    /// Replace the whole item list from an external source (bank switching)
+    /// while keeping the cursor invariants: the cursor starts on the first
+    /// non-division item and no selection survives.
+    pub fn replace_items(&mut self, items: Vec<BrowserItem>) {
+        self.items = items;
+        self.current_index = self.first_non_division_index();
+        self.selected_index = None;
+        self.renaming = false;
+        self.last_browsed = self.current_index.is_some();
+    }
+
     pub fn remove_item(&mut self, match_id: i32) -> bool {
         let Some(index) = self
             .items
@@ -259,13 +270,20 @@ impl Browser {
             return false;
         };
         self.items.remove(index);
-        self.current_index = self.current_index.and_then(|current| {
-            if self.items.is_empty() {
-                None
-            } else {
-                Some(current.min(self.items.len() - 1))
-            }
-        });
+        if self.items.is_empty() {
+            self.current_index = None;
+            self.selected_index = None;
+            self.last_browsed = false;
+        } else {
+            // Everything after the removed item shifts down one slot, so the
+            // cursors have to follow the item they were pointing at.
+            let last = self.items.len() - 1;
+            let shift = |slot: Option<usize>| {
+                slot.map(|slot| (if slot > index { slot - 1 } else { slot }).min(last))
+            };
+            self.current_index = shift(self.current_index);
+            self.selected_index = shift(self.selected_index);
+        }
         true
     }
 
@@ -323,6 +341,15 @@ impl Browser {
         if self.items.is_empty() {
             self.current_index = None;
             return;
+        }
+        // `items` and `current_index` are both public, so the index can address
+        // an entry that is gone (e.g. after truncating `items`). The loops below
+        // index through it, so a stale value is re-derived instead of panicking.
+        if self
+            .current_index
+            .is_some_and(|index| index >= self.items.len())
+        {
+            self.current_index = self.first_non_division_index();
         }
 
         if self.current_index.is_none() {
@@ -398,7 +425,11 @@ impl Browser {
             }
         }
 
-        if self.items[cur].item_type == BrowserItemType::Division {
+        if self
+            .items
+            .get(cur)
+            .is_none_or(|item| item.item_type == BrowserItemType::Division)
+        {
             self.current_index = self.first_non_division_index();
         } else {
             self.current_index = Some(cur);
@@ -441,6 +472,11 @@ impl Browser {
                     .map(|path| (path.clone(), item.modified))
             })
             .map(|(path, modified)| self.display_name_for_path(&path, modified));
+        let previous_name = self
+            .items
+            .get(idx)
+            .map(|item| item.name.clone())
+            .unwrap_or_default();
 
         let Some(item) = self.items.get_mut(idx) else {
             return false;
@@ -450,11 +486,14 @@ impl Browser {
             Some(name) => {
                 item.name = name.to_string();
                 if item.name.is_empty() {
-                    if let Some(display) = display_fallback {
-                        item.name = display.name;
-                        item.default_name = true;
-                    } else {
-                        item.default_name = true;
+                    // An item without a filename has no display fallback;
+                    // keeping the previous name avoids an unlabelled item.
+                    match display_fallback {
+                        Some(display) if !display.name.is_empty() => {
+                            item.name = display.name;
+                            item.default_name = true;
+                        }
+                        _ => item.name = previous_name,
                     }
                 } else {
                     item.default_name = false;
@@ -625,12 +664,12 @@ impl Browser {
                 }
                 false
             }
-            Event::PatchBrowserMoveToBank { direction } => {
-                self.move_patch_bank(*direction)
-            }
-            Event::PatchBrowserMoveToBankByIndex { index } => {
-                self.move_patch_bank_to_index(*index)
-            }
+            // The C++ binding for these two events carries no browser id, so
+            // patch bank movement is deliberately broadcast: every patch
+            // browser in the process reacts (there is one per running
+            // interface).
+            Event::PatchBrowserMoveToBank { direction } => self.move_patch_bank(*direction),
+            Event::PatchBrowserMoveToBankByIndex { index } => self.move_patch_bank_to_index(*index),
             Event::BrowserItemBrowsed { browserid } => {
                 if *browserid != self.browser_id {
                     return false;
@@ -701,14 +740,17 @@ impl Browser {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or(filename);
+        // Only loop/scene files are named `<prefix><hash>-<name>`; a patch file
+        // has no hash prefix, so its stem is the name.
         let prefix = match self.item_type {
             BrowserItemType::Loop => "loop-",
             BrowserItemType::Scene => "scene-",
-            BrowserItemType::Patch => "",
             _ => "",
         };
 
-        if let Some(rest) = stem.strip_prefix(prefix) {
+        if !prefix.is_empty()
+            && let Some(rest) = stem.strip_prefix(prefix)
+        {
             let mut parts = rest.splitn(2, '-');
             let hash = parts.next().unwrap_or_default();
             let maybe_name = parts.next().unwrap_or_default();
@@ -839,6 +881,63 @@ mod tests {
         assert!(browser.begin_rename());
         assert!(browser.commit_rename(Some("")));
         assert!(browser.current_item().unwrap().default_name);
+    }
+
+    #[test]
+    fn rename_to_empty_keeps_the_previous_name_without_a_filename() {
+        let mut browser = Browser::new(".", BrowserItemType::Loop);
+        browser.add_item(
+            BrowserItem::new("kept", false, BrowserItemType::Loop),
+            false,
+        );
+        assert!(browser.begin_rename());
+        assert!(browser.commit_rename(Some("")));
+        assert_eq!(browser.current_item().unwrap().name, "kept");
+    }
+
+    #[test]
+    fn removing_an_item_re_points_both_cursors() {
+        let mut browser = Browser::new(".", BrowserItemType::Loop);
+        browser.add_item(
+            BrowserItem::new("a", false, BrowserItemType::Loop).with_match_id(1),
+            false,
+        );
+        browser.add_item(
+            BrowserItem::new("b", false, BrowserItemType::Loop).with_match_id(2),
+            false,
+        );
+        browser.add_item(
+            BrowserItem::new("c", false, BrowserItemType::Loop).with_match_id(3),
+            false,
+        );
+        browser.current_index = Some(2);
+        browser.selected_index = Some(2);
+        assert!(browser.remove_item(1));
+        // The cursor still points at "c" even though it shifted down.
+        assert_eq!(browser.current_item().unwrap().name, "c");
+        assert_eq!(browser.selected_item().unwrap().name, "c");
+        assert!(browser.remove_item(3));
+        // "c" is gone: both cursors follow the item that took its slot.
+        assert_eq!(browser.current_item().unwrap().name, "b");
+        assert_eq!(browser.selected_item().unwrap().name, "b");
+        assert!(browser.remove_item(2));
+        assert_eq!(browser.current_index, None);
+        assert_eq!(browser.selected_index, None);
+        assert!(!browser.last_browsed);
+    }
+
+    #[test]
+    fn patch_display_names_keep_the_file_stem() {
+        let mut browser = Browser::new(".", BrowserItemType::Patch);
+        browser
+            .scan_with(&FakeFs(vec![file("Grand-Piano.sf2"), file("piano.pat")]))
+            .unwrap();
+        let names = browser
+            .items
+            .iter()
+            .map(|item| (item.name.as_str(), item.default_name))
+            .collect::<Vec<_>>();
+        assert_eq!(names, [("Grand-Piano", true), ("piano", true)]);
     }
 
     #[test]

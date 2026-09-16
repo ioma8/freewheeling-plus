@@ -2,4 +2,18 @@
 # SDL 2.0.20's vendored CMake project predates CMake 4's policy floor.
 # Pinning the compatibility policy keeps the fully bundled build reproducible
 # with modern CMake without patching the vendored SDL sources.
-CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+#
+# `force = true`: cargo's `[env]` otherwise leaves an inherited
+# `CMAKE_POLICY_VERSION_MINIMUM` in place, which would silently defeat the pin.
+#
+# This is workspace-global because cargo has no per-dependency `[env]`: the
+# variable has to be in the environment when `sdl2-sys` runs its build script,
+# and `[env]` cannot be scoped to one dependency's build script. The
+# alternatives were considered and rejected: patching the vendored SDL sources
+# would fork a dependency, and `[patch]`-ing `sdl2-sys` would mean maintaining
+# a whole crate. The cost is that any other CMake-based dependency built here
+# inherits the same floor, which can mask a genuinely stale
+# `cmake_minimum_required()`; if a second native dependency starts failing on
+# CMake policy, start by removing this entry.
+# TODO: remove once the bundled SDL declares `cmake_minimum_required(VERSION 3.5)`.
+CMAKE_POLICY_VERSION_MINIMUM = { value = "3.5", force = true }

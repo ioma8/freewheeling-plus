@@ -2,7 +2,18 @@
 name = "freewheeling-plus"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# The edition-2024 minimum is 1.85, but this crate also uses `let` chains
+# (`if let Some(x) = .. && let Some(y) = ..`), which stabilized in 1.88, so 1.88
+# is the real floor. The Docker acceptance image pins the same version, and the
+# `msrv` job in .github/workflows/ci.yml builds the crate with it.
+# `rust-version` constrains this crate's own code only, so a dependency with a
+# higher MSRV can still break users who honour it.
+rust-version = "1.88"
+description = "Rust port of FreeWheeling, a live-looping and audio performance instrument"
+# Same as the original FreeWheeling (see COPYING): the per-file headers grant
+# "version 2 or later", which is what this SPDX id says. It is the
+# authoritative field, so `publish` cannot reject the package as unlicensed.
+license = "GPL-2.0-or-later"
 default-run = "freewheeling-plus"
 
 [lib]
@@ -10,6 +21,10 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
+# `--smoke-test`: the diagnostic core path used by the packaging checks and by
+# `tests/macos_acceptance.rs`. Off by default so a shipped binary cannot run a
+# no-op startup (every phase "succeeds" without touching audio, video or input).
+smoke-test = []
 jack = ["dep:jack"]
 
 # The realtime DSP runs on CoreAudio's 512 KiB IO thread. Debug builds (opt 0)

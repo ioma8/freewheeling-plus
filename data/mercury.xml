@@ -14,11 +14,11 @@
          You can also roll your own special options. -->
     <declare var="VAR_mercurymode" type="char" init="1"/>
 
-    <!-- Variables for breath controller summing with expression pedal -->
+    <!-- Variables for breath controller summing with expression pedal.
+         (The hold-pedal latch and its CC are gone with the disabled binding
+         that used to set them.) -->
     <declare var="VAR_midi_breathcontrol" type="int" init="2"/>
     <declare var="VAR_midi_breathcontrol_val" type="int" init="0"/>
-    <declare var="VAR_midi_breathcontrol_hold" type="int" init="0"/>
-    <declare var="VAR_midi_holdpedal" type="int" init="64"/>
     <declare var="VAR_midi_exppedal" type="int" init="11"/>
     <declare var="VAR_midi_exppedal_val" type="int" init="0"/>
 
@@ -38,7 +38,14 @@
      parameters="var=VAR_footpedal_ctrl_num and maxvalue=1"/>
      -->
 
-    <!-- B3 mode MIDI controller remaps -->
+    <!-- B3 mode MIDI controller remaps.
+
+         Generated events are re-processed as input, so a remap whose output
+         control number is itself a source below would chain further hops (e.g.
+         83 -> 72 -> 80 -> 70 -> 92). The table is therefore built so no output
+         control number appears as a source control number below; when adding a
+         mapping, keep that property or the physical drawbar will fan out into
+         several output controllers. -->
     <binding input="midicontroller" 
      conditions="SYSTEM_cur_patchbank_tag=VAR_b3_patchbank_tag and controlnum=80"
      output="midicontroller" parameters="routethroughpatch=1 and
@@ -85,38 +92,47 @@
                                          controlnum=78 and
                                          controlval=controlval"/>
 
+    <!-- The second table reverses part of the first one (CC70..77 back to the
+         controllers the B3's own drawbars send). It must not re-enter the
+         remapped events: an output above (70/71/72/74/75/76) is also a source
+         here, so without a separate gate a single drawbar move would cascade
+         through several hops (83 -> 72 -> 80 -> 70 -> 92). Gate it on
+         VAR_b3_reverse_maps, which is off by default and can be switched on by
+         a binding when a patch expects the reverse mapping. -->
+    <declare var="VAR_b3_reverse_maps" type="char" init="0"/>
+
     <binding input="midicontroller" 
-     conditions="SYSTEM_cur_patchbank_tag=VAR_b3_patchbank_tag and controlnum=70"
+     conditions="SYSTEM_cur_patchbank_tag=VAR_b3_patchbank_tag and VAR_b3_reverse_maps=1 and controlnum=70"
      output="midicontroller" parameters="routethroughpatch=1 and
                                          controlnum=92 and
                                          controlval=controlval"/>
     <binding input="midicontroller" 
-     conditions="SYSTEM_cur_patchbank_tag=VAR_b3_patchbank_tag and controlnum=71"
+     conditions="SYSTEM_cur_patchbank_tag=VAR_b3_patchbank_tag and VAR_b3_reverse_maps=1 and controlnum=71"
      output="midicontroller" parameters="routethroughpatch=1 and
                                          controlnum=91 and
                                          controlval=controlval"/>
     <binding input="midicontroller" 
-     conditions="SYSTEM_cur_patchbank_tag=VAR_b3_patchbank_tag and controlnum=72"
+     conditions="SYSTEM_cur_patchbank_tag=VAR_b3_patchbank_tag and VAR_b3_reverse_maps=1 and controlnum=72"
      output="midicontroller" parameters="routethroughpatch=1 and
                                          controlnum=80 and
                                          controlval=controlval"/>
     <binding input="midicontroller" 
-     conditions="SYSTEM_cur_patchbank_tag=VAR_b3_patchbank_tag and controlnum=73"
+     conditions="SYSTEM_cur_patchbank_tag=VAR_b3_patchbank_tag and VAR_b3_reverse_maps=1 and controlnum=73"
      output="midicontroller" parameters="routethroughpatch=1 and
                                          controlnum=81 and
                                          controlval=controlval"/>
     <binding input="midicontroller" 
-     conditions="SYSTEM_cur_patchbank_tag=VAR_b3_patchbank_tag and controlnum=74"
+     conditions="SYSTEM_cur_patchbank_tag=VAR_b3_patchbank_tag and VAR_b3_reverse_maps=1 and controlnum=74"
      output="midicontroller" parameters="routethroughpatch=1 and
                                          controlnum=82 and
                                          controlval=controlval"/>
     <binding input="midicontroller" 
-     conditions="SYSTEM_cur_patchbank_tag=VAR_b3_patchbank_tag and controlnum=75"
+     conditions="SYSTEM_cur_patchbank_tag=VAR_b3_patchbank_tag and VAR_b3_reverse_maps=1 and controlnum=75"
      output="midicontroller" parameters="routethroughpatch=1 and
                                          controlnum=21 and
                                          controlval=controlval"/>
     <binding input="midicontroller" 
-     conditions="SYSTEM_cur_patchbank_tag=VAR_b3_patchbank_tag and controlnum=76"
+     conditions="SYSTEM_cur_patchbank_tag=VAR_b3_patchbank_tag and VAR_b3_reverse_maps=1 and controlnum=76"
      output="midicontroller" parameters="routethroughpatch=1 and
                                          controlnum=22 and
                                          controlval=controlval"/>
@@ -125,7 +141,7 @@
      output="midiprogramchange" parameters="routethroughpatch=1 and
                                             programval=40"/>
     <binding input="midicontroller" 
-     conditions="SYSTEM_cur_patchbank_tag=VAR_b3_patchbank_tag and controlnum=77"
+     conditions="SYSTEM_cur_patchbank_tag=VAR_b3_patchbank_tag and VAR_b3_reverse_maps=1 and controlnum=77"
      output="midiprogramchange" parameters="routethroughpatch=1 and
                                             programval=39"/>
 
@@ -149,28 +165,20 @@
                                            controlval=VAR_midi_channelpressure+
                                                       VAR_midi_modwheel_val"/>
 
-    <!-- DISABLED
-
-         For my setup, I press the hold pedal to hold breath controller values
-         constant. I can take a breath without my keyboard playing being
-         affected.
-
-    <binding input="midicontroller" 
-     conditions="VAR_mercurymode=1 and controlnum=VAR_midi_holdpedal"
-     output1="set-variable" parameters1="var=VAR_midi_breathcontrol_hold and
-                                         value=controlval"
-     output2="midicontroller" 
-     parameters2="routethroughpatch=1 and
-                  controlnum=VAR_midi_holdpedal and controlval=controlval"/>
-
-      -->
-
-    <!-- For my setup, I sum breath control (CC2) on top of expression pedal 
+    <!-- For my setup, I sum breath control (CC2) on top of expression pedal
          (CC11) values. This allows me to set a baseline with my pedal, and
-         'breathe' expression on top of it. -->
+         'breathe' expression on top of it.
+
+         The sum is clamped to the 7-bit CC range when it is written out
+         (`midi_value` in runtime_event_actions), so an expression value near
+         the top of the range plus breath saturates instead of wrapping to 0.
+
+         There is deliberately no hold-pedal binding: the upstream block that
+         set VAR_midi_breathcontrol_hold from CC64 was disabled, which left the
+         `VAR_midi_breathcontrol_hold=0` condition below always true. The
+         variable is gone with it. -->
     <binding input="midicontroller" 
-     conditions="VAR_mercurymode=1 and VAR_midi_breathcontrol_hold=0 and
-                 controlnum=VAR_midi_breathcontrol"
+     conditions="VAR_mercurymode=1 and controlnum=VAR_midi_breathcontrol"
      output1="set-variable" parameters1="var=VAR_midi_breathcontrol_val and
                                          value=controlval"
      output2="midicontroller" 
@@ -205,21 +213,24 @@
     <display interfaceid="0" 
      id="DISPLAY_browser_patch" type="browser" font="main" 
      browsetype="BROWSE_patch" pos="0.0,0.96" 
-     xpand="1" xbox="0.1,0.1, 0.9,0.9" xdelay="5.0" show="1">
+     xpand="1" xbox="0.1,0.1, 0.9,0.9" show="1">
 <!--
        <patchbank bypasscc="116" midiport="1" separatechannels="0" suppressprogramchanges="1" patches="patches-receptor-1.xml"/>
        <patchbank bypasscc="116" midiport="1" separatechannels="0" suppressprogramchanges="1" patches="patches-receptor-2.xml"/>
        <patchbank midiport="2" separatechannels="0" patches="patches-synful.xml"/>
 -->
+       <!-- tag="999" is what the B3 remap bindings below match against
+            (VAR_b3_patchbank_tag); without it the whole drawbar remap block is
+            dead configuration. -->
        <patchbank bypasscc="116" bypasstime1="60" bypasstime2="10" midiport="1" separatechannels="0" suppressprogramchanges="1" 
-        patches="patches-channels.xml"/>
+        patches="patches-channels.xml" tag="999"/>
     </display>
 
 <!--
     <display interfaceid="0" 
      id="DISPLAY_browser_patch" type="browser" font="main" 
      browsetype="BROWSE_patch" pos="0.0,0.96" 
-     xpand="1" xbox="0.1,0.1, 0.9,0.9" xdelay="5.0" show="1">
+     xpand="1" xbox="0.1,0.1, 0.9,0.9" show="1">
        <patchbank midiport="2" separatechannels="1" patches="patches2.xml"/>
        <patchbank midiport="1" suppressprogramchanges="1" separatechannels="0" patches="mercury/patches-piano-strings-small.xml"/>
        <patchbank midiport="3" patches="patches3.xml"/>

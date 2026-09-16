@@ -1,12 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <patchlist>
 <patch channel="0" name="B3 Upper"/>
 
-<combi name="B3 Pedal/Lower/Upper">
+<!-- Combi names follow the zone order below (as in the sibling patch lists):
+     Upper, Lower, Pedal. Every zone spans the full keyboard, so the names
+     describe which B3 parts sound together, not a manual split. -->
+<combi name="B3 Upper/Lower/Pedal">
   <zone keyrange="0>127" channel="0"/>
   <zone keyrange="0>127" channel="1"/>
   <zone keyrange="0>127" channel="2"/>
 </combi>
-<combi name="B3 Pedal/Upper">
+<combi name="B3 Upper/Pedal">
   <zone keyrange="0>127" channel="0"/>
   <zone keyrange="0>127" channel="2"/>
 </combi>

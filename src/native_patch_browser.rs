@@ -52,6 +52,13 @@ pub struct SynthAction {
     pub program: u8,
 }
 
+/// Internal-synth soundfont slot used when a patch does not name one.
+///
+/// Port 0 means the internal synth, and the XML patch format (like the MIDI
+/// program-change path in `runtime_event_actions`) addresses the first loaded
+/// soundfont.
+pub const DEFAULT_SOUNDFONT_ID: i32 = 0;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExternalMidiAction {
     pub midi_port: u32,
@@ -208,6 +215,12 @@ fn parse_patch_bank(cfg: &PatchBankConfig) -> Result<Vec<PatchBank>, String> {
                 },
             }
         } else if node.has_tag_name("combi") {
+            // A combi carries no channel of its own, so it must not inherit the
+            // previous patch's channel: it is its own group boundary.
+            if cfg.separate_channels && !items.is_empty() {
+                groups.push(make_bank(cfg, std::mem::take(&mut items)));
+            }
+            channel = None;
             let mut zones = Vec::new();
             for z in node.children().filter(|n| n.has_tag_name("zone")) {
                 let (lo, hi) = parse_range(z.attribute("keyrange").unwrap_or("0>127"))?;
@@ -246,27 +259,60 @@ fn make_bank(cfg: &PatchBankConfig, items: Vec<PatchItem>) -> PatchBank {
         cursor: 0,
     }
 }
-fn parse_attr<T: std::str::FromStr>(n: roxmltree::Node<'_, '_>, k: &str, d: T) -> Result<T, String> {
-    n.attribute(k)
-        .map_or(Ok(d), |v| v.parse().map_err(|_| format!("invalid attribute '{k}': expected {}", std::any::type_name::<T>())))
+fn parse_attr<T>(n: roxmltree::Node<'_, '_>, k: &str, d: T) -> Result<T, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    n.attribute(k).map_or(Ok(d), |v| {
+        v.parse().map_err(|error| {
+            format!(
+                "invalid attribute '{k}' value '{v}': {error} (expected {})",
+                std::any::type_name::<T>()
+            )
+        })
+    })
 }
-fn parse_opt_attr<T: std::str::FromStr>(n: roxmltree::Node<'_, '_>, k: &str) -> Result<Option<T>, String> {
+fn parse_opt_attr<T>(n: roxmltree::Node<'_, '_>, k: &str) -> Result<Option<T>, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
     n.attribute(k)
-        .map(|v| v.parse().map_err(|_| format!("invalid attribute '{k}': expected {}", std::any::type_name::<T>())))
+        .map(|v| {
+            v.parse().map_err(|error| {
+                format!(
+                    "invalid attribute '{k}' value '{v}': {error} (expected {})",
+                    std::any::type_name::<T>()
+                )
+            })
+        })
         .transpose()
 }
+/// Parse a `low>high` MIDI key range.
+///
+/// Rejects extra components, inverted ranges and values outside 0..=127, so a
+/// malformed zone fails configuration instead of silently matching no notes.
 fn parse_range(s: &str) -> Result<(u8, u8), String> {
-    let mut p = s.split('>');
-    let lo = p
+    let mut parts = s.split('>').map(str::trim);
+    let lo: u8 = parts
         .next()
-        .unwrap_or("")
+        .unwrap_or_default()
         .parse()
-        .map_err(|_| "invalid keyrange".to_string())?;
-    let hi = p
+        .map_err(|_| format!("invalid keyrange '{s}': expected '<low>><high>'"))?;
+    let hi: u8 = parts
         .next()
-        .unwrap_or("")
+        .unwrap_or_default()
         .parse()
-        .map_err(|_| "invalid keyrange".to_string())?;
+        .map_err(|_| format!("invalid keyrange '{s}': expected '<low>><high>'"))?;
+    if parts.next().is_some() {
+        return Err(format!("invalid keyrange '{s}': expected '<low>><high>'"));
+    }
+    if lo > hi || hi > 127 {
+        return Err(format!(
+            "invalid keyrange '{s}': expected 0 <= low <= high <= 127"
+        ));
+    }
     Ok((lo, hi))
 }
 
@@ -275,16 +321,25 @@ fn plan_for(bank: &PatchBank, item: &PatchItem) -> PatchActionPlan {
         suppress_program_changes: bank.suppress_program_changes,
         ..Default::default()
     };
-    let mut add = |port, channel, key_range, soundfont_id, b, p| {
+    let mut add = |port: u32,
+                   channel: u8,
+                   key_range: Option<(u8, u8)>,
+                   soundfont_id: Option<i32>,
+                   b: Option<u16>,
+                   p: Option<u8>| {
         out.echo_routing.push(EchoRouting {
             midi_port: port,
             channel,
             key_range,
         });
         if port == 0 {
-            if let (Some(soundfont_id), Some(bank), Some(program)) = (soundfont_id, b, p) {
+            // Port 0 is the internal synth. The XML patch format never names a
+            // soundfont, so an unnamed selection targets the default slot
+            // instead of being dropped (MIDI program changes use the same
+            // slot).
+            if let (Some(bank), Some(program)) = (b, p) {
                 out.synth.push(SynthAction {
-                    soundfont_id,
+                    soundfont_id: soundfont_id.unwrap_or(DEFAULT_SOUNDFONT_ID),
                     channel,
                     bank,
                     program,

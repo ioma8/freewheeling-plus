@@ -6,54 +6,93 @@ on:
   pull_request:
     branches: [master]
 
+concurrency:
+  # A re-pushed branch or PR update supersedes the previous run.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  # CI only reads the repository: the default token would be read-write.
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libjack-jackd2-dev
+      # Installs the system dependencies and caches ~/.cargo + target.
+      - uses: ./.github/actions/setup-rust
       - name: cargo check
         run: cargo check --all-targets
       - name: cargo check with JACK
         run: cargo check --all-targets --features jack
+      - name: cargo check with the smoke-test harness
+        run: cargo check --all-targets --features smoke-test
+
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+        with:
+          packages: libasound2-dev
+          cache-suffix: msrv
+      - name: Install the advertised minimum toolchain
+        run: rustup toolchain install "$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml | head -1)" --profile minimal
+      - name: cargo check on the MSRV toolchain
+        run: |
+          MSRV=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          cargo "+$MSRV" check --all-targets
 
   clippy:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libjack-jackd2-dev
+      # Installs the system dependencies and caches ~/.cargo + target.
+      - uses: ./.github/actions/setup-rust
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --features smoke-test -- -D warnings
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libjack-jackd2-dev
+      # Installs the system dependencies and caches ~/.cargo + target.
+      - uses: ./.github/actions/setup-rust
       - name: cargo test
-        run: cargo test
+        run: cargo test --features smoke-test
 
   linux-package:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - uses: ./.github/actions/setup-rust
+        with:
+          packages: libasound2-dev
       - name: Validate Linux packaging scripts
         run: scripts/linux/validate.sh
       - name: Build reproducible Linux release archive
         run: |
-          FWP_VERSION=0.1.0 FWP_DIST_DIR="$PWD/dist" scripts/linux/package-release.sh
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test -n "$VERSION"
+          FWP_VERSION="$VERSION" FWP_DIST_DIR="$PWD/dist" scripts/linux/package-release.sh
           ls -l dist/
       - name: Verify archive layout and checksum
         run: |
-          ARCHIVE=$(ls dist/freewheeling-plus-0.1.0-*.tar.gz | head -1)
+          # Match the archive by its stable prefix: repeating the version here
+          # stopped matching as soon as Cargo.toml was bumped.
+          set -o pipefail
+          ARCHIVE=$(ls dist/freewheeling-plus-*.tar.gz)
+          test -n "$ARCHIVE"
+          [ "$(printf '%s\n' "$ARCHIVE" | wc -l)" -eq 1 ] || { echo "expected exactly one archive" >&2; exit 1; }
           sha256sum -c "${ARCHIVE}.sha256"
           tar -tzf "$ARCHIVE" | grep -E 'bin/freewheeling-plus$'
           tar -tzf "$ARCHIVE" | grep -q 'share/freewheeling/data/fweelin.xml'
@@ -64,10 +103,12 @@ jobs:
 
   linux-virtual:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libjack-jackd2-dev jackd2 jack-tools
+      - uses: ./.github/actions/setup-rust
+        with:
+          packages: libasound2-dev libjack-jackd2-dev jackd2 jack-tools
       - name: Run virtual JACK acceptance workflow
         run: FWP_REALTIME_ACCEPTANCE_SECONDS=3 scripts/linux/run-virtual-workflow.sh
       - name: Show acceptance attestation
@@ -79,36 +120,65 @@ jobs:
 
   macos:
     runs-on: macos-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('rust-toolchain*') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-
+            ${{ runner.os }}-cargo-
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --features smoke-test -- -D warnings
       - name: cargo test
-        run: cargo test
+        run: cargo test --features smoke-test
 
   windows:
     runs-on: windows-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('rust-toolchain*') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-
+            ${{ runner.os }}-cargo-
       - name: cargo check
         run: cargo check --all-targets
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --features smoke-test -- -D warnings
       - name: cargo test
-        run: cargo test
+        run: cargo test --features smoke-test
 
   android:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build pkg-config libasound2-dev openjdk-17-jdk-headless
+      - uses: ./.github/actions/setup-rust
+        with:
+          packages: cmake ninja-build pkg-config libasound2-dev openjdk-17-jdk-headless
+          # The APK builds for an Android triple: its target tree is not the
+          # Linux one this key would otherwise restore.
+          cache-suffix: android
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
+        # Third-party action pinned to a commit (v4.0.1): a retargeted tag
+        # would otherwise run arbitrary code with this job's token.
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699
       - name: Install Android NDK
         run: sdkmanager --install "ndk;28.2.13676358" --sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
       - name: Install cargo-apk
-        run: cargo install cargo-apk --locked
+        run: cargo install cargo-apk --version 0.9.6 --locked
       - name: Add Android Rust target
         run: rustup target add aarch64-linux-android
       - name: Build Android APK

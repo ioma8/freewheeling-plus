@@ -19,10 +19,26 @@ pub struct RenderMetrics {
     pub scale_y: f32,
 }
 
+/// Frames the worker may queue before `submit` blocks.
+///
+/// A frame carries a full pixel buffer, so the queue is deliberately tiny:
+/// video only needs the newest frame, and an unbounded queue would grow by
+/// megabytes per frame whenever the backend falls behind.
+pub const MAX_PENDING_FRAMES: usize = 4;
+
+/// Accessor for the recorded `present` failure.
 impl RenderMetrics {
     /// Construct from unsigned sizes (from window metrics where 0 = unset).
     pub fn from_sizes(logical: (u32, u32), drawable: (u32, u32)) -> Self {
-        Self::new(logical.0 as i32, logical.1 as i32, drawable.0 as i32, drawable.1 as i32)
+        // `new` treats non-positive sizes as "unset", so a huge (or wrapped)
+        // size must not become a negative sentinel.
+        let clamp = |value: u32| i32::try_from(value).unwrap_or(i32::MAX);
+        Self::new(
+            clamp(logical.0),
+            clamp(logical.1),
+            clamp(drawable.0),
+            clamp(drawable.1),
+        )
     }
 
     /// Construct from possibly-negative sizes (negative = unset sentinel).
@@ -117,12 +133,14 @@ enum Command {
 }
 
 pub struct VideoIO<B: VideoBackend> {
-    tx: Option<mpsc::Sender<Command>>,
+    tx: Option<mpsc::SyncSender<Command>>,
     thread: Option<JoinHandle<()>>,
     active: Arc<AtomicBool>,
     mode: Arc<Mutex<VideoMode>>,
     metrics: Arc<Mutex<RenderMetrics>>,
     video_time: Arc<Mutex<f64>>,
+    /// Why the worker stopped, set when a `present` failed.
+    present_failure: Arc<Mutex<Option<String>>>,
     backend: Option<B>,
 }
 
@@ -141,6 +159,7 @@ impl<B: VideoBackend> VideoIO<B> {
                 windowed_size,
             ))),
             video_time: Arc::new(Mutex::new(0.0)),
+            present_failure: Arc::new(Mutex::new(None)),
             backend: Some(backend),
         }
     }
@@ -152,35 +171,69 @@ impl<B: VideoBackend> VideoIO<B> {
             );
         }
         if self.active.swap(true, Ordering::AcqRel) {
-            return Ok(());
+            // Reporting success would imply the new renderer was installed; it
+            // is dropped here instead.
+            return Err("video is already active; the renderer was not replaced".to_string());
         }
-        let (tx, rx) = mpsc::channel();
+        // Bounded so a slow backend applies back-pressure instead of queueing
+        // multi-megabyte frames until the process runs out of memory.
+        let (tx, rx) = mpsc::sync_channel(MAX_PENDING_FRAMES);
         let active = Arc::clone(&self.active);
         let metrics = Arc::clone(&self.metrics);
+        let metrics_ready = Arc::clone(&self.metrics);
         let time = Arc::clone(&self.video_time);
+        let present_failure = Arc::clone(&self.present_failure);
+        *present_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         let mode = *self.mode.lock().unwrap_or_else(|e| e.into_inner());
-        let mut backend = self
-            .backend
-            .take()
-            .ok_or("video backend already active".to_string())?;
-        let opened = match backend.open(mode) {
-            Ok(metrics) => metrics,
-            Err(error) => {
-                self.backend = Some(backend);
+        let mut backend = match self.backend.take() {
+            Some(backend) => backend,
+            None => {
+                // `active` was set above; without a backend there is no worker
+                // either, so the flag must not stay set.
                 self.active.store(false, Ordering::Release);
-                return Err(error);
+                return Err(
+                    "video backend was already consumed by a previous activate/close".to_string(),
+                );
             }
         };
-        *metrics.lock().unwrap_or_else(|e| e.into_inner()) = opened;
+        // Every backend call runs on the worker thread: window and GL contexts
+        // are thread-affine, so `open` must not happen on the caller's thread.
+        let (ready_tx, ready_rx) = mpsc::channel();
         self.tx = Some(tx);
         self.thread = Some(thread::spawn(move || {
             let start = Instant::now();
+            let open_result = backend.open(mode);
+            if let Err(error) = open_result {
+                // Hand the backend back so a retry can reuse it; the open
+                // failure restored the previous contract.
+                let _ = ready_tx.send(Err((error, backend)));
+                active.store(false, Ordering::Release);
+                return;
+            }
+            if let Ok(opened) = open_result
+                && ready_tx.send(Ok(opened)).is_err()
+            {
+                // The caller gave up waiting: nothing to present.
+                backend.close();
+                active.store(false, Ordering::Release);
+                return;
+            }
             while active.load(Ordering::Acquire) {
                 match rx.recv() {
                     Ok(Command::Frame(mut frame)) => {
                         renderer(&mut frame);
-                        if backend.present(&frame).is_err() {
+                        if let Err(error) = backend.present(&frame) {
+                            // Report why video stopped (and stop immediately):
+                            // `is_active` alone cannot tell the caller.
+                            eprintln!("FreeWheeling: video present failed: {error}");
+                            *present_failure
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                                Some(error);
                             active.store(false, Ordering::Release);
+                            break;
                         }
                         *time.lock().unwrap_or_else(|e| e.into_inner()) = start.elapsed().as_secs_f64();
                     }
@@ -197,8 +250,32 @@ impl<B: VideoBackend> VideoIO<B> {
             backend.close();
             active.store(false, Ordering::Release);
         }));
-        Ok(())
+        // Wait for `open` so the caller still learns about a failure.
+        match ready_rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Ok(opened)) => {
+                *metrics_ready.lock().unwrap_or_else(|e| e.into_inner()) = opened;
+                Ok(())
+            }
+            Ok(Err((error, backend))) => {
+                self.backend = Some(backend);
+                self.tx = None;
+                self.thread = None;
+                self.active.store(false, Ordering::Release);
+                Err(error)
+            }
+            Err(error) => {
+                self.tx = None;
+                self.thread = None;
+                self.active.store(false, Ordering::Release);
+                Err(format!("video backend did not open in time: {error}"))
+            }
+        }
     }
+    /// Queue a frame for presentation.
+    ///
+    /// Blocks when the worker is `MAX_PENDING_FRAMES` behind: dropping the
+    /// frame instead would show stale video while a growing queue would be
+    /// unbounded.
     pub fn submit(&self, frame: VideoFrame) -> Result<(), String> {
         self.tx
             .as_ref()
@@ -211,17 +288,32 @@ impl<B: VideoBackend> VideoIO<B> {
             fullscreen,
             windowed_size: self.mode.lock().unwrap_or_else(|e| e.into_inner()).windowed_size,
         };
-        *self.mode.lock().unwrap_or_else(|e| e.into_inner()) = mode;
         let (tx, rx) = mpsc::channel();
         self.tx
             .as_ref()
             .ok_or("video is not active".to_string())?
             .send(Command::Mode(mode, tx))
             .map_err(|e| e.to_string())?;
-        rx.recv().map_err(|e| e.to_string())?
+        // A worker that exited (or is stuck) must not hang the caller.
+        let metrics = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| format!("video mode change timed out or worker exited: {e}"))??;
+        // Cache the mode only after the worker confirmed it, otherwise
+        // `fullscreen()` and the next `activate` diverge from the backend.
+        *self.mode.lock().unwrap_or_else(|e| e.into_inner()) = mode;
+        Ok(metrics)
     }
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::Acquire)
+    }
+
+    /// Why the video worker stopped, or `None` while it is running or was
+    /// stopped deliberately.
+    pub fn present_failure(&self) -> Option<String> {
+        self.present_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
     pub fn video_time(&self) -> f64 {
         *self.video_time.lock().unwrap_or_else(|e| e.into_inner())

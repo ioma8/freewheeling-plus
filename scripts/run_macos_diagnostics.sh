@@ -16,15 +16,22 @@ OUTPUT=${FWEELIN_DIAGNOSTIC_OUTPUT:-"${TMPDIR:-/tmp}/freewheeling-diagnostic-$(d
 
 case "$DURATION" in
   ''|*[!0-9]*) echo "error: FWEELIN_DIAGNOSTIC_SECONDS must be an integer" >&2; exit 1 ;;
+  # `08` is an invalid octal literal in some `test`/`sleep` implementations.
+  0*[0-9]*) echo "error: FWEELIN_DIAGNOSTIC_SECONDS must not have leading zeros" >&2; exit 1 ;;
 esac
 [ "$DURATION" -gt 0 ] || { echo "error: diagnostic duration must be positive" >&2; exit 1; }
 [ -x "$APP" ] || { echo "error: source-tree binary is missing or not executable: $APP" >&2; exit 1; }
 [ -f "$DATA/fweelin.xml" ] || { echo "error: data directory lacks fweelin.xml: $DATA" >&2; exit 1; }
-case "$OUTPUT/" in
-  "$ROOT/acceptance-evidence/"*) echo "error: diagnostic output must not be acceptance evidence" >&2; exit 1 ;;
-esac
-
 mkdir -p "$OUTPUT"
+# Compare canonical paths: `$ROOT/./acceptance-evidence` (or a pre-existing
+# symlink into it) would otherwise bypass the guard while resolving to the
+# same directory.
+OUTPUT_REAL=$(cd -- "$OUTPUT" && pwd -P)
+EVIDENCE_REAL=$(cd -- "$ROOT/acceptance-evidence" 2>/dev/null && pwd -P \
+  || printf '%s' "$ROOT/acceptance-evidence")
+case "$OUTPUT_REAL/" in
+  "$EVIDENCE_REAL/"*) echo "error: diagnostic output must not be acceptance evidence" >&2; exit 1 ;;
+esac
 echo "Diagnostic output directory: $OUTPUT"
 APP_LOG="$OUTPUT/application.log"
 COREAUDIO_LOG="$OUTPUT/coreaudio-unified-log.txt"
@@ -60,14 +67,17 @@ trap cleanup EXIT HUP INT TERM
   echo "=== CoreAudio device inventory ==="
   system_profiler SPAudioDataType -detailLevel full 2>&1 || true
   echo
-  echo "=== Audio MIDI system snapshot ==="
-  system_profiler SPUSBDataType 2>&1 || true
+  echo "=== Audio device and USB snapshot ==="
+  system_profiler SPAudioDataType SPUSBDataType 2>&1 || true
 } >"$OUTPUT/coreaudio-devices.txt"
 
 # Unified logging is best-effort: older systems or restricted terminals may
 # not expose matching records. The application log remains the primary source.
 if command -v log >/dev/null 2>&1; then
-  log stream --style compact --level debug --timeout "$DURATION" \
+  # `--level debug` requires root: without it this command writes an error to
+  # the log file, which the summary then reports as `unavailable`.
+  # The window covers the application run plus a short tail.
+  log stream --style compact --level debug --timeout "$((DURATION + 5))" \
     --predicate '(eventMessage CONTAINS[c] "CoreAudio" OR eventMessage CONTAINS[c] "CPAL" OR eventMessage CONTAINS[c] "callback" OR eventMessage CONTAINS[c] "audio" OR eventMessage CONTAINS[c] "SDL")' \
     >"$COREAUDIO_LOG" 2>&1 &
   LOG_PID=$!
@@ -86,10 +96,21 @@ FWEELIN_DATADIR="$DATA" FWEELIN_DIAGNOSTICS=1 \
 APP_PID=$!
 sleep "$DURATION"
 kill -TERM "$APP_PID" 2>/dev/null || true
-wait "$APP_PID" 2>/dev/null || true
+APP_STATUS=0
+wait "$APP_PID" 2>/dev/null || APP_STATUS=$?
 APP_PID=
-wait "${LOG_PID:-}" 2>/dev/null || true
-LOG_PID=
+if [ -n "${LOG_PID:-}" ]; then
+  if ! wait "$LOG_PID" 2>/dev/null; then
+    # `--level debug` needs root; the command then writes its error text to the
+    # file, which must not be classified as captured evidence.
+    {
+      echo "unavailable: the unified log capture failed (run with sudo for --level debug)"
+      cat "$COREAUDIO_LOG"
+    } >"$COREAUDIO_LOG.failed"
+    mv "$COREAUDIO_LOG.failed" "$COREAUDIO_LOG"
+  fi
+  LOG_PID=
+fi
 
 if grep -Eiq 'SDL|input|keyboard|mouse|joystick|event' "$APP_LOG"; then
   grep -Ei 'SDL|input|keyboard|mouse|joystick|event' "$APP_LOG" >"$SDL_LOG" || true
@@ -112,10 +133,16 @@ crash_count=0
 for crash_dir in "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports; do
   if [ -d "$crash_dir" ]; then
     while IFS= read -r report; do
-      cp "$report" "$CRASH_REPORTS/" 2>/dev/null || true
-      crash_count=$((crash_count + 1))
+      # Only reports for this binary: the crash directory also holds every
+      # other application's reports, which are not this script's to copy.
+      if grep -qil freewheeling "$report" 2>/dev/null; then
+        cp "$report" "$CRASH_REPORTS/" 2>/dev/null || true
+        crash_count=$((crash_count + 1))
+      fi
     done <<EOF
-$(find "$crash_dir" -type f -newer "$CRASH_MARKER" -name '*.crash' -print 2>/dev/null || true)
+$(find "$crash_dir" -type f -newer "$CRASH_MARKER" \
+    \( -name '*.crash' -o -name '*.ips' -o -name '*.diag' -o -name '*.panic' \) \
+    -print 2>/dev/null || true)
 EOF
   fi
 done
@@ -126,8 +153,8 @@ rm -f "$CRASH_MARKER"
 
 cat >>"$SUMMARY" <<EOF
 finished=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-application_exit_observed=yes
-coreaudio_unified_log=$(if [ -s "$COREAUDIO_LOG" ]; then echo captured-or-error-text; else echo unavailable; fi)
+application_exit_status=$APP_STATUS
+coreaudio_unified_log=$(if grep -q '^unavailable:' "$COREAUDIO_LOG" 2>/dev/null; then echo unavailable; elif [ -s "$COREAUDIO_LOG" ]; then echo captured; else echo unavailable; fi)
 sdl_input_diagnostics=$(if grep -q '^unavailable:' "$SDL_LOG"; then echo unavailable; else echo lines-extracted-from-application-log; fi)
 audio_callback_diagnostics=$(if grep -q '^unavailable:' "$CALLBACK_LOG"; then echo unavailable; else echo lines-extracted-from-application-log; fi)
 rust_stderr_rejections=$(if grep -q '^unavailable:' "$RUST_REJECTION_LOG"; then echo unavailable; else echo lines-extracted-from-application-log; fi)

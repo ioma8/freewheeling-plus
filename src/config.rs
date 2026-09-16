@@ -140,11 +140,14 @@ fn apply_math_operation(left: &UserVariable, right: &UserVariable, op: char) -> 
     } else {
         let lhs = left.as_i32();
         let rhs = right.as_i32();
+        // A malformed configuration expression must not abort the process: a
+        // zero divisor and an overflowing operation both fall back to the left
+        // operand.
         let val = match op {
-            '/' => lhs / rhs,
-            '*' => lhs * rhs,
-            '+' => lhs + rhs,
-            '-' => lhs - rhs,
+            '/' if rhs != 0 => lhs / rhs,
+            '*' => lhs.saturating_mul(rhs),
+            '+' => lhs.saturating_add(rhs),
+            '-' => lhs.saturating_sub(rhs),
             _ => lhs,
         };
         out.set_int(val);
@@ -346,6 +349,11 @@ pub struct FontConfig {
     pub size: u32,
 }
 
+/// Bounds applied to the configured `videodelay` (milliseconds).
+pub const VIDEO_DELAY_MIN_MS: u32 = 1;
+/// Upper bound: a delay above this makes the UI look frozen.
+pub const VIDEO_DELAY_MAX_MS: u32 = 1_000;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct VideoConfig {
     pub width: u32,
@@ -421,6 +429,50 @@ impl FloConfig {
         }
     }
 
+    /// Reset every field a loaded document may set back to its startup
+    /// default, including the interface list it discovered.
+    ///
+    /// `parse`/`parse_string` on an existing instance must not keep values
+    /// from the previous document for attributes the new one omits: such a
+    /// value is no longer distinguishable from a default. `variables`
+    /// intentionally survives (the startup pass declares them before parsing)
+    /// and so do the preallocation/memory constants, which are not
+    /// configuration input.
+    pub fn reset_transient_state(&mut self) {
+        self.reset_document_state();
+        self.interfaces.clear();
+    }
+
+    /// Per-document part of [`Self::reset_transient_state`].
+    ///
+    /// Kept separate because the main document's interface list is collected
+    /// before the documents are applied.
+    fn reset_document_state(&mut self) {
+        self.video = VideoConfig::default();
+        self.paramsets.clear();
+        self.patch_banks.clear();
+        self.fluidsynth = FluidSynthConfig::default();
+        self.midi_outputs = 1;
+        self.midi_sync_outputs.clear();
+        self.midi_transpose = 0;
+        self.external_audio_input_stereo.clear();
+        self.audio_input_monitoring.clear();
+        self.stream_inputs.clear();
+        self.stream_final_mix = false;
+        self.stream_loop_mix = false;
+        self.max_play_volume = 0.0;
+        self.max_limiter_gain = 1.0;
+        self.limiter_threshold = 0.9;
+        self.limiter_release_rate = 0.000_020;
+        self.vorbis_encode_quality = 0.5;
+        self.fader_max_db = 12.0;
+        self.loop_output_format = crate::block::Codec::Vorbis;
+        self.stream_output_format = crate::block::Codec::Vorbis;
+        self.preferred_audio_buffer_frames = 128;
+        self.library_dir = format!("{}/.fweelin/fw-lib", default_home_dir());
+        self.binding_registry = BindingRegistry::default();
+    }
+
     fn default_data_dir() -> String {
         if cfg!(target_os = "macos") {
             // For macOS, check bundle Resources first, then fall back
@@ -460,6 +512,10 @@ impl FloConfig {
         Self::build_config_path(&Self::user_config_dir_from_home(home), cfgname)
     }
 
+    /// First unused `<path>.backup.<n>` name.
+    ///
+    /// Beyond the numbered range a timestamped name is used so an existing
+    /// backup is never overwritten.
     pub fn next_backup_path(existing_path: &Path) -> PathBuf {
         for idx in 1u16..=255 {
             let candidate = PathBuf::from(format!("{}.backup.{}", existing_path.display(), idx));
@@ -467,7 +523,14 @@ impl FloConfig {
                 return candidate;
             }
         }
-        PathBuf::from(format!("{}.backup.255", existing_path.display()))
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0);
+        PathBuf::from(format!(
+            "{}.backup.{stamp}",
+            existing_path.display()
+        ))
     }
 
     pub fn copy_config_file_in_paths(
@@ -585,7 +648,10 @@ impl FloConfig {
     }
 
     pub fn copy_config_file(&self, cfgname: &str, copyall: bool) -> Result<(), String> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        // Same home resolution as `FloConfig::new`/`prepare_load_config_file`,
+        // so the copied file lands where the loader looks for it (Android has
+        // no `HOME` in the environment).
+        let home = default_home_dir();
         self.copy_config_file_in_paths(
             cfgname,
             copyall,
@@ -650,7 +716,7 @@ impl FloConfig {
                         CoreDataType::Variable
                         | CoreDataType::VariableRef
                         | CoreDataType::Invalid => {
-                            ConfigVariableValue::Raw(value.get_value().try_into().unwrap())
+                            ConfigVariableValue::Raw(value.data)
                         }
                     },
                     is_system: value.is_system_variable(),
@@ -663,17 +729,31 @@ impl FloConfig {
         }
     }
 
-    /// Set a variable by name and float value
+    /// Set a variable by name and float value.
+    ///
+    /// Keeps the `is_system` flag of an existing entry, like
+    /// [`FloConfig::set_int_variable`].
     pub fn set_float_variable(&mut self, name: &str, value: f32) {
         let mut v = UserVariable::new();
         v.set_float(value);
+        if let Some(existing) = self.variables.get(name) {
+            v.is_system = existing.is_system_variable();
+        }
         self.variables.insert(name.to_string(), v);
     }
 
-    /// Set a variable by name and int value
+    /// Set a variable by name and int value.
+    ///
+    /// Replacing an existing entry keeps its `is_system` flag: overwriting a
+    /// system variable would otherwise silently demote it, and the renderer
+    /// snapshot (which reports the flag) would describe a different variable
+    /// than the one the runtime publishes.
     pub fn set_int_variable(&mut self, name: &str, value: i32) {
         let mut v = UserVariable::new();
         v.set_int(value);
+        if let Some(existing) = self.variables.get(name) {
+            v.is_system = existing.is_system_variable();
+        }
         self.variables.insert(name.to_string(), v);
     }
 
@@ -766,10 +846,7 @@ impl FloConfig {
 
     fn load_documents(&mut self, documents: Vec<(i32, PathBuf, String)>) -> Result<(), String> {
         let mut registry = BindingRegistry::default();
-        self.video = VideoConfig::default();
-        self.paramsets.clear();
-        self.patch_banks.clear();
-        self.fluidsynth = FluidSynthConfig::default();
+        self.reset_document_state();
         // C++ performs a declaration pass over every interface before bindings.
         for (_, _, xml) in &documents {
             let doc = roxmltree::Document::parse(xml).map_err(|e| e.to_string())?;
@@ -927,12 +1004,21 @@ impl FloConfig {
                         }
                         "resolution" => {
                             let v = parse_pair(attr.value())?;
-                            self.video.width = v.0 as u32;
-                            self.video.height = v.1 as u32;
+                            self.video.width =
+                                u32::try_from(v.0).map_err(|_| "invalid resolution width")?;
+                            self.video.height =
+                                u32::try_from(v.1).map_err(|_| "invalid resolution height")?;
                         }
                         "videodelay" => {
-                            self.video.delay_ms =
-                                attr.value().parse().map_err(|_| "invalid videodelay")?
+                            // Clamped: 0 would spin the render loop and
+                            // saturate a core, while a value above a second
+                            // makes the UI look frozen. A hand-edited config
+                            // must not be able to do either.
+                            self.video.delay_ms = attr
+                                .value()
+                                .parse::<u32>()
+                                .map_err(|_| "invalid videodelay")?
+                                .clamp(VIDEO_DELAY_MIN_MS, VIDEO_DELAY_MAX_MS)
                         }
                         "audiobuffersize" => {
                             let value = attr
@@ -2831,7 +2917,21 @@ fn expand_external_entities(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Str
         xml.replace_range(start..end, "");
     }
     for (name, file) in entities {
-        let included = expand_external_entities(&base.join(file), stack)?;
+        // Entity expansion is deliberately limited to files inside the config
+        // directory: the loader reads the named file itself (no general entity
+        // expansion happens, and nothing is fetched over the network), and a
+        // `..` in the name must not pull in an unrelated file.
+        let requested = base.join(&file);
+        let canonical = requested
+            .canonicalize()
+            .map_err(|e| format!("Failed to include '{file}': {e}"))?;
+        let root = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+        if !canonical.starts_with(&root) {
+            return Err(format!(
+                "Refusing to include '{file}' from outside the configuration directory"
+            ));
+        }
+        let included = expand_external_entities(&canonical, stack)?;
         xml = xml.replace(&format!("&{name};"), &included);
     }
     stack.pop();
@@ -2886,6 +2986,64 @@ fn condition_values_match(left: &UserVariable, right: &UserVariable) -> bool {
 }
 
 #[cfg(test)]
+mod expression_tests {
+    use super::*;
+
+    fn variable(cfg: &FloConfig, name: &str) -> UserVariable {
+        cfg.get_variable(name)
+            .cloned()
+            .unwrap_or_else(|| panic!("variable {name} is declared"))
+    }
+
+    #[test]
+    fn integer_division_truncates_and_float_division_does_not() {
+        // The shipped interfaces rely on this: `VAR_slide_speed/2` truncates
+        // (integer math), while `/2.0` keeps the half step. A continuous
+        // control written as `controlval/127` would collapse values 0..126
+        // to 0, which is why the data files use float divisors.
+        let mut cfg = FloConfig::new();
+        cfg.set_int_variable("VAR_probe", 5);
+        let expression = cfg.parse_expression("VAR_probe/2", false);
+        let result = expression.evaluate(&cfg);
+        assert_eq!(result.as_i32(), 2, "integer division must truncate");
+        assert_eq!(
+            result.get_type(),
+            CoreDataType::Int,
+            "integer operands must stay integral"
+        );
+
+        let halves = cfg.parse_expression("VAR_probe/2.0", false);
+        let result = halves.evaluate(&cfg);
+        assert_eq!(result.as_f32(), 2.5);
+        assert_eq!(result.get_type(), CoreDataType::Float);
+    }
+
+    #[test]
+    fn a_zero_divisor_leaves_the_value_alone() {
+        let mut cfg = FloConfig::new();
+        cfg.set_int_variable("VAR_probe", 7);
+        cfg.set_int_variable("VAR_zero", 0);
+        let expression = cfg.parse_expression("VAR_probe/VAR_zero", false);
+        assert_eq!(expression.evaluate(&cfg).as_i32(), 7);
+    }
+
+    #[test]
+    fn replacing_a_variable_keeps_its_system_flag() {
+        let mut cfg = FloConfig::new();
+        let mut system = UserVariable::new();
+        system.set_int(1);
+        system.is_system = true;
+        cfg.set_variable("SYSTEM_probe", system);
+        cfg.set_int_variable("SYSTEM_probe", 9);
+        assert_eq!(variable(&cfg, "SYSTEM_probe").as_i32(), 9);
+        assert!(
+            variable(&cfg, "SYSTEM_probe").is_system_variable(),
+            "a replaced system variable must stay a system variable"
+        );
+    }
+}
+
+#[cfg(test)]
 mod authoritative_xml_tests {
     use super::*;
 
@@ -2911,7 +3069,9 @@ mod authoritative_xml_tests {
         assert_eq!(cfg.stream_inputs, vec![false, true, true, false]);
         assert!(!cfg.stream_final_mix);
         assert!(cfg.stream_loop_mix);
-        assert_eq!(cfg.max_play_volume, 0.0);
+        // The shipped default caps loop gain at unity (the safety net the
+        // comment in data/basics.xml documents); 0 would disable the cap.
+        assert_eq!(cfg.max_play_volume, 1.0);
         assert_eq!(cfg.max_limiter_gain, 1.0);
         assert_eq!(cfg.limiter_threshold, 0.75);
         assert_eq!(cfg.limiter_release_rate, 0.000_020);
@@ -2924,9 +3084,12 @@ mod authoritative_xml_tests {
         assert!(cfg.get_variable("VAR_overdubfeedback").is_some());
         assert!(!cfg.binding_registry.tables.is_empty());
         assert!(cfg.fluidsynth.stereo);
-        assert_eq!(cfg.fluidsynth.interpolation, 1);
+        // The shipped defaults: fourth-order interpolation (the only value the
+        // backend accepts) and no global detune, so the synth is in tune with
+        // recorded loops and external gear.
+        assert_eq!(cfg.fluidsynth.interpolation, 4);
         assert_eq!(cfg.fluidsynth.channel, 0);
-        assert!((cfg.fluidsynth.tuning_cents + 31.76).abs() < 0.001);
+        assert_eq!(cfg.fluidsynth.tuning_cents, 0.0);
         assert!(cfg
             .fluidsynth
             .settings

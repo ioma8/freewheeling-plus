@@ -22,8 +22,8 @@ pub enum DrawOp {
     /// Legacy loop scope: a peak/average strip circularly mapped by the
     /// platform renderer. `position` rotates the strip with playback.
     LoopScope(
-        Vec<f32>,
-        Vec<f32>,
+        std::sync::Arc<[f32]>,
+        std::sync::Arc<[f32]>,
         u16,
         i32,
         i32,
@@ -35,7 +35,9 @@ pub enum DrawOp {
         i32,
         i32,
     ),
-    Image(Vec<u8>, u32, u32, i32, i32, i32, i32),
+    /// Logos and other static RGBA buffers are shared: a per-frame clone of a
+    /// full-frame buffer would copy megabytes for nothing.
+    Image(std::sync::Arc<Vec<u8>>, u32, u32, i32, i32, i32, i32),
 }
 pub trait Renderer {
     fn draw(&mut self, op: DrawOp);
@@ -67,7 +69,12 @@ impl FloDisplay {
         self.show = v
     }
 }
-pub trait Display {
+/// A drawable element of the scene.
+///
+/// `Send` is part of the contract: the scene is rendered on the video worker
+/// thread, so every display must be movable to it. Requiring it here makes the
+/// property compiler-enforced instead of asserted by a manual `unsafe impl`.
+pub trait SceneDisplay: Send {
     fn base(&self) -> &FloDisplay;
     fn base_mut(&mut self) -> &mut FloDisplay;
     fn render(&mut self, r: &mut dyn Renderer, m: &RenderMetrics);
@@ -87,12 +94,16 @@ pub struct BrowserHit {
     pub row: usize,
 }
 
+/// A container display.
+///
+/// Layout is purely absolute: the panel draws `sx` x `sy` at its own
+/// `base.xpos/ypos` and every child positions itself from its own absolute
+/// coordinates (there is no margin to inset a child grid).
 pub struct FloDisplayPanel {
     pub base: FloDisplay,
     pub sx: i32,
     pub sy: i32,
-    pub margin: i32,
-    pub children: Vec<Box<dyn Display>>,
+    pub children: Vec<Box<dyn SceneDisplay>>,
 }
 impl FloDisplayPanel {
     pub fn new(iid: i32) -> Self {
@@ -100,12 +111,11 @@ impl FloDisplayPanel {
             base: FloDisplay::new(iid),
             sx: 100,
             sy: 100,
-            margin: 0,
             children: Vec::new(),
         }
     }
 }
-impl Display for FloDisplayPanel {
+impl SceneDisplay for FloDisplayPanel {
     fn base(&self) -> &FloDisplay {
         &self.base
     }
@@ -127,11 +137,16 @@ impl Display for FloDisplayPanel {
     }
 }
 
+/// Logical line height used to separate a text display's title from its value.
+pub const DEFAULT_TEXT_LINE_HEIGHT: i32 = 14;
+
 pub struct FloDisplayText {
     pub base: FloDisplay,
-    pub exp: Box<dyn Fn() -> f32>,
+    /// Expression sampled on every frame; `Send` because the scene is drawn on
+    /// the video worker thread.
+    pub exp: Box<dyn Fn() -> f32 + Send>,
 }
-impl Display for FloDisplayText {
+impl SceneDisplay for FloDisplayText {
     fn base(&self) -> &FloDisplay {
         &self.base
     }
@@ -144,9 +159,12 @@ impl Display for FloDisplayText {
         }
         let x = m.x(self.base.xpos);
         let y = m.y(self.base.ypos);
-        if let Some(t) = &self.base.title {
+        if let Some(title) = &self.base.title {
+            // The value is drawn one line below the title: at the same
+            // coordinates it would completely cover it.
+            let line_height = (DEFAULT_TEXT_LINE_HEIGHT as f32 * m.scale_y.max(1.0)).ceil() as i32;
             r.draw(DrawOp::Text(
-                t.clone(),
+                title.clone(),
                 x,
                 y,
                 Color(0x77, 0x88, 0x99, 255),
@@ -156,7 +174,7 @@ impl Display for FloDisplayText {
             r.draw(DrawOp::Text(
                 format!("{}", (self.exp)()),
                 x,
-                y,
+                y + line_height,
                 Color(0xdf, 0xef, 0x20, 255),
                 0,
                 1,
@@ -167,9 +185,9 @@ impl Display for FloDisplayText {
 
 pub struct FloDisplaySwitch {
     pub base: FloDisplay,
-    pub exp: Box<dyn Fn() -> f32>,
+    pub exp: Box<dyn Fn() -> f32 + Send>,
 }
-impl Display for FloDisplaySwitch {
+impl SceneDisplay for FloDisplaySwitch {
     fn base(&self) -> &FloDisplay {
         &self.base
     }
@@ -204,7 +222,7 @@ pub enum Orientation {
 }
 pub struct FloDisplayBar {
     pub base: FloDisplay,
-    pub exp: Box<dyn Fn() -> f32>,
+    pub exp: Box<dyn Fn() -> f32 + Send>,
     pub orientation: Orientation,
     pub barscale: f32,
     pub thickness: i32,
@@ -217,9 +235,20 @@ impl FloDisplayBar {
         let v = (self.exp)();
         let f = if self.dbscale {
             let db = if v > 0.0 { 20.0 * v.log10() } else { -60.0 };
-            ((db + 60.0) / (self.maxdb + 60.0)).clamp(0.0, 1.0)
+            // `maxdb == -60` would divide by zero (and `clamp` does not
+            // sanitize NaN), leaving a permanently empty meter; a non-finite
+            // level is clamped like any other out-of-range value.
+            let range = (self.maxdb + 60.0).max(f32::EPSILON);
+            let level = (db + 60.0) / range;
+            if level.is_finite() {
+                level.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        } else if v.is_finite() {
+            v.clamp(0.0, 1.0)
         } else {
-            v
+            0.0
         };
         f * self.barscale
             * if self.orientation == Orientation::Horizontal {
@@ -229,7 +258,7 @@ impl FloDisplayBar {
             }
     }
 }
-impl Display for FloDisplayBar {
+impl SceneDisplay for FloDisplayBar {
     fn base(&self) -> &FloDisplay {
         &self.base
     }

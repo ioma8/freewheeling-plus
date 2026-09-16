@@ -24,20 +24,30 @@ pub trait LoopSource {
     fn save_hash_text(&self) -> String;
 }
 
+/// The file that backs a library stub.
+///
+/// A codec of `Unknown` means the caller supplied the extension itself (the
+/// stub's data file), so there is nothing to interpret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LibraryFileInfo {
-    pub exists: bool,
     pub codec: block::Codec,
+    /// The matching file, or `None` when the stub has no file at all.
     pub name: Option<PathBuf>,
 }
 
 impl Default for LibraryFileInfo {
     fn default() -> Self {
         Self {
-            exists: false,
             codec: block::Codec::Unknown,
             name: None,
         }
+    }
+}
+
+impl LibraryFileInfo {
+    /// Whether the stub has a file on disk.
+    pub fn exists(&self) -> bool {
+        self.name.is_some()
     }
 }
 
@@ -50,11 +60,19 @@ impl LibraryHelper {
             .join(format!("{}-{}", OUTPUT_LOOP_NAME, loop_.save_hash_text()))
     }
 
+    /// Next free `live<n>` stream path.
+    ///
+    /// The returned path is *not* reserved: the caller must create it with
+    /// create-new semantics (`OpenOptions::new().create_new(true)`) and treat
+    /// `AlreadyExists` as "try again".
+    ///
+    /// Returns `None` once the numeric suffix space is exhausted instead of
+    /// re-probing the last name forever.
     pub fn next_available_stream_out_filename<R: LibraryRuntime>(
         runtime: &R,
         stream_num: &mut i32,
         display_name: &mut String,
-    ) -> PathBuf {
+    ) -> Option<PathBuf> {
         loop {
             let timing = runtime.library_path().join(format!(
                 "{}{}{}",
@@ -62,9 +80,9 @@ impl LibraryHelper {
             ));
             if !timing.exists() {
                 *display_name = format!("{}{}", OUTPUT_STREAM_NAME, *stream_num);
-                return runtime.library_path().join(display_name.as_str());
+                return Some(runtime.library_path().join(display_name.as_str()));
             }
-            *stream_num = stream_num.saturating_add(1);
+            *stream_num = stream_num.checked_add(1)?;
         }
     }
 
@@ -79,16 +97,24 @@ impl LibraryHelper {
 
 fn find_file_extensions(stub: &Path, exts: &[(&str, block::Codec)]) -> LibraryFileInfo {
     for &(ext, codec) in exts {
-        let exact = PathBuf::from(format!("{}{}", stub.display(), ext));
+        // Append at the `OsStr` level: `display()` is lossy for non-UTF-8
+        // paths, which would point at a file that does not exist.
+        let mut exact = stub.as_os_str().to_os_string();
+        exact.push(ext);
+        let exact = PathBuf::from(exact);
         if exact.is_file() {
             return LibraryFileInfo {
-                exists: true,
                 codec,
                 name: Some(exact),
             };
         }
     }
-    let parent = stub.parent().unwrap_or_else(|| Path::new("."));
+    // `parent()` reports `Some("")` for a bare filename, which is not a
+    // directory that can be listed.
+    let parent = stub
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let prefix = stub
         .file_name()
         .and_then(|n| n.to_str())
@@ -97,24 +123,62 @@ fn find_file_extensions(stub: &Path, exts: &[(&str, block::Codec)]) -> LibraryFi
     // matches in lexical order.  `read_dir` has no ordering guarantee, so it
     // must not decide which codec/name wins when a legacy wildcard load has
     // more than one candidate.
+    // A directory that cannot be listed is not "no such file", but the caller
+    // only sees the empty result (`LibraryFileInfo::default()`), so the failure
+    // is reported here instead of being swallowed.
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!(
+                "FreeWheeling: cannot list {} while resolving {}: {error}",
+                parent.display(),
+                stub.display()
+            );
+            return LibraryFileInfo::default();
+        }
+    };
+    let mut directory: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) => directory.push(entry.path()),
+            Err(error) => eprintln!(
+                "FreeWheeling: cannot read an entry of {} while resolving {}: {error}",
+                parent.display(),
+                stub.display()
+            ),
+        }
+    }
     for &(ext, codec) in exts {
-        let mut candidates: Vec<_> = fs::read_dir(parent)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|entry| entry.path())
+        let mut candidates: Vec<_> = directory
+            .iter()
             .filter(|path| {
                 path.is_file()
-                    && path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with(prefix) && name.ends_with(ext))
+                    && path.file_name().and_then(|name| name.to_str()).is_some_and(
+                        |name| {
+                            // C++ resolves a legacy stub with a glob, i.e. the
+                            // candidates are `<stub>*<ext>`. Requiring a
+                            // separator after the stub keeps a longer hash
+                            // (`loop-<hash>ER.wav`) or an unrelated sibling out
+                            // of the match, while a user-chosen name such as
+                            // `-backup` stays valid.
+                            if !name.starts_with(prefix)
+                                || !name.ends_with(ext)
+                                || name.len() < prefix.len() + ext.len()
+                            {
+                                return false;
+                            }
+                            name[prefix.len()..name.len() - ext.len()]
+                                .chars()
+                                .next()
+                                .is_none_or(|next| !next.is_ascii_alphanumeric())
+                        },
+                    )
             })
+            .cloned()
             .collect();
         candidates.sort();
         if let Some(path) = candidates.into_iter().next() {
             return LibraryFileInfo {
-                exists: true,
                 codec,
                 name: Some(path),
             };
@@ -145,9 +209,18 @@ impl LoopTray {
     pub fn items(&self) -> &[LoopTrayItem] {
         &self.items
     }
+    /// Insert `item` at its sorted position, replacing an entry with the same
+    /// loop id so the tray cannot hold ambiguous duplicates.
     pub fn insert(&mut self, item: LoopTrayItem) {
-        self.items.push(item);
-        self.items.sort_by_key(|i| i.loop_id);
+        if let Some(existing) = self.items.iter_mut().find(|i| i.loop_id == item.loop_id) {
+            *existing = item;
+            return;
+        }
+        let index = self
+            .items
+            .binary_search_by_key(&item.loop_id, |i| i.loop_id)
+            .unwrap_or_else(|index| index);
+        self.items.insert(index, item);
     }
     pub fn remove(&mut self, loop_id: i32) -> Option<LoopTrayItem> {
         self.items
@@ -203,10 +276,13 @@ mod tests {
         let mut display = String::new();
         assert_eq!(
             LibraryHelper::next_available_stream_out_filename(&r, &mut n, &mut display),
-            d.join("live0")
+            Some(d.join("live0"))
         );
         fs::write(d.join("loop-ABCD.wav"), b"x").unwrap();
-        assert!(LibraryHelper::loop_filename_from_stub(&r, &d.join("loop-ABCD")).exists);
+        assert!(
+            LibraryHelper::loop_filename_from_stub(&r, &d.join("loop-ABCD")).exists(),
+            "the stub resolves its .wav companion"
+        );
         let _ = fs::remove_dir_all(d);
     }
 

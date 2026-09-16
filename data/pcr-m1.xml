@@ -111,7 +111,14 @@
      parameters="loopid=SYSTEM_loopid_lastrecord_7 and 
                  amp=controlval/127.0*2.0"/>
 
-  <!-- Loops on buttons mode-
+  <!-- Loops on buttons mode (unused).
+
+       Kept as a template, but its controllers must be renumbered before it is
+       enabled: CC 91-95 are already bound to `set-loop-amplifier` in the live
+       "Knobs: Loop volumes" section above, and dispatch takes the first match,
+       so enabling this block would silently shadow those knobs. Use a free
+       range (e.g. 108+) when wiring it up.
+
 
     <binding input="midicontroller" conditions="controlnum=91" 
      output="set-loop-amplifier" 
@@ -157,8 +164,8 @@
                                              and amp=controlval/127*2"/>
   -->
 
-    <!-- Overdub feedback continuous adjust from MIDI control -->
-    <!-- MIDI CC87: Overdub feedback continuous adjust -->
+    <!-- Overdub feedback continuous adjust from MIDI control
+         (VAR_pcrm_overdubfeedback_midicontrol, CC87 as declared above). -->
     <binding input="midicontroller" 
      conditions="controlnum=VAR_pcrm_overdubfeedback_midicontrol"
      output="set-variable" parameters="var=VAR_overdubfeedback and
@@ -218,22 +225,24 @@
                                                show=1"
      output4="patchbrowser-move-to-bank" parameters4="direction=1"/>
 
-    <!-- Overdub feedback continuous adjust from MIDI control -->
-    <!-- HELP: MIDI CC50: MIDI shift key (like space) -->
+    <!-- HELP: MIDI CC50: MIDI shift key (like space).
+
+         NOTE: the physical space key is authoritative for
+         `VAR_keyheld_space` (coreinterface.xml writes it with `value=keydown`),
+         so this switch only maintains its own `VAR_keyheld_midishift` flag. A
+         second writer would zero the shared flag while the real key was still
+         held (or the reverse), leaving every space-gated binding dead until
+         the key was pressed again. -->
     <binding input="midicontroller" 
      conditions="controlnum=VAR_pcrm_midishift_midicontrol and
                  controlval=VAR_switch_on"
-     output1="set-variable" parameters1="var=VAR_keyheld_midishift and
-                                         value=1"
-     output2="set-variable" parameters2="var=VAR_keyheld_space and
+     output="set-variable" parameters="var=VAR_keyheld_midishift and
                                          value=1"/>
 
     <binding input="midicontroller" 
      conditions="controlnum=VAR_pcrm_midishift_midicontrol and
                  controlval=VAR_switch_off"
-     output1="set-variable" parameters1="var=VAR_keyheld_midishift and
-                                         value=0"
-     output2="set-variable" parameters2="var=VAR_keyheld_space and
+     output="set-variable" parameters="var=VAR_keyheld_midishift and
                                          value=0"/>
 
     <!-- (midishift) + MIDI Program Change: (Jump)/Change browser item -->

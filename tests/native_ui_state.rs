@@ -1,6 +1,4 @@
-#[path = "../src/native_ui_state.rs"]
-mod native_ui_state;
-use native_ui_state::*;
+use freewheeling_plus::native_ui_state::*;
 
 #[test]
 fn sync_publishes_a_bounded_coherent_frame() {
@@ -36,7 +34,9 @@ fn sync_carries_transport_and_control_flags() {
         sequence: 4,
         sample_clock: 12,
         pulse_position: 3,
+        // The slot must index the published loop list (see below).
         recording_slot: Some(2),
+        loops: (0..3).map(|_| UiLoop::default()).collect(),
         streaming: true,
         stream_bytes: 42,
         fullscreen: true,
@@ -54,6 +54,48 @@ fn sync_carries_transport_and_control_flags() {
         (4, 12, 3, Some(2))
     );
     assert!(s.streaming && s.fullscreen && s.autosave && s.midi_sync && s.stream_bytes == 42);
+}
+
+#[test]
+fn a_recording_slot_outside_the_published_loops_is_dropped() {
+    let mut s = NativeUiState::default();
+    s.sync(UiRuntimeInput {
+        recording_slot: Some(2),
+        loops: vec![UiLoop::default()],
+        ..Default::default()
+    });
+    // A renderer indexing `loops[recording_slot]` must not be able to panic.
+    assert_eq!(s.recording_slot, None);
+    s.sync(UiRuntimeInput {
+        recording_slot: Some(0),
+        loops: vec![UiLoop::default()],
+        ..Default::default()
+    });
+    assert_eq!(s.recording_slot, Some(0));
+}
+
+#[test]
+fn the_runtime_patch_item_cursor_reaches_the_published_frame() {
+    let mut s = NativeUiState::default();
+    s.sync(UiRuntimeInput {
+        patch_item_cursor: 1,
+        patch_banks: vec![UiPatchBank {
+            items: vec!["a".into(), "b".into()],
+            cursor: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    assert_eq!(s.patch_item_cursor, 1);
+    s.sync(UiRuntimeInput {
+        patch_item_cursor: 9,
+        patch_banks: vec![UiPatchBank {
+            items: vec!["a".into(), "b".into()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    assert_eq!(s.patch_item_cursor, 1);
 }
 
 #[test]

@@ -21,6 +21,10 @@ APP=target/aarch64-apple-darwin/release/bundle/osx/FreeWheeling.app
 RESOURCES="$APP/Contents/Resources"
 FRAMEWORKS="$APP/Contents/Frameworks"
 mkdir -p "$RESOURCES/licenses" "$FRAMEWORKS"
+# Start from a clean bundle: leftovers from an earlier run (including
+# Frameworks/*.dylib, which the copy below would keep) must not ship.
+rm -rf "$FRAMEWORKS"
+mkdir -p "$FRAMEWORKS"
 rm -rf "$RESOURCES/data"
 cp -R data "$RESOURCES/data"
 cp COPYING "$RESOURCES/licenses/COPYING"
@@ -46,23 +50,48 @@ if notices[0] != notices[1]:
 pathlib.Path(sys.argv[3]).write_text(notices[0] + "\n", encoding="utf-8")
 PY
 
-/usr/libexec/PlistBuddy -c "Delete :NSMicrophoneUsageDescription" "$APP/Contents/Info.plist" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string FreeWheeling uses audio input to record and loop live sound." "$APP/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Delete :CFBundleDocumentTypes" "$APP/Contents/Info.plist" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes array" "$APP/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0 dict" "$APP/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeName string FreeWheeling Audio or Scene" "$APP/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeRole string Editor" "$APP/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeExtensions array" "$APP/Contents/Info.plist"
-for extension in wav aiff aif au flac ogg xml; do
-  /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeExtensions: string $extension" "$APP/Contents/Info.plist"
+# Every mutation reports which command failed instead of aborting with a raw
+# PlistBuddy error under `set -e`.
+plist_set() {
+  if ! /usr/libexec/PlistBuddy -c "$1" "$APP/Contents/Info.plist"; then
+    echo "error: PlistBuddy failed: $1" >&2
+    exit 1
+  fi
+}
+plist_set "Delete :NSMicrophoneUsageDescription" 2>/dev/null || true
+plist_set "Add :NSMicrophoneUsageDescription string FreeWheeling uses audio input to record and loop live sound."
+# cargo-bundle's generated document types are replaced, so a type it adds from
+# `Cargo.toml` later would be dropped silently unless it is added here too:
+# this list is the single source of truth for what the bundle advertises.
+DOCUMENT_EXTENSIONS="wav aiff aif au flac ogg xml"
+plist_set "Delete :CFBundleDocumentTypes" 2>/dev/null || true
+plist_set "Add :CFBundleDocumentTypes array"
+plist_set "Add :CFBundleDocumentTypes:0 dict"
+plist_set "Add :CFBundleDocumentTypes:0:CFBundleTypeName string FreeWheeling Audio or Scene"
+plist_set "Add :CFBundleDocumentTypes:0:CFBundleTypeRole string Editor"
+plist_set "Add :CFBundleDocumentTypes:0:CFBundleTypeExtensions array"
+for extension in $DOCUMENT_EXTENSIONS; do
+  plist_set "Add :CFBundleDocumentTypes:0:CFBundleTypeExtensions: string $extension"
 done
+declared=$(/usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes:0:CFBundleTypeExtensions" \
+  "$APP/Contents/Info.plist" | grep -c '^    ')
+[ "$declared" -eq "$(printf '%s\n' $DOCUMENT_EXTENSIONS | wc -l | tr -d ' ')" ] || {
+  echo "error: the bundle declares $declared document extensions, expected the $DOCUMENT_EXTENSIONS list" >&2
+  exit 1
+}
 
 bundle_dependency() {
   binary=$1
-  otool -L "$binary" | tail -n +2 | awk '{print $1}' | while IFS= read -r dependency; do
+  [ -f "$binary" ] || { echo "error: cannot inspect missing binary: $binary" >&2; exit 1; }
+  # `sed` strips the trailing "(compatibility ...)" text: `awk '{print $1}'`
+  # would truncate any dependency path containing a space.
+  otool -L "$binary" | tail -n +2 | sed -e 's/^[[:space:]]*//' -e 's/ (compatibility.*//' | while IFS= read -r dependency; do
+    [ -n "$dependency" ] || continue
     case "$dependency" in
-      /System/Library/*|/usr/lib/*|@rpath/*|@loader_path/*) continue ;;
+      /System/Library/*|/usr/lib/*) continue ;;
+      @rpath/*|@loader_path/*|@executable_path/*)
+        echo "warning: pre-linked dependency was not bundled: $dependency (in $binary)" >&2
+        continue ;;
     esac
     [ -f "$dependency" ] || { echo "error: unresolved dependency: $dependency" >&2; exit 1; }
     target="$FRAMEWORKS/$(basename "$dependency")"
@@ -77,6 +106,8 @@ bundle_dependency() {
 }
 
 bundle_dependency "$APP/Contents/MacOS/freewheeling-plus"
-find "$FRAMEWORKS" -type f -name '*.dylib' -exec codesign --force --sign - {} \;
+# Every regular file in Frameworks is signed: a framework binary copied by
+# basename (or a .so) would otherwise break the seal.
+find "$FRAMEWORKS" -type f -exec codesign --force --sign - {} \;
 codesign --force --sign - "$APP"
 python3 scripts/verify_macos_bundle.py "$APP"

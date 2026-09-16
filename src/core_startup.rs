@@ -35,9 +35,12 @@ pub const STARTUP_SYSTEM_VARIABLES: &[&str] = &[
     "SYSTEM_snapshot_page_firstidx",
 ];
 
-/// Names which the C++ startup links to live runtime state.  Keeping this
-/// separate from the declaration list makes it possible for a native adapter
-/// to refresh the values without having to duplicate the startup inventory.
+/// Names which the C++ startup links to live runtime state.
+///
+/// This list has the same *contents* as [`STARTUP_SYSTEM_VARIABLES`] but the
+/// order carries no meaning: it is a refresh inventory, and consumers look
+/// names up rather than pairing the two lists positionally. A test asserts
+/// that both lists hold the same set.
 pub const LIVE_SYSTEM_VARIABLES: &[&str] = &[
     "SYSTEM_num_midi_outs",
     "SYSTEM_midi_transpose",
@@ -97,13 +100,19 @@ pub trait StartupServices {
     fn activate_signal_processing(&mut self) -> Result<(), String>;
     fn init_streamers_and_finalize_rings(&mut self) -> Result<(), String>;
     fn add_processing_elements(&mut self) -> Result<(), String>;
-    fn rollback_setup(&mut self);
+    /// Undo a partially completed startup, leaving the adapter clean enough
+    /// for a retry.
+    fn rollback_setup(&mut self) -> Result<(), String>;
 
     /// Commit a completely initialized graph.  C++ calls
     /// `FweelinStartupGuard::Release()` at this point, so the setup-only
     /// rollback stack must not be replayed during ordinary application
     /// shutdown (which has its own ordered cleanup path).
-    fn commit_setup(&mut self) {}
+    ///
+    /// Required rather than defaulted: an implementation that keeps a rollback
+    /// stack must clear (or otherwise retire) it here, and the compiler cannot
+    /// tell the difference for a defaulted no-op body.
+    fn commit_setup(&mut self);
 
     /// Give the native graph a deterministic point at which to publish its
     /// current values to the configuration system.
@@ -167,53 +176,100 @@ pub fn setup<C: StartupConfig, S: StartupServices>(
     inputs: usize,
     last_records: usize,
 ) -> Result<(), StartupError> {
+    // The receiver is passed in explicitly: the macro must not depend on the
+    // names in scope at its (only) expansion site.
     macro_rules! step {
-        ($name:literal, $expr:expr) => {
-            $expr.map_err(|e| {
-                services.rollback_setup();
-                fail($name, e)
-            })?
+        ($services:expr, $name:literal, $expr:expr) => {
+            match $expr {
+                Ok(value) => value,
+                Err(error) => {
+                    return Err(match $services.rollback_setup() {
+                        Ok(()) => fail($name, error),
+                        Err(rollback) => {
+                            fail($name, format!("{error}; rollback failed: {rollback}"))
+                        }
+                    });
+                }
+            }
         };
     }
-    step!("lock_memory", services.lock_memory());
-    step!("init_rt_threads", services.init_rt_threads());
-    step!("register_main_thread", services.register_main_thread());
-    step!("init_platform_threads", services.init_platform_threads());
-    step!("init_sdl", services.init_sdl());
-    step!("init_memory_manager", services.init_memory_manager());
-    install_startup_variables(cfg, inputs, last_records);
-    step!("parse_config", cfg.parse());
-    step!("init_event_manager", services.init_event_manager());
-    step!("activate_video", services.activate_video());
-    step!("wait_for_video", services.wait_for_video());
-    step!("init_audio", services.init_audio());
-    step!("init_core_graph", services.init_core_graph());
-    step!("init_synth_and_buffers", services.init_synth_and_buffers());
+    step!(services, "lock_memory", services.lock_memory());
+    step!(services, "init_rt_threads", services.init_rt_threads());
     step!(
+        services,
+        "register_main_thread",
+        services.register_main_thread()
+    );
+    step!(
+        services,
+        "init_platform_threads",
+        services.init_platform_threads()
+    );
+    step!(services, "init_sdl", services.init_sdl());
+    step!(
+        services,
+        "init_memory_manager",
+        services.init_memory_manager()
+    );
+    install_startup_variables(cfg, inputs, last_records);
+    step!(services, "parse_config", cfg.parse());
+    step!(
+        services,
+        "init_event_manager",
+        services.init_event_manager()
+    );
+    step!(services, "activate_video", services.activate_video());
+    step!(services, "wait_for_video", services.wait_for_video());
+    step!(services, "init_audio", services.init_audio());
+    step!(services, "init_core_graph", services.init_core_graph());
+    step!(
+        services,
+        "init_synth_and_buffers",
+        services.init_synth_and_buffers()
+    );
+    step!(
+        services,
         "init_loop_and_scene_browsers",
         services.init_loop_and_scene_browsers()
     );
-    step!("init_input_and_midi", services.init_input_and_midi());
-    step!("init_osc_and_mixer", services.init_osc_and_mixer());
-    step!("link_system_variables", services.link_system_variables());
     step!(
+        services,
+        "init_input_and_midi",
+        services.init_input_and_midi()
+    );
+    step!(
+        services,
+        "init_osc_and_mixer",
+        services.init_osc_and_mixer()
+    );
+    step!(
+        services,
+        "link_system_variables",
+        services.link_system_variables()
+    );
+    step!(
+        services,
         "refresh_system_variables",
         services.refresh_system_variables()
     );
     step!(
+        services,
         "refresh_config_system_variables",
         cfg.refresh_system_variables()
     );
-    step!("start_config", cfg.start());
+    step!(services, "start_config", cfg.start());
     step!(
+        services,
         "activate_signal_processing",
         services.activate_signal_processing()
     );
     step!(
+        services,
         "init_streamers_and_finalize_rings",
         services.init_streamers_and_finalize_rings()
     );
     step!(
+        services,
         "add_processing_elements",
         services.add_processing_elements()
     );

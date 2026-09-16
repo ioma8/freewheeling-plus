@@ -7,7 +7,7 @@ use crossbeam_queue::ArrayQueue;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const MEMMGR_UPDATE_QUEUE_SIZE: usize = 8192;
 pub const PREALLOC_DEFAULT_NUM_INSTANCES: usize = 10;
@@ -113,6 +113,11 @@ impl MemoryManager {
         self.rejected.load(Ordering::Relaxed)
     }
 
+    /// Drain pending updates on the calling thread.
+    ///
+    /// This performs allocation, recycling and destruction, so it must not be
+    /// called from an audio callback and must not run concurrently with the
+    /// manager thread: it is intended for tests and shutdown paths.
     pub fn process_queue(&self) {
         while let Some(update) = self.queue.pop() {
             if let Some(pt) = update.which_pt.upgrade() {
@@ -133,23 +138,13 @@ impl Drop for MemoryManager {
         self.stopping.store(true, Ordering::Release);
         if let Some(t) = self.thread.take() {
             t.thread().unpark();
-            // Bound the shutdown wait: the worker thread parks with a 1ms
-            // timeout so it observes `stopping` promptly after unpark.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            loop {
-                if t.is_finished() {
-                    break;
-                }
-                if std::time::Instant::now() >= deadline {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
+            // Join unconditionally: the worker parks with a 1ms timeout, so it
+            // observes `stopping` promptly. Detaching it (the previous
+            // behaviour) leaked the thread and could run `FreeInstance`
+            // updates after this manager was dropped.
+            if t.join().is_err() {
+                eprintln!("FreeWheeling: memory manager worker panicked during shutdown");
             }
-            if !t.is_finished() {
-                // Worker failed to stop within 2s — detach rather than hang.
-                return;
-            }
-            let _ = t.join();
         }
         // The worker drains every accepted update before observing an empty
         // queue and stopping, so no callback-owned instance is reclaimed early.
@@ -168,6 +163,8 @@ pub struct PreallocatedTypeInner {
     block_mode: bool,
     block_size: usize,
     ready_overflow: AtomicU64,
+    /// Pool slots lost because a `RestockInstance` request could not be queued.
+    restock_failures: AtomicU64,
 }
 
 impl PreallocatedTypeInner {
@@ -180,7 +177,10 @@ impl PreallocatedTypeInner {
     where
         F: Fn() -> Instance + Send + Sync + 'static,
     {
-        assert!(count > 0 && (!block_mode || count >= 3));
+        assert!(
+            count > 0 && (!block_mode || count >= 3),
+            "count must be > 0 (and >= 3 in block mode), got count = {count}"
+        );
         let pt = Arc::new(Self {
             factory: Box::new(factory),
             // This is the C++ ready_list capacity.  It is never resized from
@@ -192,6 +192,7 @@ impl PreallocatedTypeInner {
             block_mode,
             block_size: count,
             ready_overflow: AtomicU64::new(0),
+            restock_failures: AtomicU64::new(0),
         });
         // In C++ block mode the first element of the first array is the
         // permanent prototype/base instance, so only count - 1 instances are
@@ -207,26 +208,59 @@ impl PreallocatedTypeInner {
         pt
     }
 
+    /// Take one instance, requesting a replacement.
+    ///
+    /// A restock that cannot be queued loses a pool slot permanently (the item
+    /// has already been popped and nothing will push a replacement), so the
+    /// failure is counted in [`Self::restock_failures`] instead of being
+    /// discarded: without that, sustained overflow empties the pool and every
+    /// later `rt_new` returns `None` forever.
     pub fn rt_new(self: &Arc<Self>) -> Option<Instance> {
         let item = self.ready.pop();
-        if item.is_some()
-            && let Some(m) = self.manager.upgrade()
-        {
-            let _ = m.wake_up(MemoryManagerUpdate {
-                which_pt: Arc::downgrade(self),
-                update_type: MemoryManagerUpdateType::RestockInstance,
-                update_idx: 0,
-                tofree: None,
+        if item.is_some() {
+            let queued = self.manager.upgrade().is_some_and(|manager| {
+                manager
+                    .wake_up(MemoryManagerUpdate {
+                        which_pt: Arc::downgrade(self),
+                        update_type: MemoryManagerUpdateType::RestockInstance,
+                        update_idx: 0,
+                        tofree: None,
+                    })
+                    .is_ok()
             });
+            if !queued {
+                self.restock_failures.fetch_add(1, Ordering::Relaxed);
+            }
         }
         item
     }
 
+    /// Pool slots lost because a restock request could not be queued.
+    pub fn restock_failures(&self) -> u64 {
+        self.restock_failures.load(Ordering::Relaxed)
+    }
+
     /// Non-realtime convenience API. Never call this from an audio callback.
-    pub fn rt_new_with_wait(self: &Arc<Self>) -> Instance {
+    ///
+    /// Blocks until an instance becomes available, giving up when the manager
+    /// is gone (nothing will ever restock the pool) or after `timeout`:
+    /// spinning forever would hang a control thread with no way to report the
+    /// exhaustion. Returns the pool-slot loss count on failure.
+    pub fn rt_new_with_wait(self: &Arc<Self>, timeout: Duration) -> Result<Instance, String> {
+        let deadline = Instant::now() + timeout;
         loop {
-            if let Some(x) = self.rt_new() {
-                break x;
+            if let Some(instance) = self.rt_new() {
+                return Ok(instance);
+            }
+            if self.manager.upgrade().is_none() {
+                return Err("memory manager was dropped while waiting for an instance".into());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "timed out waiting for a preallocated instance ({} pool slots lost to \
+                     unqueued restocks)",
+                    self.restock_failures()
+                ));
             }
             thread::sleep(Duration::from_millis(10));
         }

@@ -12,6 +12,10 @@
     <declare var="VAR_bcf2000_any_midicc" type="range" init="0>127"/>
     
     <!-- Multi-pages of loops -->
+    <!-- Write-only page counter: the loop bindings below increment/decrement
+         it, and the visible page is carried by `VAR_loopid_bcf2000` (which the
+         same bindings shift by `VAR_loopidrangechange`). Kept because the
+         legacy interface exposes it to user bindings. -->
     <declare var="VAR_bcf2000_looppage" type="int" init="0"/>
     <declare var="VAR_loopidrangechange" type="int" init="8"/>
 
@@ -31,6 +35,9 @@
 
     <!-- Scene browse buttons -->
     <declare var="VAR_bcf2000_scenebrowse_fine_midicontrol" type="int" init="75"/>
+    <!-- Reserved for coarse scene-browser paging; the arrow keys and the
+         scene browser's own bindings drive it instead, so no binding uses this
+         controller yet. -->
     <declare var="VAR_bcf2000_scenebrowse_coarse_midicontrol" type="int" init="74"/>
     <declare var="VAR_bcf2000_scenebrowse_select_midicontrol" type="int" init="76"/>
     <declare var="VAR_bcf2000_scenebrowse_save_midicontrol" type="int" init="77"/>
@@ -48,7 +55,11 @@
     <declare var="VAR_keyheld_midishift" type="char" init="0"/>
 
     <!-- Which MIDI controller # controls overdub feedback. -->
-    <declare var="VAR_bcf2000_overdubfeedback_midicontrol" type="int" init="86"/>
+    <!-- 67 is outside every control block this interface uses (31-33, 40-47,
+         50-57, 72-77, 80-87, 90-97, 100-107, 110-117, 118-125): 86 collided
+         with the loop trigger-volume faders (80>87), and with first-match
+         dispatch the fader binding won, so this controller was unreachable. -->
+    <declare var="VAR_bcf2000_overdubfeedback_midicontrol" type="int" init="67"/>
 
     <!-- MIDI controller # to fade trigger volume of selected loops -->
     <declare var="VAR_bcf2000_triggervol_selected_midicontrol" type="int" init="89"/>
@@ -64,9 +75,16 @@
     <declare var="VAR_loopid_bcf2000" type="int" init="350"/>
     <declare var="VAR_bcf2000range" type="range" init="0>7"/>
     <declare var="VAR_bcf2000controlrange1" type="range" init="0>7"/>
+    <!-- Second fader page, kept from the legacy interface but not wired up:
+         enabling it would put its range (8>15) on the same MIDI CCs the amp
+         knobs use (90>97), so a fader and a knob would fight over one
+         controller. -->
     <declare var="VAR_bcf2000controlrange2" type="range" init="8>15"/>
 
     <!-- Speed of amplitude variation for knob twisting -->
+    <!-- Legacy damping speed for the level meters; the port damps through
+         `VAR_slide_speed` and the DSP ballistics, so nothing reads it. Kept so
+         existing user configuration that sets it still parses. -->
     <declare var="VAR_damp_speed" type="float" init="0.04"/>
 
     <!-- How much are loop amplitudes adjusted when operating on entire
@@ -100,7 +118,10 @@
     <declare var="VAR_bcf2000_fadermode_midicontrol" type="int" init="70"/>
 
     <!-- 16 loops and only 8 faders/knobs, so we create 2 pages of
-         switchable controls -->
+         switchable controls.
+         `VAR_controlpage` stays 0: the fader bindings below require page 0,
+         and no binding ever switches it to 1 (page 2 is unreachable for the
+         reason given on VAR_bcf2000controlrange2). -->
     <declare var="VAR_controlpage" type="char" init="0"/>
 
     <declare var="VAR_bcf2000_interfaceid" type="int" init="0"/>
@@ -116,7 +137,7 @@
     <!-- Rest of the bindings... -->
 
     <!-- Knobs: Fade loops- amp levels -->
-    <binding input="midicontroller" conditions="midichannel=VAR_bcf2000_channel and controlnum=VAR_bcf2000controlrange1+VAR_bcf2000ampcc and controlval=0>64" 
+    <binding input="midicontroller" conditions="midichannel=VAR_bcf2000_channel and controlnum=VAR_bcf2000controlrange1+VAR_bcf2000ampcc and controlval=0>63" 
      output="adjust-loop-amplifier"
      parameters="loopid=VAR_loopid_bcf2000+controlnum-VAR_bcf2000ampcc and
                  ampfactor=controlval*VAR_bcf2000_loopamp_adj+1.0"/>
@@ -129,7 +150,7 @@
     <binding input="midicontroller"
      conditions="midichannel=VAR_bcf2000_channel and 
                  controlnum=VAR_bcf2000_scenebrowse_fine_midicontrol and
-                 controlval=0>64"
+                 controlval=0>63"
      output1="go-sub" parameters1="sub=100 and param1=DISPLAY_browser_scene"
      output2="browser-move-to-item" parameters2="browserid=DISPLAY_browser_scene and adjust=controlval and jumpadjust=0"/>
 
@@ -286,12 +307,14 @@
      parameters="loopid=VAR_loopid_bcf2000+controlnum-VAR_bcf2000fadercc and
                  vol=controlval/127.0*2.0"/>
 
-    <!-- Overdub feedback continuous adjust from MIDI control -->
-    <!-- MIDI CC87: Overdub feedback continuous adjust -->
+    <!-- Overdub feedback continuous adjust from MIDI control.
+         The controller number is VAR_bcf2000_overdubfeedback_midicontrol
+         (CC67, declared above); keep the number out of this comment so it
+         cannot drift from the declare again. -->
     <binding input="midicontroller" 
      conditions="midichannel=VAR_bcf2000_channel and controlnum=VAR_bcf2000_overdubfeedback_midicontrol"
      output="set-variable" parameters="var=VAR_overdubfeedback and
-                                       value=controlval/127"/>
+                                       value=controlval/127.0"/>
 
     <!-- MIDI CC89: Fade volume of selected loops -->
     <binding input="midicontroller" 
@@ -355,8 +378,7 @@
                                                show=1"
      output4="patchbrowser-move-to-bank" parameters4="direction=1"/>
 
-    <!-- Overdub feedback continuous adjust from MIDI control -->
-    <!-- HELP: MIDI CC73: MIDI shift key (like space) -->
+    <!-- HELP: MIDI shift key (like space) -->
     <binding input="midicontroller" 
      conditions="midichannel=VAR_bcf2000_channel and controlnum=VAR_bcf2000_midishift_midicontrol and
                  controlval=VAR_switch_on"
@@ -496,7 +518,7 @@
     <binding input="midicontroller" 
              conditions="midichannel=VAR_bcf2000_channel and 
                          controlnum=VAR_bcf2000range+VAR_bcf2000miscknobcc and 
-                         controlval=0>64" 
+                         controlval=0>63" 
      output="adjust-selected-loops-amp"
      parameters="setid=0 and
                  ampfactor=controlval*VAR_bcf2000_loopamp_adj+1.0"/>

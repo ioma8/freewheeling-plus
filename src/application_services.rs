@@ -15,6 +15,15 @@ use crate::sdlio::InputEvent;
 /// streaming and snapshot methods must not silently succeed without doing
 /// work. Hardware-specific implementations can be generic over the backend
 /// types from `audioio`, `midiio`, `sdlio`, and `videoio`.
+/// The component surface a `Core` drives (§startup phases).
+///
+/// Errors are `String` on purpose: this is the boundary where the startup and
+/// shutdown sequence reports failures to the user, and every implementation
+/// (`ProductionApp`, `NativeComponentAdapter`, the test doubles) formats a
+/// backend-specific error - a typed `io::Error`, `SnapshotError`,
+/// `jack::JackError`, ... - into a message anyway. The typed errors stay at
+/// their own layers, where callers can still match on them; introducing a
+/// second error type only here would make this trait the odd one out.
 pub trait Components {
     fn start_session(&mut self) -> Result<(), String>;
     fn start_interfaces(&mut self) -> Result<(), String>;
@@ -31,12 +40,26 @@ pub trait Components {
     fn restore_snapshot(&mut self, snapshot: &Snapshot) -> Result<(), String>;
 }
 
-/// Converts platform input into core events. SDL events not understood by the
-/// core are consumed and reported as no event.
-pub fn core_event(event: InputEvent) -> Option<CoreEvent> {
+/// What the core should do with a platform input event.
+///
+/// A plain `Option` would be ambiguous: `Core::go` ends the session when
+/// `poll_event` reports `None`, so an adapter that forwards this mapping must
+/// not be able to turn "the core has no use for this key" into a shutdown.
+/// Key bindings stay data-driven (`data/*.xml`) so this mapping only covers
+/// inputs the core itself owns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoreEventAction {
+    /// The session must handle this event.
+    Handle(CoreEvent),
+    /// The core ignores this input; the caller keeps processing.
+    Ignore,
+}
+
+/// Converts platform input into a core action.
+pub fn core_event(event: InputEvent) -> CoreEventAction {
     match event {
-        InputEvent::Quit => Some(CoreEvent::ExitSession),
-        _ => None,
+        InputEvent::Quit => CoreEventAction::Handle(CoreEvent::ExitSession),
+        _ => CoreEventAction::Ignore,
     }
 }
 
@@ -95,10 +118,12 @@ impl<C: StartupConfig, S: StartupServices, P: Components> CoreServices
             self.inputs,
             self.last_records,
         )
-        .map_err(|e| {
+        .map_err(|error| {
             // core_startup::setup already rolled the startup services back.
             self.startup_active = false;
-            format!("startup {}: {}", e.phase, e.message)
+            // Use the structured error's own Display so the formats cannot
+            // drift apart.
+            error.to_string()
         })?;
         Ok(())
     }
@@ -133,19 +158,19 @@ impl<C: StartupConfig, S: StartupServices, P: Components> CoreServices
         self.components.close_audio()
     }
     fn shutdown(&mut self) {
+        // Rollback belongs to core_startup::setup (failed phases) and
+        // `rollback_setup` below; a committed setup must not be replayed here.
+        // Normal teardown is `Components::shutdown`.
         self.components.shutdown();
-        if self.startup_active {
-            self.startup.rollback_setup();
-            self.startup_active = false;
-        }
     }
-    fn rollback_setup(&mut self) {
+    fn rollback_setup(&mut self) -> Result<(), String> {
         // Avoid a second rollback when core_startup already handled a failed
         // phase; Core calls this hook for every setup error.
-        if self.startup_active {
-            self.startup.rollback_setup();
-            self.startup_active = false;
+        if !self.startup_active {
+            return Ok(());
         }
+        self.startup_active = false;
+        self.startup.rollback_setup()
     }
     fn snapshot_loops(&self) -> Vec<LoopSnapshot> {
         self.components.snapshot_loops()
@@ -196,7 +221,52 @@ mod tests {
         fn activate_signal_processing(&mut self) -> Result<(), String> { Ok(()) }
         fn init_streamers_and_finalize_rings(&mut self) -> Result<(), String> { Ok(()) }
         fn add_processing_elements(&mut self) -> Result<(), String> { Ok(()) }
-        fn rollback_setup(&mut self) {}
+        fn rollback_setup(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn commit_setup(&mut self) {}
+    }
+
+    /// Startup double whose `init_sdl` fails and which counts rollbacks.
+    struct FailingStartup {
+        rollbacks: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+    macro_rules! startup_ok {
+        ($($name:ident),* $(,)?) => {
+            $(fn $name(&mut self) -> Result<(), String> {
+                Ok(())
+            })*
+        };
+    }
+    impl StartupServices for FailingStartup {
+        startup_ok!(
+            lock_memory,
+            init_rt_threads,
+            register_main_thread,
+            init_platform_threads,
+            init_memory_manager,
+            init_event_manager,
+            activate_video,
+            wait_for_video,
+            init_audio,
+            init_core_graph,
+            init_synth_and_buffers,
+            init_loop_and_scene_browsers,
+            init_input_and_midi,
+            init_osc_and_mixer,
+            link_system_variables,
+            activate_signal_processing,
+            init_streamers_and_finalize_rings,
+            add_processing_elements,
+        );
+        fn init_sdl(&mut self) -> Result<(), String> {
+            Err("no display".into())
+        }
+        fn rollback_setup(&mut self) -> Result<(), String> {
+            self.rollbacks.set(self.rollbacks.get() + 1);
+            Ok(())
+        }
+        fn commit_setup(&mut self) {}
     }
 
     struct TestComponents {
@@ -266,7 +336,99 @@ mod tests {
     }
 
     #[test]
-    fn quit_is_a_real_core_exit_event() {
-        assert_eq!(core_event(InputEvent::Quit), Some(CoreEvent::ExitSession));
+    fn a_failed_setup_rolls_back_exactly_once() {
+        let rollbacks = std::rc::Rc::new(std::cell::Cell::new(0));
+        let services = ApplicationServices::new(
+            Config,
+            FailingStartup {
+                rollbacks: std::rc::Rc::clone(&rollbacks),
+            },
+            TestComponents::new(),
+            0,
+            0,
+        );
+        let mut core = Core::new(services);
+        let error = core.setup().unwrap_err();
+        assert!(error.contains("init_sdl"), "{error}");
+        // `core_startup::setup` rolled the failed phase back; `Core::setup`'s
+        // own hook must not replay the stack a second time.
+        assert_eq!(rollbacks.get(), 1);
+    }
+
+    #[test]
+    fn a_failing_run_still_shuts_down() {
+        struct FailingComponents(TestComponents);
+        impl Components for FailingComponents {
+            fn start_session(&mut self) -> Result<(), String> {
+                Err("no session".into())
+            }
+            fn start_interfaces(&mut self) -> Result<(), String> {
+                self.0.start_interfaces()
+            }
+            fn next_event(&mut self) -> Result<Option<CoreEvent>, String> {
+                self.0.next_event()
+            }
+            fn set_streaming(&mut self, enabled: bool, sequence: u64) -> Result<(), String> {
+                self.0.set_streaming(enabled, sequence)
+            }
+            fn stream_state(&self) -> StreamState {
+                self.0.stream_state()
+            }
+            fn stream_bytes(&self) -> u64 {
+                self.0.stream_bytes()
+            }
+            fn close_video(&mut self) {
+                self.0.close_video()
+            }
+            fn close_sdl(&mut self) {
+                self.0.close_sdl()
+            }
+            fn close_midi(&mut self) {
+                self.0.close_midi()
+            }
+            fn close_audio(&mut self) {
+                self.0.close_audio()
+            }
+            fn shutdown(&mut self) {
+                self.0.shutdown()
+            }
+            fn snapshot_loops(&self) -> Vec<LoopSnapshot> {
+                self.0.snapshot_loops()
+            }
+            fn restore_snapshot(&mut self, snapshot: &Snapshot) -> Result<(), String> {
+                self.0.restore_snapshot(snapshot)
+            }
+        }
+
+        let services = ApplicationServices::new(
+            Config,
+            Startup,
+            FailingComponents(TestComponents::new()),
+            0,
+            0,
+        );
+        let mut core = Core::new(services);
+        core.setup().unwrap();
+        assert_eq!(core.go().unwrap_err(), "no session");
+        // The failed run must still release the components it may have opened.
+        assert_eq!(core.services().components().0.closes, 1);
+        assert!(!core.is_running());
+    }
+
+    #[test]
+    fn quit_is_a_real_core_exit_event_and_other_input_is_ignored() {
+        assert_eq!(
+            core_event(InputEvent::Quit),
+            CoreEventAction::Handle(CoreEvent::ExitSession)
+        );
+        // Any other platform input must not look like "the session ended".
+        assert_eq!(
+            core_event(InputEvent::Key {
+                keysym: 32,
+                down: true,
+                unicode: 32,
+            }),
+            CoreEventAction::Ignore
+        );
     }
 }

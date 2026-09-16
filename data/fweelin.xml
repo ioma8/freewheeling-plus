@@ -1,4 +1,11 @@
 <?xml version="1.0"?>
+<!-- The SYSTEM entities are resolved by this project's own loader
+     (`FloConfig::load_documents_into`), which opens each referenced file
+     directly and refuses anything but the include names below: it does not
+     perform general entity expansion, so an external entity that points at
+     /etc/passwd or a URL cannot leak file contents or reach the network.
+     The entity declarations must stay on one line each and keep the
+     local-file names the loader knows about. -->
 <!DOCTYPE freewheeling [
 <!ENTITY basics SYSTEM "basics.xml">
 <!ENTITY interfaces SYSTEM "interfaces.xml">
@@ -23,10 +30,11 @@
      fingertips. This is important, because you will be grabbing and 
      controlling loops from different MIDI/keyboard controllers.
 
-     In the events section, you can tell FreeWheeling how you want it to
-     respond to the physical buttons and switches you press,
-     sliders you move, and movements you make. Most of FreeWheeling's 
-     important functions can be controlled from any input. 
+     In the interface files (the ones the DOCTYPE entity named interfaces
+     names), you can tell FreeWheeling how you want it to respond to the
+     physical buttons and switches you press, sliders you move, and movements
+     you make. Most of FreeWheeling's important functions can be controlled
+     from any input. 
 
      Underlying the configuration system is a robust language. 
      You can do things like map velocity of a MIDI note to a 

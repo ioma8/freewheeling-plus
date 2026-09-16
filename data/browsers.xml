@@ -5,7 +5,7 @@
     <display interfaceid="0" 
      id="DISPLAY_browser_patch" type="browser" font="main" 
      browsetype="BROWSE_patch" pos="0.0,0.96" 
-     xpand="1" xbox="0.1,0.1, 0.9,0.9" xdelay="5.0" show="1">
+     xpand="1" xbox="0.1,0.1, 0.9,0.9" show="1">
   <!-- Load the given patch bank for patch browsing. Link this bank of patches
        to the given MIDI output port. You can have several of these statements,
        each controlling patches for a different MIDI output port. 
@@ -72,12 +72,12 @@
     <display interfaceid="0" 
      id="DISPLAY_browser_loop" type="browser" font="small"
      browsetype="BROWSE_loop" pos="0.0,0.96"
-     xpand="1" xbox="0.1,0.1, 0.9,0.9" xdelay="5.0" show="0"/>
+     xpand="1" xbox="0.1,0.1, 0.9,0.9" show="0"/>
 
     <display interfaceid="0" 
      id="DISPLAY_browser_scene" type="browser" font="small"
      browsetype="BROWSE_scene" pos="0.0,0.96" 
-     xpand="1" xbox="0.1,0.1, 0.9,0.9" xdelay="5.0" show="0"/>
+     xpand="1" xbox="0.1,0.1, 0.9,0.9" show="0"/>
 
     <display interfaceid="0" 
      id="DISPLAY_loop_tray" type="browser" font="tiny"

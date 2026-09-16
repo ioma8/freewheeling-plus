@@ -1,18 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <patchlist>
-<patch channel="0" name="OUTPUT TO MIDI CHANNEL 1"/>
-<patch channel="1" name="OUTPUT TO MIDI CHANNEL 2"/>
-<patch channel="2" name="OUTPUT TO MIDI CHANNEL 3"/>
-<patch channel="3" name="OUTPUT TO MIDI CHANNEL 4"/>
-<patch channel="4" name="OUTPUT TO MIDI CHANNEL 5"/>
-<patch channel="5" name="OUTPUT TO MIDI CHANNEL 6"/>
-<patch channel="6" name="OUTPUT TO MIDI CHANNEL 7"/>
-<patch channel="7" name="OUTPUT TO MIDI CHANNEL 8"/>
-<patch channel="8" name="OUTPUT TO MIDI CHANNEL 9"/>
-<patch channel="9" name="OUTPUT TO MIDI CHANNEL 10"/>
-<patch channel="10" name="OUTPUT TO MIDI CHANNEL 11"/>
-<patch channel="11" name="OUTPUT TO MIDI CHANNEL 12"/>
-<patch channel="12" name="OUTPUT TO MIDI CHANNEL 13"/>
-<patch channel="13" name="OUTPUT TO MIDI CHANNEL 14"/>
-<patch channel="14" name="OUTPUT TO MIDI CHANNEL 15"/>
-<patch channel="15" name="OUTPUT TO MIDI CHANNEL 16"/>
+<!-- One entry per MIDI output channel, used by the Mercury setup to route a
+     performance to a fixed channel.
+
+     The `channel` attribute is the ZERO-BASED MIDI channel index (0..15) used
+     by the engine, while the label is the human-readable MIDI channel number
+     (1..16). The browser prints the raw index, so the entry for channel index 0
+     reads "00: OUTPUT TO MIDI CHANNEL 1": the two numbers differ by one by
+     design and neither is wrong.
+
+     `bank`/`program` are declared explicitly as 0/0: a patch without them is
+     identical to one that selects bank 0 program 0, and the external port this
+     list drives would emit an unintended bank/program change unless the
+     bank's `suppressprogramchanges` is set. -->
+<patch channel="0" name="OUTPUT TO MIDI CHANNEL 1" bank="0" program="0"/>
+<patch channel="1" name="OUTPUT TO MIDI CHANNEL 2" bank="0" program="0"/>
+<patch channel="2" name="OUTPUT TO MIDI CHANNEL 3" bank="0" program="0"/>
+<patch channel="3" name="OUTPUT TO MIDI CHANNEL 4" bank="0" program="0"/>
+<patch channel="4" name="OUTPUT TO MIDI CHANNEL 5" bank="0" program="0"/>
+<patch channel="5" name="OUTPUT TO MIDI CHANNEL 6" bank="0" program="0"/>
+<patch channel="6" name="OUTPUT TO MIDI CHANNEL 7" bank="0" program="0"/>
+<patch channel="7" name="OUTPUT TO MIDI CHANNEL 8" bank="0" program="0"/>
+<patch channel="8" name="OUTPUT TO MIDI CHANNEL 9" bank="0" program="0"/>
+<patch channel="9" name="OUTPUT TO MIDI CHANNEL 10" bank="0" program="0"/>
+<patch channel="10" name="OUTPUT TO MIDI CHANNEL 11" bank="0" program="0"/>
+<patch channel="11" name="OUTPUT TO MIDI CHANNEL 12" bank="0" program="0"/>
+<patch channel="12" name="OUTPUT TO MIDI CHANNEL 13" bank="0" program="0"/>
+<patch channel="13" name="OUTPUT TO MIDI CHANNEL 14" bank="0" program="0"/>
+<patch channel="14" name="OUTPUT TO MIDI CHANNEL 15" bank="0" program="0"/>
+<patch channel="15" name="OUTPUT TO MIDI CHANNEL 16" bank="0" program="0"/>
 </patchlist>

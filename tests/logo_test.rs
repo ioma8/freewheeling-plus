@@ -7,7 +7,7 @@ fn logo_public_metadata_matches_embedded_payload() {
     assert_eq!(logo::BYTES_PER_PIXEL, 4);
     assert_eq!(
         logo::PIXEL_DATA.len(),
-        logo::WIDTH * logo::HEIGHT * logo::BYTES_PER_PIXEL + 1
+        logo::WIDTH * logo::HEIGHT * logo::BYTES_PER_PIXEL + logo::SENTINEL_LEN
     );
     assert_eq!(logo::PIXEL_DATA.last(), Some(&0));
 }

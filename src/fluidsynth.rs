@@ -9,6 +9,7 @@ use crate::core_dsp_audio_buffers::AudioBuffers;
 use crate::midiio::MidiMessage;
 use fluidlite::{IsFont, IsPreset, IsSettings};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub const PITCH_BEND_CENTER: i32 = 0x2000;
 pub const MIDI_CHANNELS: usize = 16;
@@ -55,6 +56,20 @@ impl FluidLiteConfig {
 pub struct FluidLiteBackend {
     synth: fluidlite::Synth,
     patches: Vec<Patch>,
+    /// Messages already reported, so a per-callback failure is not printed
+    /// thousands of times.
+    reported: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+/// Report a backend failure once per distinct message.
+fn report_once(reported: &std::sync::Mutex<std::collections::HashSet<String>>, message: &str) {
+    let first = reported
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(message.to_string());
+    if first {
+        eprintln!("FreeWheeling synth: {message}");
+    }
 }
 
 impl FluidLiteBackend {
@@ -106,22 +121,29 @@ impl FluidLiteBackend {
             ));
         }
         if config.tuning_cents != 0.0 {
+            // `apply = true`: registering the tuning without applying it left
+            // a configured `tuning_cents` silently inaudible until the
+            // runtime `SetMidiTuning` action ran.
             synth.activate_octave_tuning(
                 0,
                 0,
                 "FreeWheeling detune",
                 &[config.tuning_cents; 12],
-                false,
+                true,
             )?;
             for channel in 0..MIDI_CHANNELS as u32 {
-                synth.activate_tuning(channel, 0, 0, false)?;
+                synth.activate_tuning(channel, 0, 0, true)?;
             }
         }
         for path in &config.soundfonts {
             synth.sfload(path, true)?;
         }
         let patches = enumerate_patches(&synth);
-        Ok(Self { synth, patches })
+        Ok(Self {
+            synth,
+            patches,
+            reported: std::sync::Mutex::new(std::collections::HashSet::new()),
+        })
     }
 
     pub fn load_soundfont(&mut self, path: impl AsRef<Path>) -> Result<i32, fluidlite::Error> {
@@ -191,42 +213,102 @@ impl FluidSynthBackend for FluidLiteBackend {
         }
     }
     fn controller(&mut self, channel: u8, controller: u8, value: u8) {
-        let _ = self
+        if let Err(error) = self
             .synth
-            .cc(channel.into(), controller.into(), value.into());
-    }
-    fn pitch_bend(&mut self, channel: u8, value: i32) {
-        let _ = self
-            .synth
-            .pitch_bend(channel.into(), value.clamp(0, 0x3fff) as u32);
-    }
-    fn note_on(&mut self, channel: u8, note: i32, velocity: u8) {
-        if (0..=127).contains(&note) {
-            let _ = self
-                .synth
-                .note_on(channel.into(), note as u32, velocity.into());
-        }
-    }
-    fn note_off(&mut self, channel: u8, note: i32) {
-        if (0..=127).contains(&note) {
-            let _ = self.synth.note_off(channel.into(), note as u32);
-        }
-    }
-    fn program_select(&mut self, channel: u8, soundfont_id: i32, bank: i32, program: i32) {
-        if soundfont_id >= 0 && bank >= 0 && program >= 0 {
-            let _ = self.synth.program_select(
-                channel.into(),
-                soundfont_id as u32,
-                bank as u32,
-                program as u32,
+            .cc(channel.into(), controller.into(), value.into())
+        {
+            report_once(
+                &self.reported,
+                &format!("controller {controller} failed: {error}"),
             );
         }
     }
+    /// Set the pitch wheel.
+    ///
+    /// The accepted range is the 14-bit MIDI wheel position (`0..=0x3fff`);
+    /// fluidlite's own API takes the same range. A value outside it is clamped
+    /// and reported once, because a decoded bend that lands here out of range
+    /// means the message was mis-encoded.
+    fn pitch_bend(&mut self, channel: u8, value: i32) {
+        let clamped = value.clamp(0, 0x3fff);
+        if clamped != value {
+            report_once(
+                &self.reported,
+                &format!("pitch bend {value} on channel {channel} is outside 0..=0x3fff"),
+            );
+        }
+        if let Err(error) = self.synth.pitch_bend(channel.into(), clamped as u32) {
+            report_once(&self.reported, &format!("pitch bend failed: {error}"));
+        }
+    }
+    fn note_on(&mut self, channel: u8, note: i32, velocity: u8) {
+        if !(0..=127).contains(&note) {
+            // A transposed note outside the MIDI range: dropping it is correct,
+            // but it must be visible.
+            report_once(&self.reported, &format!("note {note} is outside 0..=127"));
+            return;
+        }
+        if let Err(error) = self
+            .synth
+            .note_on(channel.into(), note as u32, velocity.into())
+        {
+            report_once(&self.reported, &format!("note on failed: {error}"));
+        }
+    }
+    fn note_off(&mut self, channel: u8, note: i32) {
+        if !(0..=127).contains(&note) {
+            report_once(&self.reported, &format!("note {note} is outside 0..=127"));
+            return;
+        }
+        if let Err(error) = self.synth.note_off(channel.into(), note as u32) {
+            report_once(&self.reported, &format!("note off failed: {error}"));
+        }
+    }
+    fn program_select(&mut self, channel: u8, soundfont_id: i32, bank: i32, program: i32) {
+        if soundfont_id < 0 || bank < 0 || program < 0 {
+            report_once(
+                &self.reported,
+                &format!(
+                    "invalid program selection (soundfont {soundfont_id}, bank {bank}, \
+                     program {program})"
+                ),
+            );
+            return;
+        }
+        if let Err(error) = self.synth.program_select(
+            channel.into(),
+            soundfont_id as u32,
+            bank as u32,
+            program as u32,
+        ) {
+            // An unknown soundfont id fails here: previously invisible.
+            report_once(&self.reported, &format!("program select failed: {error}"));
+        }
+    }
     fn set_tuning(&mut self, cents: f64) {
-        let _ = FluidLiteBackend::set_tuning(self, cents);
+        if let Err(error) = FluidLiteBackend::set_tuning(self, cents) {
+            report_once(
+                &self.reported,
+                &format!("applying the tuning failed: {error}"),
+            );
+        }
     }
     fn patches(&self) -> Vec<Patch> {
         self.patches.clone()
+    }
+}
+
+/// Put `samples` into `buffer`, reusing its allocation when nothing else holds
+/// it.
+fn publish(buffer: &mut Arc<Vec<Sample>>, samples: &[Sample]) {
+    match Arc::get_mut(buffer) {
+        Some(storage) => {
+            storage.clear();
+            storage.extend_from_slice(samples);
+        }
+        // The consumer still holds the previous callback's buffer: a new
+        // allocation is the only option.
+        None => *buffer = Arc::new(samples.to_vec()),
     }
 }
 
@@ -259,6 +341,12 @@ pub struct FluidSynthProcessor<B: FluidSynthBackend> {
     backend: B,
     left: Vec<Sample>,
     right: Vec<Sample>,
+    /// Buffers handed to the graph, reused when the consumer has already
+    /// released the previous callback's reference (`Arc::get_mut` succeeds):
+    /// allocating and copying a fresh `Arc` on every callback was avoidable
+    /// heap traffic in the render path.
+    left_output: Arc<Vec<Sample>>,
+    right_output: Arc<Vec<Sample>>,
     stereo: bool,
     enabled: bool,
     channel: u8,
@@ -271,6 +359,8 @@ impl<B: FluidSynthBackend> FluidSynthProcessor<B> {
             backend,
             left: vec![0.0; buffer_size],
             right: vec![0.0; buffer_size],
+            left_output: Arc::new(Vec::new()),
+            right_output: Arc::new(Vec::new()),
             stereo,
             enabled: true,
             channel: channel.min(15),
@@ -332,16 +422,26 @@ impl<B: FluidSynthBackend> FluidSynthProcessor<B> {
             }
         }
         let slot = buffers.numins_ext;
-        if buffers.inputs[0].len() <= slot {
-            buffers.inputs[0].resize(slot + 1, None);
-            buffers.inputs[1].resize(slot + 1, None);
+        // Each channel is grown independently: `AudioBuffers::inputs` is a
+        // public field, so its two vectors are not guaranteed to have the same
+        // length and indexing a short one would panic on the audio thread.
+        for channel in &mut buffers.inputs {
+            if channel.len() <= slot {
+                channel.resize(slot + 1, None);
+            }
         }
-        buffers.inputs[0][slot] = Some(std::sync::Arc::new(self.left[..len].to_vec()));
-        buffers.inputs[1][slot] = if self.stereo {
-            Some(std::sync::Arc::new(self.right[..len].to_vec()))
-        } else {
-            None
-        };
+        publish(&mut self.left_output, &self.left[..len]);
+        publish(&mut self.right_output, &self.right[..len]);
+        if let Some(channel) = buffers.inputs.get_mut(0)
+            && let Some(entry) = channel.get_mut(slot)
+        {
+            *entry = Some(Arc::clone(&self.left_output));
+        }
+        if let Some(channel) = buffers.inputs.get_mut(1)
+            && let Some(entry) = channel.get_mut(slot)
+        {
+            *entry = self.stereo.then(|| Arc::clone(&self.right_output));
+        }
     }
 }
 

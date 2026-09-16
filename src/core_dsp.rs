@@ -113,20 +113,20 @@ impl SmoothState {
         if !self.prewritten {
             return;
         }
-        for (i, out) in outputs.iter_mut().enumerate() {
-            for n in 0..self.pre_len.min(out.len()) {
-                let r = n as f32 / self.pre_len as f32;
-                out[n] = out[n] * r + self.pre[i][n] * (1.0 - r);
-            }
-        }
         // Invariant: after fade, the output converges to the new signal.
         // At n=0: out*0 + pre*1 = pre (old signal).
         // At n=pre_len: out*1 + pre*0 = out (new signal).
-        debug_assert!(
-            self.pre_len <= outputs.iter().map(|o| o.len()).min().unwrap_or(0),
-            "fade: output shorter than pre_len={}, convergence not guaranteed",
-            self.pre_len,
-        );
+        // A shorter output or pre-buffer simply fades over fewer samples; the
+        // loop must not index either of them out of bounds.
+        for (i, out) in outputs.iter_mut().enumerate() {
+            let Some(pre) = self.pre.get(i) else {
+                continue;
+            };
+            for n in 0..self.pre_len.min(out.len()).min(pre.len()) {
+                let r = n as f32 / self.pre_len as f32;
+                out[n] = out[n] * r + pre[n] * (1.0 - r);
+            }
+        }
         self.prewritten = false;
     }
 
@@ -157,6 +157,10 @@ impl SmoothState {
     }
 }
 
+/// Final format-safety ceiling. The limiter's own ceiling is its threshold
+/// bounded by this value.
+pub const SAFETY_CEILING: f32 = 0.99;
+
 pub struct AutoLimitProcessor {
     pub current_volume: f32,
     pub target_volume: f32,
@@ -181,7 +185,32 @@ impl AutoLimitProcessor {
         self.target_volume = 1.0;
         self.frozen = false;
     }
-    pub fn process_channels(&mut self, left: &mut [Sample], mut right: Option<&mut [Sample]>) {
+    /// Ceiling applied after the gain: the configured threshold, bounded by
+    /// the format safety limit. Deriving it from `threshold` keeps the clamp
+    /// from truncating below the limit the limiter is aiming for.
+    pub fn output_ceiling(&self) -> f32 {
+        if self.threshold.is_finite() {
+            self.threshold.clamp(0.0, SAFETY_CEILING)
+        } else {
+            SAFETY_CEILING
+        }
+    }
+
+    /// Gain ceiling: `max_gain` bounds the released gain, and unity is the
+    /// hard upper bound because the limiter must never amplify a block.
+    pub fn gain_ceiling(&self) -> f32 {
+        if self.max_gain.is_finite() {
+            self.max_gain.clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
+    }
+
+    pub fn process_channels(&mut self, left: &mut [Sample], right: Option<&mut [Sample]>) {
+        // A right channel that is shorter than the left one cannot be written
+        // for the whole block; drop it instead of indexing past its end.
+        let mut right = right.filter(|right| right.len() >= left.len());
+        let ceiling = self.output_ceiling();
         let mut max: f32 = 0.0;
         let mut clips = 0;
         for n in 0..left.len() {
@@ -193,15 +222,24 @@ impl AutoLimitProcessor {
                 if v.abs() > self.threshold {
                     clips += 1;
                 }
-                *v = v.clamp(-0.99, 0.99);
+                *v = v.clamp(-ceiling, ceiling);
             }
             left[n] = vals[0];
             if let Some(r) = right.as_mut() {
                 r[n] = vals[1];
             }
         }
-        if !self.frozen && (clips > 0 || max > self.threshold) && max > 0.0 {
-            self.target_volume = (self.threshold / max).min(self.max_gain);
+        if !self.frozen && max > 0.0 {
+            let ceiling = self.gain_ceiling();
+            if clips > 0 || max > self.threshold {
+                // Clipping: attenuate so the block fits under the threshold.
+                self.target_volume = (self.threshold / max).clamp(0.0, ceiling);
+            } else {
+                // Material is below the threshold: release the gain back
+                // towards the ceiling, otherwise the channel stays attenuated
+                // for the rest of the session.
+                self.target_volume = ceiling;
+            }
         }
         self.current_volume += (self.target_volume - self.current_volume).signum() * self.delta;
         if (self.current_volume - self.target_volume).abs() < self.delta {
@@ -225,6 +263,9 @@ pub struct Pulse {
     pub metro_volume: f32,
     sync_positions: Vec<SyncPosition>,
     max_sync_positions: usize,
+    /// Monotonic id source: reusing the vector length would hand out an index
+    /// that an existing sync position still holds after `del_sync`.
+    next_sync_index: i32,
 }
 impl Pulse {
     pub const METRONOME_HIT_LEN: NFrames = 800;
@@ -240,13 +281,19 @@ impl Pulse {
             metro_volume: 0.1,
             sync_positions: Vec::new(),
             max_sync_positions: 1000,
+            next_sync_index: 0,
         }
     }
     pub fn quantize_length(&self, src: NFrames) -> NFrames {
         if self.len == 0 {
             src
         } else {
-            ((src as f32 / self.len as f32).round() as NFrames) * self.len
+            // Round to the nearest whole pulse length in u64: frame counts are
+            // wide enough to overflow the u32 product.
+            let pulses = (u64::from(src) + u64::from(self.len) / 2) / u64::from(self.len);
+            pulses
+                .saturating_mul(u64::from(self.len))
+                .min(u64::from(u32::MAX)) as NFrames
         }
     }
     pub fn wrap(&mut self) {
@@ -257,7 +304,9 @@ impl Pulse {
     }
     pub fn process_clock(&mut self, n: NFrames) {
         let prev_curpos = self.curpos;
-        if !self.stopped {
+        // A zero-length pulse has nothing to wrap to; `curpos %= len` would
+        // divide by zero on the realtime clock path.
+        if !self.stopped && self.len > 0 {
             self.curpos += n;
             if self.curpos >= self.len {
                 self.curpos %= self.len;
@@ -275,7 +324,8 @@ impl Pulse {
         if self.sync_positions.len() >= self.max_sync_positions {
             return Err("max sync positions reached".into());
         }
-        let idx = self.sync_positions.len() as i32;
+        let idx = self.next_sync_index;
+        self.next_sync_index = self.next_sync_index.saturating_add(1);
         self.sync_positions.push(SyncPosition { position: pos, callback: cb, index: idx });
         Ok(idx)
     }
@@ -317,6 +367,31 @@ impl<'a, C: AudioBufferConfig> PassthroughProcessor<'a, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn zero_length_pulse_does_not_divide_by_zero() {
+        let mut pulse = Pulse::new(0, 0);
+        pulse.process_clock(128);
+        assert_eq!(pulse.curpos, 0);
+        assert!(!pulse.take_wrapped());
+    }
+
+    #[test]
+    fn sync_indices_stay_unique_after_a_deletion() {
+        let mut pulse = Pulse::new(480, 0);
+        let first = pulse.add_sync(10, Box::new(|_, _| {})).unwrap();
+        let second = pulse.add_sync(20, Box::new(|_, _| {})).unwrap();
+        assert!(pulse.del_sync(first));
+        // The next index must not reuse `second`'s index, otherwise deleting it
+        // would remove both positions.
+        let third = pulse.add_sync(30, Box::new(|_, _| {})).unwrap();
+        assert_ne!(third, first);
+        assert_ne!(third, second);
+        assert!(pulse.del_sync(third));
+        assert_eq!(pulse.sync_positions.len(), 1);
+        assert!(pulse.del_sync(second));
+        assert!(pulse.sync_positions.is_empty());
+    }
+
     #[test]
     fn fader_round_trip() {
         for db in [-60.0, -40.0, -20.0, 0.0] {

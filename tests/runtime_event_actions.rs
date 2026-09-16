@@ -111,8 +111,12 @@ fn actual_fullscreen_chain_applies_variable_before_application_action() {
 #[test]
 fn actual_save_loop_and_scene_bindings_carry_configured_codec_and_save_mode() {
     let mut config = FloConfig::new();
-    config.set_int_variable("SYSTEM_loopid_lastrecord_0", 12);
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/fweelin.xml");
+    // Seeded *before* the load: parsing a binding captures the value of a
+    // `SYSTEM_` variable it references (`store_parameter_value`), so the
+    // seed has to be in place while the documents are parsed. Seeding after
+    // the load leaves the captured default (0) in the binding.
+    config.set_int_variable("SYSTEM_loopid_lastrecord_0", 12);
     config.load_authoritative(&path).unwrap();
     config
         .get_variable_mut("VAR_keyheld_shift")

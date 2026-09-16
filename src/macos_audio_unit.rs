@@ -304,10 +304,6 @@ impl MacosAudioUnitBackend {
     }
 
     /// Verify both AudioUnit sides negotiated the expected non-interleaved
-    /// stereo float format and buffer count before starting IO. A mismatch
-    /// here means the device rejected the requested layout, so starting the
-    /// callback would deliver corrupt or truncated audio.
-    /// Verify both AudioUnit sides negotiated the expected non-interleaved
     /// stereo float format before starting IO. The HAL output unit exposes the
     /// playback side on the input scope (element 0) and the capture side on
     /// the output scope (element 1); those are the two (scope, element) pairs
@@ -322,7 +318,9 @@ impl MacosAudioUnitBackend {
             let format = audio_unit_format(self.unit, scope, element)?;
             let non_interleaved = format.mFormatFlags & K_AUDIO_FORMAT_FLAG_IS_NON_INTERLEAVED != 0;
             let float = format.mFormatFlags & K_AUDIO_FORMAT_FLAG_IS_FLOAT != 0;
-            if format.mChannelsPerFrame < NUM_CHANNELS as u32 || !non_interleaved || !float {
+            // Exactly two channels: the capture list and the callback handle
+            // two buffers, so a wider negotiated layout would overrun them.
+            if format.mChannelsPerFrame != NUM_CHANNELS as u32 || !non_interleaved || !float {
                 return Err(format!(
                     "CoreAudio {side} format is not non-interleaved stereo float \
                      (channels={}, flags=0x{:x}); refusing to start the duplex callback",
@@ -352,39 +350,41 @@ impl MacosAudioUnitBackend {
     /// path here unwinds through `dispose_unit` + `destroy_owned_aggregate` and
     /// never leaves an owned aggregate or a running AudioUnit behind.
     fn configure(&mut self) -> Result<BackendInfo, String> {
-        let (active, aggregate_path, requested_input, requested_output) = self
-            .route
-            .as_ref()
-            .map(|route| {
-                (
-                    route.active_device,
-                    route.owned_aggregate_uid.is_some(),
-                    route.requested_input,
-                    route.requested_output,
-                )
-            })
-            .ok_or("audio route must be resolved before configuring the AudioUnit")?;
-        let desc = AudioComponentDescription {
-            componentType: K_AUDIO_UNIT_TYPE_OUTPUT,
-            componentSubType: K_AUDIO_UNIT_SUBTYPE_HAL_OUTPUT,
-            componentManufacturer: K_AUDIO_UNIT_MANUFACTURER_APPLE,
-            componentFlags: 0,
-            componentFlagsMask: 0,
-        };
-        // SAFETY: CoreAudio takes the description only for this call and writes
-        // a fresh AudioUnit instance into `unit`.
-        let component = unsafe { AudioComponentFindNext(ptr::null_mut(), &desc) };
-        if component.is_null() {
-            return Err("cannot find macOS HAL audio unit".into());
-        }
-        let mut unit = ptr::null_mut();
-        check(
-            unsafe { AudioComponentInstanceNew(component, &mut unit) },
-            "create HAL audio unit",
-        )?;
-        self.unit = unit;
-
+        // Everything that can fail lives inside `setup`, including the route
+        // lookup and the AudioUnit creation, so the unwind below covers every
+        // failure path.
         let setup = (|| {
+            let (active, aggregate_path, requested_input, requested_output) = self
+                .route
+                .as_ref()
+                .map(|route| {
+                    (
+                        route.active_device,
+                        route.owned_aggregate_uid.is_some(),
+                        route.requested_input,
+                        route.requested_output,
+                    )
+                })
+                .ok_or("audio route must be resolved before configuring the AudioUnit")?;
+            let desc = AudioComponentDescription {
+                componentType: K_AUDIO_UNIT_TYPE_OUTPUT,
+                componentSubType: K_AUDIO_UNIT_SUBTYPE_HAL_OUTPUT,
+                componentManufacturer: K_AUDIO_UNIT_MANUFACTURER_APPLE,
+                componentFlags: 0,
+                componentFlagsMask: 0,
+            };
+            // SAFETY: CoreAudio takes the description only for this call and
+            // writes a fresh AudioUnit instance into `unit`.
+            let component = unsafe { AudioComponentFindNext(ptr::null_mut(), &desc) };
+            if component.is_null() {
+                return Err("cannot find macOS HAL audio unit".into());
+            }
+            let mut unit = ptr::null_mut();
+            check(
+                unsafe { AudioComponentInstanceNew(component, &mut unit) },
+                "create HAL audio unit",
+            )?;
+            self.unit = unit;
             set_property(
                 unit,
                 K_AUDIO_OUTPUT_UNIT_PROPERTY_ENABLE_IO,
@@ -448,6 +448,18 @@ impl MacosAudioUnitBackend {
                 &callback,
                 "set duplex render callback",
             )?;
+            // The HAL only honours MaximumFramesPerSlice while the unit is
+            // uninitialized, so size the slice from the request first and
+            // verify the negotiated size below fits inside it.
+            let max_frames = (MAX_CALLBACK_FRAMES as u32).max(self.requested_frames());
+            set_property(
+                unit,
+                K_AUDIO_UNIT_PROPERTY_MAXIMUM_FRAMES_PER_SLICE,
+                K_AUDIO_UNIT_SCOPE_GLOBAL,
+                0,
+                &max_frames,
+                "set maximum frames per slice",
+            )?;
             let frames = if aggregate_path {
                 // An aggregate device only honours its buffer-frame-size
                 // property once its IO proc is attached, which happens when
@@ -475,15 +487,12 @@ impl MacosAudioUnitBackend {
                 )?;
                 actual
             };
-            let max_frames = (MAX_CALLBACK_FRAMES as u32).max(frames);
-            set_property(
-                unit,
-                K_AUDIO_UNIT_PROPERTY_MAXIMUM_FRAMES_PER_SLICE,
-                K_AUDIO_UNIT_SCOPE_GLOBAL,
-                0,
-                &max_frames,
-                "set maximum frames per slice",
-            )?;
+            if frames > max_frames {
+                return Err(format!(
+                    "CoreAudio negotiated {frames} frames per slice above the \
+                     {max_frames}-frame limit"
+                ));
+            }
             self.latency = latency_estimate(requested_input, requested_output, frames, 0);
             self.state = Some(state);
             Ok(BackendInfo {
@@ -565,13 +574,16 @@ impl MacosAudioUnitBackend {
                 K_AUDIO_OBJECT_SCOPE_GLOBAL,
             )
             .is_ok_and(|current| current == restore.applied_frames)
-            {
-                let _ = set_device_u32(
+                && let Err(error) = set_device_u32(
                     restore.device,
                     K_AUDIO_DEVICE_PROPERTY_BUFFER_FRAME_SIZE,
                     K_AUDIO_OBJECT_SCOPE_GLOBAL,
                     restore.previous_frames,
-                );
+                )
+            {
+                // A discarded failure would leave the physical device at the
+                // low-latency size after FreeWheeling closes.
+                eprintln!("[AUDIO-DIAG] audio: cannot restore the device buffer frames: {error}");
             }
         }
     }
@@ -764,8 +776,10 @@ unsafe extern "C" fn render_callback(
     // SAFETY: `ref_con` is a Box<CallbackState> held by the backend until the
     // AudioUnit has stopped; this callback is its sole mutable realtime user.
     let state = unsafe { &mut *ref_con.cast::<CallbackState>() };
-    let _guard = state
-        .realtime_metrics
+    // Clone the metrics Arc (no allocation) before the callback body borrows
+    // `state`, so the guard never aliases that mutable reference.
+    let realtime_metrics = state.realtime_metrics.clone();
+    let _guard = realtime_metrics
         .as_ref()
         .map(|metrics| metrics.enter_callback());
     let started = Instant::now();
@@ -807,14 +821,11 @@ unsafe extern "C" fn render_callback(
         .metrics
         .playback_frames
         .fetch_add(frames as u64, Ordering::Relaxed);
-    // Reconstruct `state` inside the closure from the raw pointer ref_con
-    // rather than capturing &mut CallbackState, so catch_unwind compiles
-    // without AssertUnwindSafe.  Panics in an audio callback corrupt the
+    // `state` is the single mutable reference for this callback: the closure
+    // borrows it rather than deriving a second one from `ref_con`, which would
+    // invalidate the uses below. Panics in an audio callback corrupt the
     // processor state and cannot be recovered safely.
-    let result = std::panic::catch_unwind(|| {
-        // SAFETY: ref_con is a Box<CallbackState> owned by the backend; the
-        // AudioUnit guarantees this callback is the sole caller.
-        let state = unsafe { &mut *ref_con.cast::<CallbackState>() };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // SAFETY: HAL is configured for non-interleaved f32 stereo. The
         // callback's `frames` cannot exceed either supplied buffer size.
         let output = unsafe { &mut *io_data };
@@ -823,6 +834,7 @@ unsafe extern "C" fn render_callback(
                 .metrics
                 .frame_size_mismatches
                 .fetch_add(1, Ordering::Relaxed);
+            zero_output(io_data);
             return;
         }
         let left_buffer = unsafe { buffer_at(io_data, 0) };
@@ -832,6 +844,7 @@ unsafe extern "C" fn render_callback(
                 .metrics
                 .frame_size_mismatches
                 .fetch_add(1, Ordering::Relaxed);
+            zero_output(io_data);
             return;
         }
         // SAFETY: left was validated above (non-null, sufficient size).
@@ -844,6 +857,12 @@ unsafe extern "C" fn render_callback(
                     .metrics
                     .frame_size_mismatches
                     .fetch_add(1, Ordering::Relaxed);
+                // The right buffer cannot be written; treat the callback as
+                // silent rather than leaving stale samples in it.
+                // SAFETY: CoreAudio owns the buffer and reported its size.
+                unsafe {
+                    ptr::write_bytes(right_buffer.mData, 0, right_buffer.mDataByteSize as usize);
+                }
                 None
             } else {
                 // SAFETY: pointer was validated above.
@@ -869,7 +888,7 @@ unsafe extern "C" fn render_callback(
         if let Some(right) = right {
             right.copy_from_slice(&state.scratch_right[..count]);
         }
-    });
+    }));
     if let Err(_panic) = result {
         zero_output(io_data);
         // State may be corrupted after a panic; abort rather than continue
@@ -1153,8 +1172,11 @@ fn device_uid(device: u32) -> Result<String, String> {
         unsafe { AudioObjectGetPropertyDataSize(device, &address, 0, ptr::null(), &mut size) },
         "query device UID size",
     )?;
+    if (size as usize) < std::mem::size_of::<CFStringRef>() {
+        return Err(format!("CoreAudio device {device} returned a {size}-byte UID"));
+    }
     let mut bytes = vec![0u8; size as usize];
-    // SAFETY: the buffer matches the size CoreAudio reported.
+    // SAFETY: the buffer is at least as large as a CFStringRef.
     check(
         unsafe {
             AudioObjectGetPropertyData(
@@ -1310,6 +1332,12 @@ impl OwnedAggregate {
             },
             "query aggregate subdevice list",
         )?;
+        if (size as usize) < std::mem::size_of::<CFArrayRef>() {
+            return Err(format!(
+                "aggregate {} returned a {size}-byte subdevice list",
+                self.device_id
+            ));
+        }
         // The buffer holds the CFArrayRef *value*; dereference it rather than
         // passing the buffer address. The returned CFArray of CFStrings is
         // owned by this call (Create Rule); wrapping without retaining

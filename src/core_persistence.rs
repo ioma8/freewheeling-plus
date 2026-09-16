@@ -57,22 +57,33 @@ pub fn saveable_path(
     format!("{}/{}", library, saveable_stub(base, hash, name, ext))
 }
 
+/// Split `<base>-<32 hex hash>[-<name>][<ext>]` into its three parts.
+///
+/// `base_len` is the byte length of the base, which the caller derives from the
+/// saveable kind; every index is validated, so a non-ASCII name is reported
+/// instead of panicking.
 pub fn split_filename(filename: &str, base_len: usize) -> Result<(String, String, String), String> {
-    let slash = filename
-        .get(base_len..)
+    let separator = base_len
+        .checked_add(1)
+        .filter(|separator| filename.is_char_boundary(*separator))
         .ok_or_else(|| format!("invalid filename: {filename}"))?;
-    if slash.is_empty() {
+    let rest = filename
+        .get(separator..)
+        .ok_or_else(|| format!("invalid filename: {filename}"))?;
+    if rest.is_empty() {
         return Err(format!("invalid filename: {filename}"));
     }
-    let dot = filename.rfind('.').unwrap_or(filename.len());
-    let breaker = filename[base_len + 1..]
-        .find('-')
-        .map(|i| base_len + 1 + i)
-        .unwrap_or(dot);
-    if dot < base_len + 1 || breaker < base_len + 1 || breaker - (base_len + 1) != HASH_LENGTH * 2 {
+    // Only the region after the base carries the extension: a dot inside a
+    // directory component must not be mistaken for one.
+    let dot = rest
+        .rfind('.')
+        .map(|index| separator + index)
+        .unwrap_or(filename.len());
+    let breaker = rest.find('-').map(|index| separator + index).unwrap_or(dot);
+    if dot < separator || breaker < separator || breaker - separator != HASH_LENGTH * 2 {
         return Err(format!("invalid hash in filename: {filename}"));
     }
-    let hash = &filename[base_len + 1..breaker];
+    let hash = &filename[separator..breaker];
     if decode_hash(hash).is_none() {
         return Err(format!("invalid hash in filename: {filename}"));
     }
@@ -118,19 +129,44 @@ pub fn md5_audio(bytes: &[u8]) -> [u8; HASH_LENGTH] {
 /// undefined and consequently cannot be reproduced as a portable identifier.
 /// This is the deterministic representation that code was clearly intended to
 /// generate and keeps hashes independent of the host float byte order.
+///
+/// Quantisation contract (pinned by `loop_signal_hash_uses_cpp_channel_order_and_quantisation`):
+/// the sample is scaled by 256 and truncated, then clamped to one byte. A byte
+/// cannot cover the whole ±1.0 range without collisions, so material below
+/// `0.0` quantises to `0` and material at or above `1.0` to `255`. Changing
+/// this mapping changes every saved loop's filename hash, so it is deliberately
+/// frozen.
 pub fn md5_loop_samples(
     left: &[crate::block::Sample],
     right: Option<&[crate::block::Sample]>,
 ) -> [u8; HASH_LENGTH] {
     let right = right.unwrap_or(&[]);
     let mut quantised = Vec::with_capacity(left.len().saturating_add(right.len()));
-    quantised.extend(left.iter().map(|sample| (*sample * 256.0) as u8));
-    quantised.extend(right.iter().map(|sample| (*sample * 256.0) as u8));
+    quantised.extend(left.iter().map(|sample| quantise_sample(*sample)));
+    quantised.extend(right.iter().map(|sample| quantise_sample(*sample)));
     md5(&quantised)
+}
+
+/// One 8-bit quantised sample, see [`md5_loop_samples`].
+fn quantise_sample(sample: crate::block::Sample) -> u8 {
+    // Non-finite input cannot be quantised; treat it as silence so the hash
+    // stays deterministic.
+    if !sample.is_finite() {
+        return 0;
+    }
+    (sample * 256.0) as u8
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoopMeta {
+    /// The loop's 16-byte hash as 32 hex digits.
+    ///
+    /// Kept as a `String` rather than a `[u8; 16]` newtype because the value
+    /// is the *name* the loop is stored under: it round-trips through the
+    /// scene XML, the library file names and the C++ naming helpers
+    /// (`saveable_path`/`saveable_stub`), all of which are text. Validation
+    /// happens at the boundaries instead: `parse_scene` rejects an empty or
+    /// non-hex hash, and `encode_hash`/`decode_hash` are the only conversions.
     pub hash: String,
     pub loop_id: i32,
     pub volume: f32,
@@ -166,7 +202,9 @@ pub fn scene_xml(scene: &Scene) -> String {
         writeln!(
             x,
             "  <loop loopid=\"{}\" hash=\"{}\" volume=\"{:.5}\"/>",
-            l.loop_id, l.hash, l.volume
+            l.loop_id,
+            xml_escape(&l.hash),
+            l.volume
         )
         .unwrap();
     }
@@ -239,6 +277,35 @@ mod tests {
             encode_hash(&md5_loop_samples(&left, Some(&right))),
             encode_hash(&md5_audio(&[0, 128, 64, 192, 32]))
         );
+    }
+
+    #[test]
+    fn loop_signal_hash_clamps_negative_and_out_of_range_samples() {
+        // The documented contract: below zero is clamped to 0 and one or more
+        // to 255, so the mapping stays stable for existing library filenames.
+        let samples = [-1.0_f32, -0.5, 0.0, 0.5, 1.0, 2.0, f32::NAN];
+        assert_eq!(
+            encode_hash(&md5_loop_samples(&samples, None)),
+            encode_hash(&md5_audio(&[0, 0, 0, 128, 255, 255, 0]))
+        );
+    }
+
+    #[test]
+    fn split_filename_handles_dotted_directories_and_non_ascii_names() {
+        let hash = "0123456789ABCDEF0123456789ABCDEF";
+        assert_eq!(
+            split_filename("lib.v2/loop-0123456789ABCDEF0123456789ABCDEF-name", 11).unwrap(),
+            ("lib.v2/loop".into(), hash.into(), "name".into())
+        );
+        // A base length that splits a multi-byte character is rejected
+        // instead of panicking.
+        assert!(split_filename("lib-lö", 6).is_err());
+        // A non-ASCII name after the hash is preserved.
+        let (base, hash, name) =
+            split_filename("lib-lö-0123456789ABCDEF0123456789ABCDEF-näme", 7).unwrap();
+        assert_eq!(base, "lib-lö");
+        assert_eq!(hash, "0123456789ABCDEF0123456789ABCDEF");
+        assert_eq!(name, "näme");
     }
 
     #[test]

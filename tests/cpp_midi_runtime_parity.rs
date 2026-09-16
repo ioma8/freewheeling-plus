@@ -234,9 +234,42 @@ fn genuine_cpp_output_fixture_matches_clamping_sync_and_runtime_send() {
     );
     io.activate(0, 1).unwrap();
     for (message, bytes) in cases {
+        // Through `io.send`: this path intentionally does not echo (echoing is
+        // the caller's decision), so the bytes on the wire are the input.
         io.send(0, message).unwrap();
         assert_eq!(encode(&registry.take_output().unwrap().message), bytes);
     }
+
+    // Transport bytes go through the production clock/start/stop paths, which
+    // is where the sync gating lives: with `sync_transmit` disabled nothing
+    // may reach the port.
+    io.sync_transmit = false;
+    io.output_clock(0).unwrap();
+    io.output_start(0).unwrap();
+    io.output_stop(0).unwrap();
+    assert!(
+        registry.take_output().is_none(),
+        "transport output ignored the sync_transmit gate"
+    );
+    io.sync_transmit = true;
+    io.output_clock(0).unwrap();
+    assert_eq!(
+        encode(&registry.take_output().unwrap().message),
+        [0xf8],
+        "clock output"
+    );
+    io.output_start(0).unwrap();
+    assert_eq!(
+        encode(&registry.take_output().unwrap().message),
+        [0xfa],
+        "start output"
+    );
+    io.output_stop(0).unwrap();
+    assert_eq!(
+        encode(&registry.take_output().unwrap().message),
+        [0xfc],
+        "stop output"
+    );
     io.shutdown();
 
     for (wire, start) in [([0xfa], true), ([0xfc], false)] {

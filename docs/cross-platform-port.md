@@ -183,7 +183,7 @@ impl Platform for UIKitPlatform {
         Ok(())
     }
 
-    fn set_menu_and_foreground(&mut self) -> Result<(), Self::Error> {
+    fn activate_foreground(&mut self) -> Result<(), Self::Error> {
         // No-op: iOS has no menu bar. SDL2 handles full-screen.
         Ok(())
     }

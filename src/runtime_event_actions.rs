@@ -209,6 +209,9 @@ pub enum DispatchError {
     InvalidLoopId(i32),
     InvalidInputId(i32),
     RecursionLimit { depth: usize },
+    /// No parameter set is configured for the given interface/display, so the
+    /// relative parameter index cannot be resolved.
+    MissingParameterSet { interfaceid: i32, displayid: i32 },
     MissingParameter(&'static str),
     InvalidParameter(&'static str),
 }
@@ -220,6 +223,10 @@ impl std::fmt::Display for DispatchError {
             DispatchError::InvalidLoopId(id) => write!(f, "invalid loop id {id}"),
             DispatchError::InvalidInputId(id) => write!(f, "invalid input id {id}"),
             DispatchError::RecursionLimit { depth } => write!(f, "dispatch recursion limit reached (depth {depth})"),
+            DispatchError::MissingParameterSet { interfaceid, displayid } => write!(
+                f,
+                "no parameter set for interface {interfaceid} display {displayid}"
+            ),
             DispatchError::MissingParameter(name) => write!(f, "missing dispatch parameter '{name}'"),
             DispatchError::InvalidParameter(name) => write!(f, "invalid dispatch parameter '{name}'"),
         }
@@ -386,7 +393,16 @@ impl RuntimeEventDispatcher {
                     program: *val as i32,
                 }))?;
             }
-            _ => {}
+            other => {
+                // Native input with no runtime action: report the gap instead
+                // of dropping it silently.
+                if std::env::var_os("FWEELIN_DIAGNOSTICS").is_some() {
+                    eprintln!(
+                        "FreeWheeling dispatch: no runtime action for {:?}",
+                        other.get_type()
+                    );
+                }
+            }
         }
         Ok(())
 }
@@ -461,14 +477,21 @@ impl RuntimeEventDispatcher {
                 out.append(nested)?;
             }
             EventType::ALSAMixerControlSet => {
+                // val1/val2 select the control cell and val3/val4 carry level
+                // values. The level is clamped to ALSA's 16-bit control range:
+                // the shipped rme-hdsp bindings compute it from two fader
+                // conversions, which can overshoot, and an out-of-range value
+                // makes `amixer` reject the write (leaving hardware monitoring
+                // at a different level than the software path).
+                let level = |name: &'static str| int(p, name).map(alsa_control_level);
                 out.push(app(ApplicationAction::AlsamixerControlSet {
                     hwid: int(p, "hwid")?,
                     numid: int(p, "numid")?,
                     values: [
                         int(p, "val1")?,
                         int(p, "val2")?,
-                        int(p, "val3")?,
-                        int(p, "val4")?,
+                        level("val3")?,
+                        level("val4")?,
                     ],
                 }))?
             }
@@ -476,11 +499,19 @@ impl RuntimeEventDispatcher {
                 let key = (int(p, "interfaceid")?, int(p, "displayid")?);
                 let relative = int(p, "paramidx")? as isize;
                 let target = variable_ref(p, "absidx")?;
-                if let Some(paramset) = config.paramsets.get(&key)
-                    && let Some(index) = paramset.absolute_param_index(relative)
-                {
-                    config.set_int_variable(target, index as i32);
-                }
+                // The chained outputs below send this index on the wire, so an
+                // unresolvable one must fail the binding: silently keeping the
+                // variable would re-send the previous edit's index as if it
+                // belonged to the parameter being edited now.
+                let index = config
+                    .paramsets
+                    .get(&key)
+                    .and_then(|paramset| paramset.absolute_param_index(relative))
+                    .ok_or(DispatchError::MissingParameterSet {
+                        interfaceid: key.0,
+                        displayid: key.1,
+                    })?;
+                config.set_int_variable(target, index as i32);
             }
             EventType::ParamSetGetParam => {
                 let key = (int(p, "interfaceid")?, int(p, "displayid")?);
@@ -517,39 +548,13 @@ impl RuntimeEventDispatcher {
             }
             EventType::EndRecord => out.push(runtime(RuntimeCommand::StopRecord))?,
             EventType::SetMasterInVolume => {
-                let vol = float_or(p, "vol", -1.0)?;
-                let gain = if vol >= 0.0 {
-                    vol
-                } else if let Some(fader) = p.iter().find(|(key, _)| key == "fadervol") {
-                    let fader = match &fader.1 {
-                        StoredParameterValue::Float(value) => *value,
-                        StoredParameterValue::Int(value) => *value as f32,
-                        _ => return Err(DispatchError::InvalidParameter("fadervol")),
-                    };
-                    let db = crate::core_dsp::AudioLevel::fader_to_db(fader, config.fader_max_db());
-                    10.0_f32.powf(db / 20.0)
-                } else {
-                    -1.0
-                };
+                let gain = master_gain(p, config)?;
                 if gain >= 0.0 {
                     out.push(runtime(RuntimeCommand::SetInputMonitor(gain)))?;
                 }
             }
             EventType::SetMasterOutVolume => {
-                let vol = float_or(p, "vol", -1.0)?;
-                let gain = if vol >= 0.0 {
-                    vol
-                } else if let Some(fader) = p.iter().find(|(key, _)| key == "fadervol") {
-                    let fader = match &fader.1 {
-                        StoredParameterValue::Float(value) => *value,
-                        StoredParameterValue::Int(value) => *value as f32,
-                        _ => return Err(DispatchError::InvalidParameter("fadervol")),
-                    };
-                    let db = crate::core_dsp::AudioLevel::fader_to_db(fader, config.fader_max_db());
-                    10.0_f32.powf(db / 20.0)
-                } else {
-                    -1.0
-                };
+                let gain = master_gain(p, config)?;
                 if gain >= 0.0 {
                     out.push(runtime(RuntimeCommand::SetMasterGain(gain)))?;
                 }
@@ -868,7 +873,12 @@ impl RuntimeEventDispatcher {
             EventType::InputMIDIController => {
                 let channel = byte(p, "midichannel")?;
                 let control = byte(p, "controlnum")?;
-                let value = byte(p, "controlval")?;
+                // Clamped, not rejected: several shipped bindings sum two
+                // controller values (data/mercury.xml), which can exceed the
+                // 7-bit range. A CC byte cannot carry more than 127, and
+                // masking would wrap 128 to 0 and send the parameter the wrong
+                // way, so the value saturates at the top of the range.
+                let value = midi_value(int(p, "controlval")?);
                 out.push(runtime(RuntimeCommand::SynthController {
                     channel,
                     control,
@@ -901,7 +911,9 @@ impl RuntimeEventDispatcher {
                     channel,
                     soundfont_id: int_or(p, "soundfontid", 0)?,
                     bank: int_or(p, "bank", 0)?,
-                    program,
+                    // Both the synth and the echoed MIDI message use the same
+                    // normalized value.
+                    program: program.clamp(0, 127),
                 }))?;
                 out.push(app(ApplicationAction::OutputMidi {
                     message: MidiMessage::ProgramChange {
@@ -938,7 +950,14 @@ impl RuntimeEventDispatcher {
             EventType::TransmitPlayingLoopsToDAW => {
                 out.push(app(ApplicationAction::TransmitPlayingLoopsToDaw))?
             }
-            _ => {}
+            other => {
+                // A vocabulary gap (a typo in an XML binding, or an event type
+                // that was never wired up) would otherwise look like an inert
+                // key press.
+                if std::env::var_os("FWEELIN_DIAGNOSTICS").is_some() {
+                    eprintln!("FreeWheeling dispatch: unhandled event type {other:?}");
+                }
+            }
         }
         Ok(())
     }
@@ -957,8 +976,18 @@ fn int(p: &[(String, StoredParameterValue)], name: &'static str) -> Result<i32, 
     match value(p, name)? {
         StoredParameterValue::Char(v) => Ok(*v as i32),
         StoredParameterValue::Int(v) => Ok(*v),
-        StoredParameterValue::Long(v) => Ok(*v as i32),
-        StoredParameterValue::Float(v) => Ok(*v as i32),
+        // Checked narrowing: a wrapped value would defeat the range checks of
+        // every caller (e.g. `loop_slot`).
+        StoredParameterValue::Long(v) => {
+            i32::try_from(*v).map_err(|_| DispatchError::InvalidParameter(name))
+        }
+        StoredParameterValue::Float(v) => {
+            if v.is_finite() && *v >= i32::MIN as f32 && *v <= i32::MAX as f32 {
+                Ok(*v as i32)
+            } else {
+                Err(DispatchError::InvalidParameter(name))
+            }
+        }
         _ => Err(DispatchError::InvalidParameter(name)),
     }
 }
@@ -971,6 +1000,27 @@ fn float(p: &[(String, StoredParameterValue)], name: &'static str) -> Result<f32
         _ => Err(DispatchError::InvalidParameter(name)),
     }
 }
+/// Resolve a master-volume binding to a linear gain.
+///
+/// `vol` is used directly when present and non-negative, otherwise the fader
+/// value is converted through the configured dB scale. Shared by the input and
+/// output master arms (and it accepts a `Char` fader, like `float`).
+fn master_gain(
+    p: &[(String, StoredParameterValue)],
+    config: &crate::config::FloConfig,
+) -> Result<f32, DispatchError> {
+    let vol = float_or(p, "vol", -1.0)?;
+    if vol >= 0.0 {
+        return Ok(vol);
+    }
+    if p.iter().any(|(key, _)| key == "fadervol") {
+        let fader = float(p, "fadervol")?;
+        let db = crate::core_dsp::AudioLevel::fader_to_db(fader, config.fader_max_db());
+        return Ok(10.0_f32.powf(db / 20.0));
+    }
+    Ok(-1.0)
+}
+
 fn int_or(
     p: &[(String, StoredParameterValue)],
     name: &'static str,
@@ -1013,6 +1063,19 @@ fn bool_or(
 fn byte(p: &[(String, StoredParameterValue)], name: &'static str) -> Result<u8, DispatchError> {
     u8::try_from(int(p, name)?).map_err(|_| DispatchError::InvalidParameter(name))
 }
+
+/// Clamp an ALSA control value to the 16-bit range the mixer controls use.
+fn alsa_control_level(value: i32) -> i32 {
+    value.clamp(0, i32::from(u16::MAX))
+}
+
+/// A 7-bit MIDI data value.
+///
+/// Sums of controller values (`CC_a + CC_b`) saturate here instead of wrapping,
+/// so an over-range value cannot flip the parameter to the opposite end.
+fn midi_value(value: i32) -> u8 {
+    u8::try_from(value.clamp(0, 127)).unwrap_or(127)
+}
 fn u16_param(
     p: &[(String, StoredParameterValue)],
     name: &'static str,
@@ -1043,9 +1106,12 @@ fn range(p: &[(String, StoredParameterValue)], name: &'static str) -> Result<Ran
         _ => Err(DispatchError::InvalidParameter(name)),
     }
 }
-fn loop_slot(id: i32) -> Result<u8, DispatchError> {
+fn loop_slot(id: i32) -> Result<u16, DispatchError> {
+    // The whole runtime address space must be reachable: shipped interfaces
+    // address legacy offsets such as the piano keyboard's base 350, and a
+    // narrower slot type would silently turn their bindings into no-ops.
     if (0..MAX_RUNTIME_LOOPS as i32).contains(&id) {
-        Ok(id as u8)
+        Ok(id as u16)
     } else {
         Err(DispatchError::InvalidLoopId(id))
     }
@@ -1181,7 +1247,7 @@ mod tests {
         assert_eq!(
             outputs(&batch),
             vec![DispatchOutput::Runtime(RuntimeCommand::Record {
-                slot: b'q',
+                slot: b'q' as u16,
                 presslen_ms: 0
             })]
         );
@@ -1324,5 +1390,69 @@ mod tests {
         // LoopClickedEvent; this dispatcher intentionally has no coordinates
         // to loop-slot mapping and therefore emits nothing for raw mouse input.
         assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn middle_click_overdub_requires_the_mobile_interface() {
+        // SDL's middle button is button 2, so the shipped mobile gestures are
+        // gated on the *selected* interface: on the desktop (interface 1) a
+        // middle-click on a loop must not start a destructive overdub.
+        //
+        // `SYSTEM_cur_switchable_interface` has to exist *before* the XML is
+        // parsed: a condition whose left-hand name is unknown at parse time is
+        // dropped, which is exactly how the gate would become ineffective.
+        // Production seeds it through `core_startup::STARTUP_SYSTEM_VARIABLES`.
+        let dispatch = |interface: i32| {
+            let mut config = FloConfig::new();
+            config.set_int_variable("SYSTEM_cur_switchable_interface", 1);
+            config
+                .load_authoritative(
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("data/fweelin.xml")
+                        .as_path(),
+                )
+                .unwrap();
+            config.set_int_variable("SYSTEM_cur_switchable_interface", interface);
+            // mobile.xml captures its own id from `start-interface`; the gate
+            // compares that id against the selected interface.
+            config.set_int_variable("VAR_mobile_interfaceid", 5);
+            // `trigger-loop`'s legacy `overdub=1` field is not part of the event
+            // schema, so the arm falls back to `VAR_overdubmode` (see the
+            // TriggerLoop arm); the shipped mobile gesture relies on that.
+            config.set_int_variable("VAR_overdubmode", 1);
+            let registry = config.binding_registry.clone();
+            let input = Event::LoopClicked {
+                loopid: 0,
+                button: 2,
+                down: true,
+                in_layout: true,
+                presslen: 0,
+            };
+            let batch = RuntimeEventDispatcher::new()
+                .dispatch(
+                    &mut config,
+                    &registry,
+                    &input,
+                    &[LoopMode::Empty; MAX_RUNTIME_LOOPS],
+                )
+                .unwrap();
+            outputs(&batch)
+        };
+        let desktop = dispatch(1);
+        assert!(
+            !desktop.iter().any(|output| matches!(
+                output,
+                DispatchOutput::Runtime(RuntimeCommand::Overdub { .. })
+            )),
+            "middle-click must not start an overdub while the desktop interface is selected: {desktop:?}"
+        );
+        let mobile = dispatch(5);
+        assert!(
+            mobile.iter().any(|output| matches!(
+                output,
+                DispatchOutput::Runtime(RuntimeCommand::Overdub { .. })
+            )),
+            "middle-click must still start the mobile overdub gesture: {mobile:?}"
+        );
     }
 }

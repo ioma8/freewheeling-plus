@@ -2,7 +2,11 @@
   <bindings>
     <!-- Variables -->
 
-    <!-- Footswitch controller # used to grab loops initially -->
+    <!-- Footswitch controller # used to grab loops initially.
+
+         64 is the standard MIDI sustain-pedal CC: a keyboard or sustain pedal
+         on the same MIDI input fires these bindings too. Change this to a free
+         CC when the footswitch shares an input with such a device. -->
     <declare var="VAR_midi_footswitch" type="int" init="64"/>
 
     <declare var="VAR_loopid_footswitch" type="int" init="340"/>
@@ -21,32 +25,28 @@
      conditions="VAR_keyheld_up=1 and controlnum=VAR_midi_footswitch and
                  controlval=VAR_switch_on"
      output="slide-loop-amplifier"
-     parameters="loopid=VAR_loopid_footswitch and slide=VAR_slide_speed/2"/> 
+     parameters="loopid=VAR_loopid_footswitch and slide=VAR_slide_speed/2.0"/> 
     <binding input="midicontroller"
      conditions="VAR_keyheld_down=1 and controlnum=VAR_midi_footswitch and
                  controlval=VAR_switch_on"
      output="slide-loop-amplifier"
-     parameters="loopid=VAR_loopid_footswitch and slide=-VAR_slide_speed/2"/> 
+     parameters="loopid=VAR_loopid_footswitch and slide=-VAR_slide_speed/2.0"/> 
 
     <!-- Erase Loops -->
     <binding input="midicontroller"
      conditions="VAR_keyheld_space=1 and controlnum=VAR_midi_footswitch and 
                  controlval=VAR_switch_on"
      output1="erase-loop" parameters1="loopid=VAR_loopid_footswitch" 
-     output2="set-variable" parameters2="var=VAR_xferloop and value=0"/>
+     output2="set-variable" parameters2="var=VAR_xferloop and value=0"
+     output3="set-variable" parameters3="var=VAR_xferidx and value=-1"/>
 
-    <!-- Overdub Loops -->
-    <!-- Auto-overdub for first recorded loop- disabled!
-    <binding input="midicontroller"
-     conditions="SYSTEM_num_loops_in_map=0 and controlnum=VAR_midi_footswitch
-                 and controlval=VAR_switch_on"
-     output1="trigger-loop"
-     parameters1="loopid=VAR_loopid_footswitch and overdub=1 and
-                  overdubfeedback=VAR_overdubfeedback and vol=1.0" 
-     output2="set-variable" parameters2="var=VAR_xferloop and value=1"
-     output3="set-variable" parameters3="var=VAR_xferidx and 
-                                         value=VAR_loopid_footswitch"/>
-      -->
+    <!-- Overdub Loops.
+
+         Overdub requires `VAR_overdubmode=1` (set by the mode bindings in
+         coreinterface.xml). There is deliberately no auto-overdub for the
+         first recorded loop: the upstream block for it was commented out and
+         is not reintroduced here, because the trigger binding below already
+         covers that case without a hidden mode. -->
 
     <binding input="midicontroller"
      conditions="VAR_overdubmode=1 and controlnum=VAR_midi_footswitch
@@ -58,9 +58,14 @@
      output3="set-variable" parameters3="var=VAR_xferidx and
                                          value=VAR_loopid_footswitch"/>
 
-    <!-- Trigger Loops -->
+    <!-- Trigger Loops.
+
+         The negative guards make this fallback order-independent: without
+         them it matches the same controller value as the slide/erase/overdub
+         bindings above, and (with first-match dispatch) any binding placed
+         after it would be silently shadowed. -->
     <binding input="midicontroller"
-     conditions="controlnum=VAR_midi_footswitch and controlval=VAR_switch_on"
+     conditions="VAR_keyheld_up=0 and VAR_keyheld_down=0 and VAR_keyheld_space=0 and VAR_overdubmode=0 and controlnum=VAR_midi_footswitch and controlval=VAR_switch_on"
      output1="trigger-loop" 
      parameters1="loopid=VAR_loopid_footswitch and vol=1.0" 
      output2="set-variable" parameters2="var=VAR_xferloop and value=1"

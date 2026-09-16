@@ -10,7 +10,12 @@
     <binding input="start-interface" 
      output1="video-show-loop" 
      parameters1="layoutid=0 and
-                  loopid=VAR_pckeyfullrange+VAR_loopid_pckeystart"/>
+                  loopid=VAR_loopid_pckeystart"/>
+    <!-- NOTE: only the *low* bound of VAR_pckeyfullrange matters to the layout
+         code (the display base), while every per-key action addresses
+         key + VAR_loopid_pckeystart. Both are the same integer base now, so a
+         non-zero range low bound cannot make the keyboard display different
+         loops than its keys act on. -->
 
     <!-- Rest of the bindings... -->   
 
@@ -37,7 +42,13 @@
      conditions="VAR_keyheld_space=1 and key=VAR_pckeyrange and keydown=1" 
      output="erase-loop" parameters="loopid=key+VAR_loopid_pckeystart"/> 
 
-    <!-- Move Loops -->
+    <!-- Move Loops.
+
+         NOTE: `VAR_xferloop` is cleared unconditionally, so a rejected move
+         (stale source, or a self-move on the same key) drops the pending
+         transfer without feedback. The flag cannot be cleared conditionally
+         from this level, because the dispatcher has no way to branch on the
+         move's outcome. -->
     <binding input="key"
      conditions="VAR_xferloop=1 and key=VAR_pckeyrange and keydown=1"
      output1="move-loop"
@@ -60,8 +71,14 @@
   </bindings>
 
   <graphics>
+    <!-- `show="1"`: this is the layout of the interface the desktop starts on
+         (`VAR_showinterface`/`SYSTEM_cur_switchable_interface` default to id 1).
+         The renderer draws an interface's layouts only while it is selected, so
+         authoring it visible cannot leak it onto another interface's screen.
+         Like the piano keyboard and the footswitch layouts, it has no
+         `video-show-layout` binding of its own. -->
     <layout id="0" name="PC Keyboard" scale="1.0,1.0" pos="0.00,0.00"
-     label="0" elabel="1" show="0">
+     label="0" elabel="1" show="1">
       <element id="113" name="Q" base="0.0,0.0" looppos="0.05,0.05" 
        loopsize="0.1" namepos="0.01,0.00">
         <box outline="TBLR" pos="0.00,0.00, 0.10,0.10"/>

@@ -10,8 +10,12 @@ use std::sync::Arc;
 #[global_allocator]
 static ALLOCATOR: CallbackCountingAllocator = CallbackCountingAllocator;
 
+/// Serializes the tests that assert on the process-global violation counters.
+static COUNTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn owned_platform_callback_and_bounded_queues_do_not_allocate_or_lock() {
+    let _counters = COUNTER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let realtime = RealtimeMetrics::new(48_000, 128).unwrap();
     let (mut command_tx, mut command_rx) = realtime_queue::bounded(8);
     let (mut status_tx, mut status_rx) = realtime_queue::bounded(8);
@@ -54,6 +58,7 @@ fn owned_platform_callback_and_bounded_queues_do_not_allocate_or_lock() {
 
 #[test]
 fn boxed_processor_runs_without_callback_allocation() {
+    let _counters = COUNTER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     use freewheeling_plus::audioio::{
         AudioCallback, AudioCallbackFn, AudioIO, AudioProcessor, BackendInfo,
     };
@@ -102,6 +107,7 @@ fn boxed_processor_runs_without_callback_allocation() {
 
 #[test]
 fn disk_stream_push_uses_only_preallocated_blocks() {
+    let _counters = COUNTER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     use freewheeling_plus::block::Codec;
     use freewheeling_plus::file_streamer::AudioStreamer;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -132,4 +138,28 @@ fn disk_stream_push_uses_only_preallocated_blocks() {
     assert_eq!(blocking_lock_attempts(), 0);
     streamer.finalize().unwrap();
     std::fs::remove_file(path).unwrap();
+}
+
+/// Positive control for the instrumentation itself.
+///
+/// Every `assert_eq!(callback_allocations(), 0)` above passes vacuously if
+/// `in_callback()` is always false or the counting allocator is not installed.
+#[test]
+fn the_violation_counters_actually_count() {
+    let realtime = RealtimeMetrics::new(48_000, 128).unwrap();
+    // Serialized with the other counter assertions: the counters are
+    // process-global, so a concurrent test could observe this allocation.
+    // (`COUNTER_LOCK` is not reentrant: acquire it exactly once per test.)
+    let _serialized = COUNTER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    reset_violation_counters();
+    {
+        let _guard = realtime.enter_callback();
+        let allocated = vec![0u8; 1024];
+        std::hint::black_box(&allocated);
+        assert!(
+            callback_allocations() > 0,
+            "a heap allocation inside a callback window was not counted"
+        );
+    }
+    reset_violation_counters();
 }

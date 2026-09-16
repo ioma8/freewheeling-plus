@@ -1,6 +1,12 @@
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+#[path = "support/scratch.rs"]
+mod scratch;
+
+use scratch::ScratchDir;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
@@ -33,14 +39,19 @@ fn macos_diagnostic_runner_is_manual_and_non_attesting() {
 }
 
 fn run(script: &str, arguments: &[&Path]) -> Output {
+    let arguments: Vec<&OsStr> = arguments
+        .iter()
+        .map(|argument| argument.as_os_str())
+        .collect();
+    run_raw(script, &arguments)
+}
+
+/// Like [`run`], for arguments that are not paths (flags, numbers).
+fn run_raw(script: &str, arguments: &[&OsStr]) -> Output {
     let mut command = Command::new("python3");
     command.arg(root().join("scripts").join(script));
     command.args(arguments);
     command.output().expect("python3 must run validator")
-}
-
-fn temporary(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("freewheeling-{name}-{}", std::process::id()))
 }
 
 fn rgba(path: &Path, width: u32, height: u32, pixels: &[[u8; 4]]) {
@@ -53,8 +64,7 @@ fn rgba(path: &Path, width: u32, height: u32, pixels: &[[u8; 4]]) {
 
 #[test]
 fn screenshot_gate_accepts_exactly_99_5_percent_with_delta_two() {
-    let directory = temporary("screenshots-pass");
-    fs::create_dir_all(&directory).unwrap();
+    let directory = ScratchDir::new("screenshots-pass");
     let reference = directory.join("reference.rgba");
     let candidate = directory.join("candidate.rgba");
     rgba(&reference, 200, 1, &vec![[20; 4]; 200]);
@@ -68,13 +78,11 @@ fn screenshot_gate_accepts_exactly_99_5_percent_with_delta_two() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("99.500000%"));
-    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
 fn screenshot_gate_rejects_below_threshold_and_missing_goldens() {
-    let directory = temporary("screenshots-fail");
-    fs::create_dir_all(&directory).unwrap();
+    let directory = ScratchDir::new("screenshots-fail");
     let reference = directory.join("reference.rgba");
     let candidate = directory.join("candidate.rgba");
     rgba(&reference, 100, 1, &vec![[0; 4]; 100]);
@@ -87,16 +95,33 @@ fn screenshot_gate_rejects_below_threshold_and_missing_goldens() {
     let missing = directory.join("cpp-golden-missing.rgba");
     let output = run("compare_screenshots.py", &[&missing, &candidate]);
     assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("required screenshot fixture is missing")
+    // Every read failure goes through the script's clean `error: ...` report,
+    // and the message names the fixture that could not be read.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error:"), "{stderr}");
+    assert!(stderr.contains("cpp-golden-missing.rgba"), "{stderr}");
+
+    // An out-of-range threshold is an argument error, not a silent pass.
+    let invalid = run_raw(
+        "compare_screenshots.py",
+        &[
+            OsStr::new("--max-delta"),
+            OsStr::new("-1"),
+            reference.as_os_str(),
+            candidate.as_os_str(),
+        ],
     );
-    fs::remove_dir_all(directory).unwrap();
+    assert!(!invalid.status.success());
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr).contains("--max-delta must be >= 0"),
+        "{}",
+        String::from_utf8_lossy(&invalid.stderr)
+    );
 }
 
 #[test]
 fn performance_result_validator_enforces_realtime_acceptance() {
-    let directory = temporary("performance");
-    fs::create_dir_all(&directory).unwrap();
+    let directory = ScratchDir::new("performance-result");
     let valid = directory.join("valid.json");
     fs::write(
         &valid,
@@ -132,24 +157,41 @@ fn performance_result_validator_enforces_realtime_acceptance() {
     let output = run("validate_performance_result.py", &[&invalid]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("below 70%"));
-    fs::remove_dir_all(directory).unwrap();
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn bundle_verifier_requires_executable_resources_license_and_microphone_text() {
-    let directory = temporary("bundle");
+    let directory = ScratchDir::new("bundle-fixture");
     let bundle = directory.join("FreeWheeling.app");
     let contents = bundle.join("Contents");
     let resources = contents.join("Resources");
     fs::create_dir_all(contents.join("MacOS")).unwrap();
     fs::create_dir_all(resources.join("data")).unwrap();
     fs::create_dir_all(resources.join("licenses")).unwrap();
-    fs::copy(
-        env!("CARGO_BIN_EXE_freewheeling-plus"),
-        contents.join("MacOS/freewheeling-plus"),
+    // A system stub, not the crate's own binary: this test is about the
+    // verifier's checks, and copying the real executable would make it depend
+    // on the feature set it was built with (a `--features jack` build links a
+    // Homebrew dylib, which the dependency scan correctly rejects).
+    fs::copy("/usr/bin/true", contents.join("MacOS/freewheeling-plus")).unwrap();
+    // The stub keeps its own architecture list (`/usr/bin/true` is a universal
+    // binary), which is what the verifier compares against.
+    let architectures = String::from_utf8(
+        Command::new("lipo")
+            .args(["-archs", "/usr/bin/true"])
+            .output()
+            .expect("lipo must be available on macOS")
+            .stdout,
     )
     .unwrap();
+    let architectures: Vec<&OsStr> = architectures.split_whitespace().map(OsStr::new).collect();
+    assert!(!architectures.is_empty(), "lipo reported no architectures");
+    let mut verify_arguments = vec![
+        bundle.as_os_str(),
+        OsStr::new("--fixture"),
+        OsStr::new("--architectures"),
+    ];
+    verify_arguments.extend(architectures.iter().copied());
     for file in ["Vera.ttf", "VeraBd.ttf", "basic.sf2"] {
         fs::write(resources.join("data").join(file), b"fixture").unwrap();
     }
@@ -170,7 +212,10 @@ fn bundle_verifier_requires_executable_resources_license_and_microphone_text() {
 </dict></plist>"#,
     )
     .unwrap();
-    let output = run("verify_macos_bundle.py", &[&bundle]);
+    // `--fixture` is the explicit opt-in for a minimal test bundle: without
+    // it the verifier requires a real resource seal, so a tampered bundle
+    // cannot downgrade its own verification through Info.plist.
+    let output = run_raw("verify_macos_bundle.py", &verify_arguments);
     assert!(
         output.status.success(),
         "{}",
@@ -178,10 +223,9 @@ fn bundle_verifier_requires_executable_resources_license_and_microphone_text() {
     );
 
     fs::remove_file(resources.join("data/basic.sf2")).unwrap();
-    let output = run("verify_macos_bundle.py", &[&bundle]);
+    let output = run_raw("verify_macos_bundle.py", &verify_arguments);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("basic.sf2"));
-    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]

@@ -8,19 +8,14 @@ use freewheeling_plus::core_persistence_runtime::{
 };
 use freewheeling_plus::file_codecs::{IFileDecoder, SndFileDecoder};
 use std::fs;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-static NEXT: AtomicU64 = AtomicU64::new(0);
+#[path = "support/scratch.rs"]
+mod scratch;
 
-fn temporary_library() -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "freewheeling-runtime-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir_all(&path).unwrap();
-    path
+use scratch::ScratchDir;
+
+fn library_scratch() -> ScratchDir {
+    ScratchDir::new("runtime-library")
 }
 
 #[derive(Default)]
@@ -83,7 +78,7 @@ impl AudioLoopSource for LoopFixture {
 
 #[test]
 fn encoded_loop_rename_reload_and_scene_workflow_uses_real_files() {
-    let library = temporary_library();
+    let library = library_scratch();
     let mut runtime = PersistenceRuntime::new(OsPersistenceFileSystem, Events::default());
     let mut source = LoopFixture {
         hash: None,
@@ -97,7 +92,7 @@ fn encoded_loop_rename_reload_and_scene_workflow_uses_real_files() {
     let (audio, metadata) = runtime
         .save_loop_encoded(&mut source, &library, Codec::Flac)
         .unwrap();
-    assert!(audio.starts_with(&library));
+    assert!(audio.starts_with(library.path()));
     assert_eq!(
         runtime.load_loop_metadata(&metadata).unwrap().nbeats,
         Some(4)
@@ -128,7 +123,11 @@ fn encoded_loop_rename_reload_and_scene_workflow_uses_real_files() {
     assert!(renamed.with_extension("xml").is_file());
     assert!(!audio.exists());
 
-    let hash = freewheeling_plus::core_persistence::encode_hash(&source.hash.unwrap());
+    let hash = freewheeling_plus::core_persistence::encode_hash(
+        &source
+            .hash
+            .expect("save_loop_encoded should set the loop save hash"),
+    );
     let scene = Scene {
         loops: vec![LoopMeta {
             hash,
@@ -153,6 +152,5 @@ fn encoded_loop_rename_reload_and_scene_workflow_uses_real_files() {
         .unwrap();
     assert_eq!(runtime.events.loads.len(), 1);
     assert_eq!(runtime.events.loads[0].1, 7);
-    assert_eq!(runtime.events.scenes[0].snapshots[0].name, "live & loud");
-    fs::remove_dir_all(library).unwrap();
+    assert_eq!(runtime.events.scenes[0].snapshots()[0].name, "live & loud");
 }

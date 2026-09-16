@@ -87,12 +87,15 @@ pub struct UiRuntimeInput {
 
 impl NativeUiState {
     /// Replace the published frame, enforcing every renderer-facing bound.
-    /// IDs and cursors are clamped, and selection IDs are deduplicated.
+    ///
+    /// Cursors are clamped against the published list length, selection ids
+    /// are positions into [`Self::loops`] (deduplicated), and loop `id`s are
+    /// re-derived from the published order — the runtime's loop ids are not
+    /// renderer indices.
     pub fn sync(&mut self, input: UiRuntimeInput) {
         self.sequence = input.sequence;
         self.sample_clock = input.sample_clock;
         self.pulse_position = input.pulse_position;
-        self.recording_slot = input.recording_slot.filter(|&n| n < MAX_UI_LOOPS);
         self.loops = input
             .loops
             .into_iter()
@@ -103,6 +106,9 @@ impl NativeUiState {
                 v
             })
             .collect();
+        // The slot must index the published list: a renderer indexing
+        // `loops[recording_slot]` would otherwise panic.
+        self.recording_slot = input.recording_slot.filter(|&slot| slot < self.loops.len());
         self.browser_items = input
             .browser_items
             .into_iter()
@@ -114,12 +120,16 @@ impl NativeUiState {
             .into_iter()
             .take(MAX_UI_SELECTION_SETS)
             .map(|set| {
-                let mut out = Vec::with_capacity(MAX_UI_SELECTION_ITEMS);
+                let mut out = Vec::with_capacity(set.len().min(MAX_UI_SELECTION_ITEMS));
+                // Membership is a bitset: a linear scan per id made this
+                // quadratic, once per set, on every published frame.
+                let mut seen = vec![false; self.loops.len()];
                 for id in set {
-                    if id < self.loops.len() && !out.contains(&id) {
+                    if id < self.loops.len() && !seen[id] {
                         if out.len() == MAX_UI_SELECTION_ITEMS {
                             break;
                         }
+                        seen[id] = true;
                         out.push(id);
                     }
                 }
@@ -137,10 +147,15 @@ impl NativeUiState {
             })
             .collect();
         self.patch_bank_cursor = clamp(input.patch_bank_cursor, self.patch_banks.len());
+        // The runtime's item cursor is authoritative (clamped to the selected
+        // bank); ignoring it left callers publishing a highlight the renderer
+        // never showed.
         self.patch_item_cursor = self
             .patch_banks
             .get(self.patch_bank_cursor)
-            .map_or(0, |b| b.cursor);
+            .map_or(input.patch_item_cursor, |bank| {
+                clamp(input.patch_item_cursor, bank.items.len())
+            });
         self.snapshots = input.snapshots.into_iter().take(MAX_UI_SNAPSHOTS).collect();
         self.streaming = input.streaming;
         self.stream_bytes = input.stream_bytes;
@@ -152,4 +167,20 @@ impl NativeUiState {
 
 fn clamp(value: usize, len: usize) -> usize {
     if len == 0 { 0 } else { value.min(len - 1) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp;
+
+    #[test]
+    fn an_empty_list_clamps_every_index_to_zero() {
+        // `clamp` is the branch that guards `len - 1`: an empty list must not
+        // underflow, and any index has to land on the same (empty) selection.
+        assert_eq!(clamp(0, 0), 0);
+        assert_eq!(clamp(7, 0), 0);
+        assert_eq!(clamp(0, 3), 0);
+        assert_eq!(clamp(2, 3), 2);
+        assert_eq!(clamp(9, 3), 2);
+    }
 }
