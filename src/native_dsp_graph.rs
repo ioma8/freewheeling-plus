@@ -1,6 +1,7 @@
 //! Preallocated production DSP graph for native audio callbacks.
 
 use crate::audioio::{AudioCallback, AudioProcessor, NFrames};
+use crate::core_dsp::flush_subnormal;
 use crate::fluidsynth::{FluidLiteBackend, FluidSynthBackend, PITCH_BEND_CENTER};
 use crate::realtime_queue::{RealtimeReceiver, RealtimeSender, bounded};
 use std::cell::UnsafeCell;
@@ -44,10 +45,23 @@ const AUDIO_BLOCK_FRAMES: usize = 20_000;
 /// `PreallocatedType::RTNew` asks `MemoryManager` to replenish this many
 /// ready `AudioBlock`s on its non-realtime thread as blocks are consumed.
 const DEFAULT_AUDIO_BLOCKS: usize = 40;
+/// Block-slot reserve covering `DEFAULT_AUDIO_BLOCKS` ready blocks plus the
+/// 40-slot refill ring and room for one cross-fade tail block. A recording
+/// below this many blocks never reallocates the slot's `VecDeque` inside the
+/// audio callback; beyond it, growth resumes amortized doubling on the same
+/// heap slot the callback owns.
+const SLOT_BLOCK_RESERVE: usize = DEFAULT_AUDIO_BLOCKS * 2 + 2;
 /// Initial frames represented by the C++ realtime-ready audio-block set.
 /// This remains the import/transfer capacity for now; it is deliberately not
 /// a lifetime cap for native recordings.
 pub const CPP_AUDIO_POOL_FRAMES: usize = AUDIO_BLOCK_FRAMES * DEFAULT_AUDIO_BLOCKS;
+/// Hard frame ceiling every audio backend accepts in one callback. The CPAL
+/// and CoreAudio adapters reject more explicitly (`MAX_CALLBACK_FRAMES`
+/// there); JACK's negotiated period is bounded far below by the server. One
+/// shared constant here lets the DSP graph and the streaming pool reserve for
+/// the worst negotiated buffer instead of only the buffer the route happened
+/// to open with.
+pub const MAX_DEVICE_CALLBACK_FRAMES: usize = 16_384;
 /// The C++ memory-manager update ring is independent from the audio callback.
 /// Keep enough returned-block slots for all native recording buffers to be
 /// erased in one command burst without allocating on the callback thread.
@@ -59,16 +73,18 @@ pub const WAVEFORM_SAMPLES: usize = 8;
 pub const LOOP_SCOPE_COLUMNS: usize = 320;
 /// `FloConfig::loop_peaksavgs_chunksize`.
 const PEAK_AVG_CHUNK_FRAMES: usize = 500;
-/// The original `PeaksAvgsManager` runs from BlockManager's non-audio
-/// management thread.  Until scope scanning has its own Rust worker, keep the
-/// compatibility scan strictly bounded so it cannot dominate a 16-frame audio
-/// callback.  At 48 kHz this finishes one 500-frame peak chunk in at most
-/// eight 64-frame callbacks (about 2.7 ms with a 16-frame device period).
-const SCOPE_REFRESH_SAMPLES_PER_CALLBACK: usize = 64;
 /// The callback→UI snapshot is fixed-size. It carries the first 320 C++
 /// chunks without allocating; a future preallocated variable-length snapshot
 /// channel can retain the full 1,600-entry block-pool scope.
 pub const MAX_LOOP_SCOPE_CHUNKS: usize = LOOP_SCOPE_COLUMNS;
+/// The scope-compatibility scan runs from inside the audio callback (until
+/// scope scanning gets its own Rust worker by porting the C++
+/// `PeaksAvgsManager` thread). It visits one scope sample per callback
+/// sample, so it can never dominate the audio thread — and its wall-clock
+/// progress no longer depends on the negotiated device period: the historical
+/// fixed 64-sample budget scaled scanning by callback *frequency*, so a
+/// 512-frame device period finished one 500-frame peak chunk 8x slower than
+/// a 16-frame period did.
 /// Maximum stereo frames copied for a loop export in one audio callback.
 /// This bounds save-related callback work independently of loop duration.
 pub const EXPORT_COPY_FRAMES_PER_CALLBACK: usize = 4096;
@@ -369,6 +385,12 @@ pub enum RuntimeCommand {
         /// the captured audio starts at the moment of touch, not release.
         presslen_ms: u32,
     },
+    /// A recreated audio route negotiated a different sample rate. The pulse
+    /// engine and the metronome material are rate-relative, so the DSP
+    /// follows the device instead of keeping the startup route's tempo.
+    SetSampleRate {
+        sample_rate: u32,
+    },
     Overdub {
         slot: u16,
         feedback: f32,
@@ -617,12 +639,13 @@ impl Default for RuntimeSnapshot {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-// Keeping the snapshot inline makes status publication allocation-free. The
-// bounded ring pays this storage cost once during construction.
-#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq)]
+// The snapshot payload is shared through an `Arc` ring instead of travelling
+// by value: six 49 KB copies per second (to and from the status ring, plus the
+// stack build) were avoidable, and the ring is what keeps them off the audio
+// thread's stack. The bounded ring itself pays only pointer slots.
 pub enum RuntimeStatus {
-    Snapshot(RuntimeSnapshot),
+    Snapshot(Arc<RuntimeSnapshot>),
     CommandRejected(RuntimeCommand),
     RecordingFull {
         slot: u16,
@@ -887,7 +910,10 @@ impl LoopSlot {
         Self {
             left: Vec::new(),
             right: Vec::new(),
-            blocks: VecDeque::new(),
+            // Reserving the block chain here (construction is control-thread
+            // time) keeps `add_block`'s `push_back` from reallocating the
+            // deque's pointer buffer on the audio callback.
+            blocks: VecDeque::with_capacity(SLOT_BLOCK_RESERVE),
             data_offset: 0,
             len: 0,
             position: 0,
@@ -1080,6 +1106,49 @@ impl LoopScopeCache {
     }
 }
 
+/// Bounded triple buffer for snapshot publication. The callback fills a slot
+/// and hands out an `Arc` clone; the consumer reads and drops it. Publication
+/// and consumption never allocate when both sides keep up: `Arc::get_mut`
+/// reclaims a released slot the same way `FluidSynthProcessor::publish` reuses
+/// its render buffers.
+///
+/// The three slots bound how many snapshots a slow consumer may hold while
+/// the callback keeps producing. Each slot holds the snapshot's ~50 KB of
+/// data, so this is the 150 KB that replaces a ~3.1 MB inline status ring.
+struct SnapshotRing {
+    slots: [Arc<RuntimeSnapshot>; 3],
+    next: usize,
+}
+
+impl SnapshotRing {
+    fn new() -> Self {
+        Self {
+            slots: [
+                Arc::new(RuntimeSnapshot::default()),
+                Arc::new(RuntimeSnapshot::default()),
+                Arc::new(RuntimeSnapshot::default()),
+            ],
+            next: 0,
+        }
+    }
+
+    /// Writable view of the next slot. A still-held slot is replaced; that
+    /// fallback allocates once and matches `publish`'s documented fallback.
+    fn writable(&mut self) -> &mut RuntimeSnapshot {
+        if Arc::strong_count(&self.slots[self.next]) != 1 {
+            self.slots[self.next] = Arc::new(RuntimeSnapshot::default());
+        }
+        Arc::get_mut(&mut self.slots[self.next])
+            .expect("empty slot ownership was just ensured")
+    }
+
+    fn publish(&mut self) -> Arc<RuntimeSnapshot> {
+        let slot = &self.slots[self.next];
+        self.next = (self.next + 1) % self.slots.len();
+        Arc::clone(slot)
+    }
+}
+
 /// Callback-owned end of the C++ `PreallocatedType<AudioBlock>` path.  Its
 /// vectors/rings have fixed capacity before activation; consuming or returning
 /// a block only moves an already allocated `StereoTransfer`.
@@ -1096,7 +1165,9 @@ struct LoopStoragePool {
 /// starts with 40 ready instances and creates replacements asynchronously
 /// whenever `RTNew` consumes one. This worker has the same ownership boundary:
 /// it alone may allocate `AudioBlock` storage, while the callback merely moves
-/// it through bounded SPSC rings.
+/// it through bounded SPSC rings. The owning slot's deque is reserved for this
+/// pool's block ceiling at `LoopSlot::new`, so the callback's chain append
+/// never reallocates either.
 struct LoopStorageRefiller {
     stopping: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -1275,7 +1346,7 @@ fn update_loop_gain(slot: &mut LoopSlot) {
         if slot.gain_delta > 1.0 && slot.gain < LOOP_MIN_GAIN {
             slot.gain = LOOP_MIN_GAIN;
         }
-        slot.gain *= slot.gain_delta;
+        slot.gain = flush_subnormal(slot.gain * slot.gain_delta);
     }
 }
 
@@ -1368,6 +1439,8 @@ pub struct RuntimeAudioProcessor<B: FluidSynthBackend = FluidLiteBackend> {
     loop_storage: LoopStoragePool,
     commands: RealtimeReceiver<RuntimeCommand>,
     statuses: RealtimeSender<RuntimeStatus>,
+    /// Snapshot publication buffer reused across `RequestSnapshot` callbacks.
+    snapshot_ring: SnapshotRing,
     sample_clock: u64,
     pulse_frames: u32,
     pulse_position: u32,
@@ -1467,6 +1540,10 @@ pub struct RuntimeAudioProcessor<B: FluidSynthBackend = FluidLiteBackend> {
     synth_stereo: bool,
     synth_left: Vec<f32>,
     synth_right: Vec<f32>,
+    /// Callback frame count the scope scanner paces itself to: refreshed at
+    /// the top of every `process`, and equal to the configured capacity until
+    /// the first callback (or outside one, in tests).
+    last_callback_frames: usize,
     sequence: u64,
     running: bool,
     transfers: Arc<TransferPool>,
@@ -1588,6 +1665,7 @@ pub fn runtime_audio_processor_with_backend_settings<B: FluidSynthBackend>(
             loop_storage,
             commands: command_rx,
             statuses: status_tx,
+            snapshot_ring: SnapshotRing::new(),
             sample_clock: 0,
             pulse_frames: sample_rate / 2,
             pulse_position: 0,
@@ -1658,6 +1736,9 @@ pub fn runtime_audio_processor_with_backend_settings<B: FluidSynthBackend>(
             synth_stereo: true,
             synth_left: vec![0.0; max_callback_frames],
             synth_right: vec![0.0; max_callback_frames],
+            // Until the first callback arrives, the scope scanner behaves as
+            // though the configured capacity were the device period.
+            last_callback_frames: max_callback_frames,
             sequence: 0,
             running: true,
             transfers: Arc::clone(&transfers),
@@ -1683,23 +1764,30 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
 
     fn snapshot(&mut self) {
         self.sequence = self.sequence.wrapping_add(1);
-        let mut snapshot = RuntimeSnapshot {
-            sequence: self.sequence,
-            sample_clock: self.sample_clock,
-            pulse_position: self.pulse_position,
-            pulse_frames: self.pulse_frames,
-            pulse_long_count: self.pulse_long_count,
-            pulse_long_length: self.pulse_long_length,
-            recording_slot: self.recording.map_or(-1, |slot| slot as i16),
-            input_peak: self.input_peak,
-            output_peak: self.output_peak,
-            monitor_gain: self.monitor_gain,
-            input_volume: self.input_volume,
-            input_selected: self.input_selected,
-            master_gain: self.master_gain,
-            limiter_gain: self.master_limiter.current_gain,
-            ..RuntimeSnapshot::default()
-        };
+        // Filling a ring.slot in place keeps the ~50 KB snapshot off this
+        // callback's stack and off the status channel's ~3.1 MiB inline ring.
+        let snapshot = self.snapshot_ring.writable();
+        // Reset the scope strip that a previously filled slot left behind:
+        // scopes are only rewritten below up to the new `scope_count`.
+        snapshot.scope_count = 0;
+        for preview in snapshot.scopes.iter_mut() {
+            *preview = RuntimeScopePreview::default();
+        }
+
+        snapshot.sequence = self.sequence;
+        snapshot.sample_clock = self.sample_clock;
+        snapshot.pulse_position = self.pulse_position;
+        snapshot.pulse_frames = self.pulse_frames;
+        snapshot.pulse_long_count = self.pulse_long_count;
+        snapshot.pulse_long_length = self.pulse_long_length;
+        snapshot.recording_slot = self.recording.map_or(-1, |slot| slot as i16);
+        snapshot.input_peak = self.input_peak;
+        snapshot.output_peak = self.output_peak;
+        snapshot.monitor_gain = self.monitor_gain;
+        snapshot.input_volume = self.input_volume;
+        snapshot.input_selected = self.input_selected;
+        snapshot.master_gain = self.master_gain;
+        snapshot.limiter_gain = self.master_limiter.current_gain;
         for (out, slot) in snapshot.loops.iter_mut().zip(&self.loops) {
             *out = RuntimeLoopSnapshot {
                 mode: slot.mode,
@@ -1736,7 +1824,8 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
             snapshot.scope_count += 1;
             slot.recent_peak = 0.0;
         }
-        self.send_status(RuntimeStatus::Snapshot(snapshot));
+        let published = self.snapshot_ring.publish();
+        self.send_status(RuntimeStatus::Snapshot(published));
     }
 
     /// Exact stateful counterpart to `Pulse::ExtendLongCount`.  C++ grows
@@ -2303,6 +2392,16 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
             RuntimeCommand::SetRecordingAlignmentFrames { frames } => {
                 self.recording_alignment_frames = frames;
             }
+            RuntimeCommand::SetSampleRate { sample_rate } => {
+                if sample_rate != 0 && sample_rate != self.sample_rate {
+                    self.sample_rate = sample_rate;
+                    // The constructor derives the idle pulse length from the
+                    // rate the same way, so a recreated route keeps pulses at
+                    // the same default tempo instead of scaling them by the
+                    // old/max rate ratio.
+                    self.pulse_frames = sample_rate / 2;
+                }
+            }
             RuntimeCommand::CalibrateLatency => {
                 if self.latency_calibration.is_none() {
                     self.calibration_monitor_gain = self.monitor_gain;
@@ -2753,7 +2852,10 @@ impl<B: FluidSynthBackend> RuntimeAudioProcessor<B> {
     /// pieces. Native block-chain recordings maintain the same values while
     /// samples are written and never enter this playback-time path.
     fn refresh_scopes(&mut self) {
-        let mut budget = SCOPE_REFRESH_SAMPLES_PER_CALLBACK;
+        // One scope sample per callback sample: bounded by what this callback
+        // is producing, and its progress tracks the audio rate regardless of
+        // the device period (see the scan-bound rationale above).
+        let mut budget = self.last_callback_frames;
         let mut empty_slots_seen = 0;
         while budget != 0 {
             let index = self.scope_refresh_slot;
@@ -2974,6 +3076,7 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
             .min(callback.outputs[0].len())
             .min(callback.outputs[1].len())
             .min(self.synth_left.len());
+        self.last_callback_frames = frames;
         callback.outputs[0][..frames].fill(0.0);
         callback.outputs[1][..frames].fill(0.0);
         if !self.running {
@@ -3239,13 +3342,19 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                         // fragment, then stores the overdubbed fragment.  The
                         // latter must never leak into the current output
                         // sample merely because recording is active.
+                        // Feedback decays multiplicatively, so a faded-out
+                        // write can land in subnormal territory; flush it
+                        // before it poisons the whole callback's FP timing
+                        // (see `flush_subnormal`).
                         let (new_left, new_right, ends_fade) = if let Some(progress) = jump_fade {
                             let ramp = progress as f32 / LOOP_SMOOTH_FRAMES as f32;
                             (
-                                input_l * ramp
-                                    + old_write_left * (1.0 - ramp + ramp * fb),
-                                input_r * ramp
-                                    + old_write_right * (1.0 - ramp + ramp * fb),
+                                flush_subnormal(
+                                    input_l * ramp + old_write_left * (1.0 - ramp + ramp * fb),
+                                ),
+                                flush_subnormal(
+                                    input_r * ramp + old_write_right * (1.0 - ramp + ramp * fb),
+                                ),
                                 false,
                             )
                         } else if let Some((progress, total)) = slot.overdub_fade_out {
@@ -3256,14 +3365,14 @@ impl<B: FluidSynthBackend> AudioProcessor for RuntimeAudioProcessor<B> {
                             slot.overdub_fade_out =
                                 (progress + 1 < total).then_some((progress + 1, total));
                             (
-                                input_l * input_gain + old_write_left * loop_gain,
-                                input_r * input_gain + old_write_right * loop_gain,
+                                flush_subnormal(input_l * input_gain + old_write_left * loop_gain),
+                                flush_subnormal(input_r * input_gain + old_write_right * loop_gain),
                                 progress + 1 == total,
                             )
                         } else {
                             (
-                                old_write_left * fb + input_l,
-                                old_write_right * fb + input_r,
+                                flush_subnormal(old_write_left * fb + input_l),
+                                flush_subnormal(old_write_right * fb + input_r),
                                 false,
                             )
                         };
@@ -5353,12 +5462,13 @@ mod tests {
     #[test]
     fn scope_columns_use_cpp_stereo_range_and_mean_absolute_amplitude() {
         let (mut processor, _controls) = processor(0.0);
+        let callback_frames = processor.synth_left.len();
         let slot = &mut processor.loops[0];
         slot.left = vec![0.75; PEAK_AVG_CHUNK_FRAMES];
         slot.right = vec![-0.25; PEAK_AVG_CHUNK_FRAMES];
         slot.len = PEAK_AVG_CHUNK_FRAMES;
         slot.mode = LoopMode::Playing;
-        for _ in 0..PEAK_AVG_CHUNK_FRAMES.div_ceil(SCOPE_REFRESH_SAMPLES_PER_CALLBACK) {
+        for _ in 0..PEAK_AVG_CHUNK_FRAMES.div_ceil(callback_frames) {
             processor.refresh_scopes();
         }
 
@@ -5366,6 +5476,33 @@ mod tests {
         // is 0.75 - (-0.25) = 1.0. Its average is (|.75| + |-.25|) / 2.
         assert_eq!(processor.loops[0].scope.peaks[0], 1.0);
         assert_eq!(processor.loops[0].scope.averages[0], 0.5);
+    }
+
+    #[test]
+    fn scope_scan_progress_is_proportional_to_the_device_period() {
+        // The scan visits one scope sample per callback sample, so completing
+        // one 500-frame chunk is a fixed number of samples regardless of the
+        // negotiated callback size: a 512-frame device period does the same
+        // chunk in ceil(500/512) callbacks, not the 500-frame rate divided by
+        // the historical 64-frame budget.
+        for callback_frames in [16usize, 64, 256, 512] {
+            let (mut processor, _controls) =
+                runtime_audio_processor_with_backend(FakeSynth::default(), 48_000, 4096, 512);
+            processor.last_callback_frames = callback_frames;
+            let slot = &mut processor.loops[0];
+            slot.left = vec![0.5; PEAK_AVG_CHUNK_FRAMES];
+            slot.right = vec![0.0; PEAK_AVG_CHUNK_FRAMES];
+            slot.len = PEAK_AVG_CHUNK_FRAMES;
+            slot.mode = LoopMode::Playing;
+            for _ in 0..PEAK_AVG_CHUNK_FRAMES.div_ceil(callback_frames) {
+                processor.refresh_scopes();
+            }
+            assert_eq!(
+                processor.loops[0].scope.sample, 0,
+                "a {callback_frames}-frame device period must finish the chunk"
+            );
+            assert_eq!(processor.loops[0].scope.column, 1);
+        }
     }
 
     #[test]

@@ -47,7 +47,7 @@ fn boxed_dsp(
 fn next_snapshot(controls: &mut RuntimeControls) -> Box<RuntimeSnapshot> {
     loop {
         match controls.try_status().expect("snapshot status expected") {
-            RuntimeStatus::Snapshot(snapshot) => return Box::new(snapshot),
+            RuntimeStatus::Snapshot(snapshot) => return Box::new(*snapshot),
             RuntimeStatus::LoopCompleted { slot: 0 } => {}
             other => panic!("unexpected status: {other:?}"),
         }

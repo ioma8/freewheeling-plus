@@ -243,6 +243,16 @@ impl<F: PersistenceFileSystem, E: PersistenceEvents> PersistenceRuntime<F, E> {
         new_name: Option<&str>,
         extensions: &[&str],
     ) -> Result<PathBuf, String> {
+        // The name is one filename component: `saveable_stub` sanitizes a
+        // separator as a fallback, but a rename is a user-facing action, so
+        // such a name is rejected visibly instead of silently rewritten.
+        if let Some(name) = new_name
+            && !crate::core_persistence::is_saveable_name(name)
+        {
+            return Err(format!(
+                "rename name must not contain a path separator: '{name}'"
+            ));
+        }
         let stub_text = stub
             .to_str()
             .ok_or_else(|| format!("filename is not UTF-8: {}", stub.display()))?;

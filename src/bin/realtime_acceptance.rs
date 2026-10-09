@@ -1,8 +1,15 @@
 //! Real-hardware realtime acceptance runner.
 
-use freewheeling_plus::audioio::{AudioBackend, AudioCallback};
+use freewheeling_plus::audioio::AudioBackend;
 #[cfg(target_os = "macos")]
 use freewheeling_plus::audioio::{AudioCallbackFn, BackendInfo};
+use freewheeling_plus::audioio::AudioProcessor;
+use freewheeling_plus::core_dsp::Sample;
+use freewheeling_plus::fluidsynth::{FluidLiteBackend, FluidLiteConfig, FluidSynthBackend, Patch};
+use freewheeling_plus::native_dsp_graph::{
+    CPP_AUDIO_POOL_FRAMES, DspSettings, RuntimeAudioProcessor, RuntimeCommand, RuntimeControls,
+    runtime_audio_processor_with_backend_settings,
+};
 use freewheeling_plus::realtime_guard::{
     CallbackCountingAllocator, PerformanceResult, RealtimeMetrics, reset_violation_counters,
 };
@@ -22,6 +29,8 @@ const DEFAULT_SECONDS: u64 = 10;
 const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 const DEFAULT_BUFFER_FRAMES: u32 = 256;
 const RSS_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+/// Control-thread tick between DSP script updates and status drains.
+const DSP_SCRIPT_TICK: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RequestedFormat {
@@ -69,19 +78,35 @@ fn run() -> Result<(), String> {
         RealtimeMetrics::new(info.sample_rate, info.buffer_size)
             .map_err(|error| format!("cannot initialize realtime metrics: {error}"))?,
     );
+    // The acceptance validates the full production DSP path, not just the
+    // backend wrappers: the graph records across block-managed storage
+    // growth, triggers, overdubs, and publishes snapshot statuses while the
+    // device runs, so the violation counters below observe the code that
+    // actually ships.
+    let (mut dsp, mut controls, synth_mode) = acceptance_dsp(info.sample_rate, info.buffer_size)?;
     reset_violation_counters();
-    backend.set_realtime_metrics(Arc::clone(&metrics));
-    backend.activate(Box::new(passthrough))?;
+    backend.set_realtime_metrics(Arc::clone(&metrics))?;
+    backend.activate(Box::new(move |callback| dsp.process(callback)))?;
 
+    // Drive the DSP script and resident-memory sampling from the control
+    // thread while the audio device runs.
     let started = Instant::now();
+    let mut script = AcceptanceScript::new(started);
+    let mut rss_next = started + RSS_SAMPLE_INTERVAL;
     while started.elapsed() < duration {
-        thread::sleep(RSS_SAMPLE_INTERVAL.min(duration.saturating_sub(started.elapsed())));
-        if let Err(error) = metrics.sample_rss() {
-            // Every return from here on must close the stream: leaving it
-            // running would keep the private aggregate device alive, which
-            // `verify_aggregate_cleanup` exists to prove cannot happen.
-            backend.close();
-            return Err(format!("cannot sample resident memory: {error}"));
+        thread::sleep(DSP_SCRIPT_TICK.min(duration.saturating_sub(started.elapsed())));
+        script.drive(&mut controls, started);
+        controls.service_loop_storage();
+        while controls.try_status().is_some() {}
+        if Instant::now() >= rss_next {
+            if let Err(error) = metrics.sample_rss() {
+                // Every return from here on must close the stream: leaving it
+                // running would keep the private aggregate device alive, which
+                // `verify_aggregate_cleanup` exists to prove cannot happen.
+                backend.close();
+                return Err(format!("cannot sample resident memory: {error}"));
+            }
+            rss_next = Instant::now() + RSS_SAMPLE_INTERVAL;
         }
     }
     // Opt-in macOS aggregate contract: capture and playback frame counts must
@@ -114,12 +139,29 @@ fn run() -> Result<(), String> {
             result.callback_count, expected_callbacks
         ));
     }
+    // The realtime contract is enforced here, not just recorded: a callback
+    // that allocated or attempted a blocking lock fails the acceptance run
+    // immediately, instead of being caught only by the downstream result
+    // validator.
+    if result.callback_allocations != 0 {
+        return Err(format!(
+            "the realtime callback allocated {} times",
+            result.callback_allocations
+        ));
+    }
+    if result.blocking_lock_attempts != 0 {
+        return Err(format!(
+            "the realtime callback attempted {} blocking lock(s)",
+            result.blocking_lock_attempts
+        ));
+    }
     let json = attestation_json(
         &result,
         total_duration,
         elapsed,
         duration,
         expected_callbacks,
+        synth_mode,
     )?;
     atomic_write(&output, json.as_bytes())
         .map_err(|error| format!("cannot write {}: {error}", output.display()))
@@ -135,6 +177,7 @@ fn attestation_json(
     elapsed: f64,
     duration: Duration,
     expected_callbacks: u64,
+    synth_mode: &str,
 ) -> Result<String, String> {
     let result_json = result
         .to_json()
@@ -193,6 +236,10 @@ fn attestation_json(
         "expected_minimum_callbacks".into(),
         serde_json::json!(expected_callbacks),
     );
+    // Provenance: which synthesizer drove the callback (production FluidLite
+    // or the documented silent fallback), so a fallback run cannot masquerade
+    // in evidence archives as a validated production synth.
+    fields.insert("dsp_synth".into(), serde_json::json!(synth_mode));
     serde_json::to_string_pretty(&document)
         .map_err(|error| format!("cannot serialize performance result: {error}"))
 }
@@ -252,20 +299,210 @@ fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// Copy input to output, tolerating a length mismatch.
+/// The synthesizer the acceptance DSP graph renders.
 ///
-/// This runs on the audio thread: `copy_from_slice` would panic (and abort the
-/// process) when a capture-underflow path hands the callback a trimmed input,
-/// so a mismatch degrades to silence instead.
-fn passthrough(callback: &mut AudioCallback<'_>) {
-    for (output, input) in callback
-        .outputs
-        .iter_mut()
-        .zip(callback.inputs.iter())
-    {
-        let frames = output.len().min(input.len());
-        output[..frames].copy_from_slice(&input[..frames]);
-        output[frames..].fill(0.0);
+/// Production `FluidLiteBackend` when the bundled soundfont can be located; a
+/// silent double keeps the DSP's realtime data path observable on hosts
+/// without the asset. The attestation records which one ran, so a silent
+/// fallback can never masquerade as a validated production synth.
+enum AcceptanceSynth {
+    FluidLite(FluidLiteBackend),
+    Silent,
+}
+
+impl AcceptanceSynth {
+    const FLUIDLITE: &'static str = "fluidlite";
+    const SILENT: &'static str = "silent";
+
+    fn mode(&self) -> &'static str {
+        match self {
+            Self::FluidLite(_) => Self::FLUIDLITE,
+            Self::Silent => Self::SILENT,
+        }
+    }
+}
+
+impl FluidSynthBackend for AcceptanceSynth {
+    fn render(&mut self, left: &mut [Sample], right: &mut [Sample]) {
+        match self {
+            Self::FluidLite(backend) => backend.render(left, right),
+            Self::Silent => {
+                left.fill(0.0);
+                right.fill(0.0);
+            }
+        }
+    }
+    fn controller(&mut self, channel: u8, controller: u8, value: u8) {
+        if let Self::FluidLite(backend) = self {
+            backend.controller(channel, controller, value);
+        }
+    }
+    fn pitch_bend(&mut self, channel: u8, value: i32) {
+        if let Self::FluidLite(backend) = self {
+            backend.pitch_bend(channel, value);
+        }
+    }
+    fn note_on(&mut self, channel: u8, note: i32, velocity: u8) {
+        if let Self::FluidLite(backend) = self {
+            backend.note_on(channel, note, velocity);
+        }
+    }
+    fn note_off(&mut self, channel: u8, note: i32) {
+        if let Self::FluidLite(backend) = self {
+            backend.note_off(channel, note);
+        }
+    }
+    fn program_select(&mut self, channel: u8, soundfont_id: i32, bank: i32, program: i32) {
+        if let Self::FluidLite(backend) = self {
+            backend.program_select(channel, soundfont_id, bank, program);
+        }
+    }
+    fn set_tuning(&mut self, cents: f64) {
+        if let Self::FluidLite(backend) = self {
+            backend.set_tuning(cents);
+        }
+    }
+    fn patches(&self) -> Vec<Patch> {
+        match self {
+            Self::FluidLite(backend) => backend.patches(),
+            Self::Silent => Vec::new(),
+        }
+    }
+    fn shutdown(&mut self) {
+        if let Self::FluidLite(backend) = self {
+            backend.shutdown();
+        }
+    }
+}
+
+/// Locate the bundled soundfont for the production synth. `FWP_ACCEPTANCE_SOUNDFONT`
+/// wins so environments can point at their own asset; the working directory and the
+/// crate's `data/` directory are the fallbacks used by local runs, the Docker image
+/// and CI.
+fn bundled_soundfont() -> Option<PathBuf> {
+    let candidates = [
+        env::var_os("FWP_ACCEPTANCE_SOUNDFONT").map(PathBuf::from),
+        Some(PathBuf::from("data/basic.sf2")),
+        Some(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("data")
+                .join("basic.sf2"),
+        ),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|candidate| fs::metadata(candidate).is_ok_and(|meta| meta.is_file()))
+}
+
+fn acceptance_synth(sample_rate: u32) -> AcceptanceSynth {
+    if let Some(soundfont) = bundled_soundfont() {
+        let mut config = FluidLiteConfig::new(f64::from(sample_rate));
+        config.soundfonts.push(soundfont);
+        match FluidLiteBackend::new(config) {
+            Ok(backend) => {
+                eprintln!("realtime acceptance: DSP synth = FluidLite");
+                return AcceptanceSynth::FluidLite(backend);
+            }
+            Err(error) => {
+                eprintln!(
+                    "realtime acceptance: cannot build FluidLite ({error}); falling back to the silent synth"
+                );
+            }
+        }
+    } else {
+        eprintln!("realtime acceptance: no bundled soundfont found; falling back to the silent synth");
+    }
+    AcceptanceSynth::Silent
+}
+
+/// Build the production DSP graph for the acceptance run: same constructor,
+/// same realtime pool sizing (`CPP_AUDIO_POOL_FRAMES`), and a callback
+/// capacity matched to the negotiated device buffer.
+fn acceptance_dsp(
+    sample_rate: u32,
+    buffer_frames: u32,
+) -> Result<(RuntimeAudioProcessor<AcceptanceSynth>, RuntimeControls, &'static str), String> {
+    let synth = acceptance_synth(sample_rate);
+    let mode = synth.mode();
+    let (processor, controls) = runtime_audio_processor_with_backend_settings(
+        synth,
+        sample_rate,
+        CPP_AUDIO_POOL_FRAMES,
+        usize::try_from(buffer_frames)
+            .unwrap_or(usize::MAX)
+            .max(freewheeling_plus::native_dsp_graph::MAX_DEVICE_CALLBACK_FRAMES),
+        DspSettings::default(),
+    );
+    Ok((processor, controls, mode))
+}
+
+/// Time-stamped DSP commands the acceptance main thread pushes into the
+/// realtime graph while the device runs: a loop is recorded across multiple
+/// block-managed storage growths, triggered, overdubbed with feedback, and
+/// erased. Nothing here runs on the audio thread; that thread only ever sees
+/// the commands arrive through the bounded queue.
+struct AcceptanceScript {
+    steps: Vec<(&'static str, f64, Option<RuntimeCommand>)>,
+    next_step: usize,
+    next_snapshot: Instant,
+}
+
+impl AcceptanceScript {
+    const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
+
+    fn new(started: Instant) -> Self {
+        Self {
+            steps: vec![
+                (
+                    "record loop 0",
+                    0.5,
+                    Some(RuntimeCommand::Record { slot: 0, presslen_ms: 0 }),
+                ),
+                ("stop recording", 2.5, Some(RuntimeCommand::StopRecord)),
+                (
+                    "trigger loop 0",
+                    3.0,
+                    Some(RuntimeCommand::Trigger { slot: 0, gain: 1.0 }),
+                ),
+                (
+                    "overdub loop 0",
+                    3.5,
+                    Some(RuntimeCommand::Overdub {
+                        slot: 0,
+                        feedback: 0.5,
+                        gain: 0.9,
+                    }),
+                ),
+                ("stop overdubbing", 5.5, Some(RuntimeCommand::StopRecord)),
+                ("erase loop 0", 6.0, Some(RuntimeCommand::Erase { slot: 0 })),
+            ],
+            next_step: 0,
+            next_snapshot: started + Self::SNAPSHOT_INTERVAL,
+        }
+    }
+
+    fn drive(&mut self, controls: &mut RuntimeControls, started: Instant) {
+        let elapsed = started.elapsed().as_secs_f64();
+        while self.next_step < self.steps.len() {
+            let (label, at, command) = self.steps[self.next_step];
+            if elapsed < at {
+                break;
+            }
+            if let Some(command) = command {
+                match controls.try_command(command) {
+                    Ok(()) => eprintln!("realtime acceptance: DSP script: {label}"),
+                    Err(rejected) => eprintln!(
+                        "realtime acceptance: DSP script: {label} rejected ({rejected:?})"
+                    ),
+                }
+            }
+            self.next_step += 1;
+        }
+        if Instant::now() >= self.next_snapshot {
+            let _ = controls.try_command(RuntimeCommand::RequestSnapshot);
+            self.next_snapshot = Instant::now() + Self::SNAPSHOT_INTERVAL;
+        }
     }
 }
 
@@ -418,9 +655,14 @@ impl NativeBackend {
         }
     }
 
-    fn set_realtime_metrics(&mut self, metrics: Arc<RealtimeMetrics>) {
+    /// Attach acceptance instrumentation before activation. Rejected by an
+    /// already-active backend (see `MacosAudioUnitBackend` for why).
+    fn set_realtime_metrics(&mut self, metrics: Arc<RealtimeMetrics>) -> Result<(), String> {
         match self {
-            NativeBackend::Cpal(backend) => backend.set_realtime_metrics(metrics),
+            NativeBackend::Cpal(backend) => {
+                backend.set_realtime_metrics(metrics);
+                Ok(())
+            }
             NativeBackend::AudioUnit(backend) => backend.set_realtime_metrics(metrics),
         }
     }
@@ -770,11 +1012,12 @@ mod tests {
             std::env::set_var("FWP_ACCEPTANCE_REVISION", "deadbeef");
             std::env::set_var("FWP_ACCEPTANCE_EVIDENCE_MODE", "virtual-jack");
         }
-        let json = attestation_json(&result, 3.0, 0.0, Duration::from_secs(3), 500).unwrap();
+        let json = attestation_json(&result, 3.0, 0.0, Duration::from_secs(3), 500, "fluidlite").unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         let object = value.as_object().unwrap();
         assert_eq!(object["git_revision"], "deadbeef");
         assert_eq!(object["evidence_mode"], "virtual-jack");
+        assert_eq!(object["dsp_synth"], "fluidlite");
         // The artifact carries only observations that can differ from an
         // expectation; a boolean that is true by construction would add no
         // evidence (the callback floor is already validated before writing).

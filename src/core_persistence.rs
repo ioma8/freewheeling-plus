@@ -36,12 +36,24 @@ pub struct LoopPath {
     pub data: String,
 }
 
+/// Whether a user-supplied saveable name is safe as a single filename
+/// component. `saveable_stub` sanitizes as the structural last line of
+/// defence; user-facing rename paths reject outright instead.
+pub fn is_saveable_name(name: &str) -> bool {
+    !name.contains('/') && !name.contains('\0')
+}
+
 pub fn saveable_stub(base: &str, hash: &str, name: Option<&str>, ext: Option<&str>) -> String {
     let mut s = format!("{}-{}", base, hash);
     if let Some(n) = name.filter(|n| !n.is_empty()) {
+        // The name is a single path component: a `/` would nest a component
+        // and a NUL would truncate it inside the C API. Both are rewritten to
+        // the separator `-`, matching how the filename splits its fields (the
+        // user-facing rename path rejects such names outright instead).
+        let sanitized = n.replace(['/', '\0'], "-");
         // write! to a String is infallible (fmt::Write::write_str for String
         // never returns Err), so unwrap is safe.
-        write!(s, "-{n}").unwrap();
+        write!(s, "-{sanitized}").unwrap();
     }
     s.push_str(ext.unwrap_or(""));
     s
@@ -104,14 +116,32 @@ pub fn encode_hash(hash: &[u8; HASH_LENGTH]) -> String {
     s
 }
 pub fn decode_hash(s: &str) -> Option<[u8; HASH_LENGTH]> {
-    if s.len() != HASH_LENGTH * 2 {
+    // Byte-safe: `str::len` counts bytes, so a 32-byte string can still contain
+    // multibyte characters, and slicing `&s[a..b]` below would then panic on a
+    // non-char boundary. Work on bytes and reject anything that is not two hex
+    // digits per pair.
+    let bytes = s.as_bytes();
+    if bytes.len() != HASH_LENGTH * 2 {
         return None;
     }
     let mut out = [0; HASH_LENGTH];
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    for (index, slot) in out.iter_mut().enumerate() {
+        let high = hash_hex_digit(bytes[index * 2])?;
+        let low = hash_hex_digit(bytes[index * 2 + 1])?;
+        *slot = high * 16 + low;
     }
     Some(out)
+}
+
+/// One hex digit, upper or lower case: the alphabet `encode_hash` writes and
+/// the 14-bit radix family the C++ parser accepted.
+fn hash_hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 // The C++ implementation hashes quantized audio bytes. This adapter preserves
@@ -147,8 +177,16 @@ pub fn md5_loop_samples(
     md5(&quantised)
 }
 
+/// Whether two samples quantise to the same name-hash byte under the frozen
+/// persistence contract (`quantise_sample`), so the comparison is exactly as
+/// discriminating as the hash itself.
+pub fn quantises_like_the_hash(a: crate::block::Sample, b: crate::block::Sample) -> bool {
+    quantise_sample(a) == quantise_sample(b)
+}
+
 /// One 8-bit quantised sample, see [`md5_loop_samples`].
 fn quantise_sample(sample: crate::block::Sample) -> u8 {
+
     // Non-finite input cannot be quantised; treat it as silence so the hash
     // stays deterministic.
     if !sample.is_finite() {

@@ -6,6 +6,7 @@
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use crate::realtime_guard::InstrumentedMutex;
 use std::thread::ThreadId;
 
 pub type Sample = f32;
@@ -385,11 +386,13 @@ impl AnyAudioBackend {
 /// callback.
 ///
 /// The audio thread never blocks here: it only performs a `try_lock` write
-/// until the id has been published.
+/// until the id has been published. The mutex is the instrumented wrapper so
+/// that any future change to a blocking acquisition becomes visible to the
+/// realtime acceptance counters instead of silently stalling the callback.
 #[derive(Default)]
 struct CallbackThreadSlot {
     published: AtomicBool,
-    thread: Mutex<Option<ThreadId>>,
+    thread: InstrumentedMutex<Option<ThreadId>>,
 }
 
 impl CallbackThreadSlot {
@@ -421,7 +424,7 @@ impl CallbackThreadSlot {
                 // The slot holds one `Copy` value, so a poisoned guard cannot
                 // publish torn state; clear the poison and carry on.
                 let mut thread = poisoned.into_inner();
-                self.thread.clear_poison();
+                self.thread.inner().clear_poison();
                 update(&mut thread)
             }
         }

@@ -73,7 +73,6 @@ impl<T> InstrumentedMutex<T> {
     pub const fn new(value: T) -> Self {
         Self(Mutex::new(value))
     }
-
     pub fn lock(&self) -> LockResult<MutexGuard<'_, T>> {
         if in_callback() {
             BLOCKING_LOCK_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
@@ -90,8 +89,20 @@ impl<T> InstrumentedMutex<T> {
         self.0.try_lock()
     }
 
+    /// The wrapped mutex, for callers with their own poison-recovery policy.
+    /// Callback-adjacent code must keep using `try_lock` above.
+    pub fn inner(&self) -> &Mutex<T> {
+        &self.0
+    }
+
     pub fn into_inner(self) -> LockResult<T> {
         self.0.into_inner()
+    }
+}
+
+impl<T: Default> Default for InstrumentedMutex<T> {
+    fn default() -> Self {
+        Self(Mutex::new(T::default()))
     }
 }
 

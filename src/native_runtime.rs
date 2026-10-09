@@ -241,7 +241,12 @@ fn write_loop_metadata_or_remove_audio(
     Ok(())
 }
 
-fn save_exported_loop(
+/// Save a loop's audio and metadata XML pair into the library.
+///
+/// Public so the persistence acceptance can exercise the collision rule: the
+/// 8-bit sample hash can collide, so an already-present file is only reused
+/// when it decodes to the same audio.
+pub fn save_exported_loop(
     audio: &std::path::Path,
     xml: &std::path::Path,
     sample_rate: u32,
@@ -251,14 +256,25 @@ fn save_exported_loop(
     metadata: LoopTransferMetadata,
 ) -> Result<(), String> {
     if audio.exists() {
-        if !xml.exists() {
-            fs::write(
-                xml,
-                crate::core_persistence::loop_metadata_xml(metadata.beats, metadata.pulse_frames),
-            )
-            .map_err(|error| format!("save loop metadata: {error}"))?;
+        // The hash is an 8-bit quantisation of the audio, so two different
+        // takes can share a filename. Reuse the file only when it really
+        // holds this loop's audio; a genuinely different take must not be
+        // silently re-pointed at the first one (C++ reports an MD5 collision
+        // rather than aliasing either).
+        if persisted_audio_matches(audio, sample_rate, left, right)? {
+            if !xml.exists() {
+                fs::write(
+                    xml,
+                    crate::core_persistence::loop_metadata_xml(metadata.beats, metadata.pulse_frames),
+                )
+                .map_err(|error| format!("save loop metadata: {error}"))?;
+            }
+            return Ok(());
         }
-        return Ok(());
+        return Err(format!(
+            "MD5 collision while saving loop-{}: a different loop already occupies this filename; rename or erase it first",
+            audio.display()
+        ));
     }
     encode_audio_file(audio, sample_rate, codec, left, Some(right))
         .map_err(|error| format!("save loop audio '{}': {error}", audio.display()))?;
@@ -268,6 +284,154 @@ fn save_exported_loop(
         crate::core_persistence::loop_metadata_xml(metadata.beats, metadata.pulse_frames)
             .as_bytes(),
     )
+}
+
+/// Slots the DSP currently owns, i.e. its non-Empty loops per the most
+/// recently drained runtime status (`cached_modes`). A slot the restore
+/// starts from Empty can replay straight away: nothing was sounding to
+/// silence first.
+fn restore_mute_slots(cached_modes: &[LoopMode]) -> Vec<u16> {
+    cached_modes
+        .iter()
+        .enumerate()
+        .filter(|(_, mode)| **mode != LoopMode::Empty)
+        .map(|(slot, _)| slot as u16)
+        .collect()
+}
+
+/// How many rotated scene backups survive an autosave.
+pub const MAX_SCENE_BACKUPS: u32 = 8;
+
+/// Delete the oldest `.backup.N` companions of `scene` beyond `keep`.
+///
+/// Removal failures are logged, never fatal: losing a prune must not fail the
+/// save that already succeeded.
+pub fn prune_scene_backups(scene: &std::path::Path, keep: u32) {
+    let Some(name_head) = scene.file_name().and_then(|value| value.to_str()) else {
+        return;
+    };
+    // `read_dir` yields bare file names, so the pattern anchors on the scene's
+    // own name, not its full path.
+    let prefix = format!("{name_head}.backup.");
+    let mut numbered: Vec<(u32, std::path::PathBuf)> = Vec::new();
+    if let Some(parent) = scene.parent() {
+        let entries = match fs::read_dir(parent) {
+            Ok(entries) => entries,
+            Err(error) => {
+                eprintln!("FreeWheeling: cannot list scene backups for prune: {error}");
+                return;
+            }
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let candidate = entry.path();
+            let Some(name) = candidate.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let Some(sequence) = name.strip_prefix(&prefix) else {
+                continue;
+            };
+            if let Ok(sequence) = sequence.parse::<u32>() {
+                numbered.push((sequence, candidate));
+            }
+        }
+    }
+    numbered.sort_by_key(|(sequence, _)| std::cmp::Reverse(*sequence));
+    for (_, path) in numbered.into_iter().skip(keep as usize) {
+        if let Err(error) = fs::remove_file(&path) {
+            eprintln!("FreeWheeling: could not prune scene backup '{}': {error}", path.display());
+        }
+    }
+}
+
+/// Whether the persisted audio decodes to exactly the samples of the loop
+/// being saved, under the same quantisation the filename hash uses.
+///
+/// Decoding runs on the control thread once per export and is bounded by the
+/// incoming loop's length, so a much longer stale file cannot pin control
+/// costs to it (its length mismatch already decides the comparison).
+fn persisted_audio_matches(
+    audio: &std::path::Path,
+    sample_rate: u32,
+    left: &[f32],
+    right: &[f32],
+) -> Result<bool, String> {
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    let codec = match audio
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("wav") => Codec::Wav,
+        Some("ogg") => Codec::Vorbis,
+        Some("flac") => Codec::Flac,
+        Some("au") => Codec::Au,
+        _ => return Err(format!("cannot detect loop codec: {}", audio.display())),
+    };
+    let mut decoder = crate::file_codecs::SndFileDecoder::new(sample_rate, codec);
+    decoder
+        .read_from_file(
+            fs::File::open(audio).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| {
+            format!(
+                "cannot verify the existing loop audio '{}': {error}",
+                audio.display()
+            )
+        })?;
+    let stereo = decoder.stereo();
+    let target = left.len();
+    // The comparison block is sized by the loop being saved: the stored file
+    // ending early or running long is the mismatch itself.
+    let mut block = crate::block::AudioBlock::new(target);
+    if stereo {
+        block.extra = Some(crate::block::ExtraChannel::new(target));
+    }
+    let decoded = {
+        let mut iterator = crate::block::AudioBlockIterator::new(
+            &mut block,
+            crate::file_codecs::MAX_STREAMING_FRAMES,
+        );
+        loop {
+            match decoder.read_samples(&mut iterator, crate::file_codecs::MAX_STREAMING_FRAMES) {
+                Ok(0) => break iterator.position,
+                Ok(_) => {
+                    if iterator.position >= target {
+                        // The stored file is at least as long as the loop:
+                        // stop decoding rather than filling the block pad.
+                        break iterator.position;
+                    }
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "cannot decode the existing loop audio '{}': {error}",
+                        audio.display()
+                    ));
+                }
+            }
+        }
+    };
+    if decoded != target {
+        return Ok(false);
+    }
+    // The persisted loop always carries a stereo pair (the encoder receives
+    // both channels), and a mono file decodes as interleaved mono, which can
+    // therefore never be confirmed as this loop's stereo audio.
+    let stored_left = &block.samples[..target];
+    let stored_right = match block.extra.as_ref() {
+        Some(extra) if extra.samples.len() >= target => &extra.samples[..target],
+        _ => return Ok(false),
+    };
+    let same = stored_left
+        .iter()
+        .zip(left.iter())
+        .chain(stored_right.iter().zip(right.iter()))
+        .all(|(stored, new)| {
+            crate::core_persistence::quantises_like_the_hash(*stored, *new)
+        });
+    Ok(same)
 }
 
 
@@ -628,6 +792,9 @@ struct RuntimeResources {
     latest_snapshot: RuntimeSnapshot,
     last_snapshot_request: Instant,
     last_diagnostic_report: Instant,
+    /// Diagnostic flags raised by the synth backend; cloned before the backend
+    /// moved into the realtime graph. `None` when no synth is configured.
+    synth_diagnostics: Option<Arc<crate::fluidsynth::SynthDiagnosticBus>>,
     cached_modes: [LoopMode; crate::native_dsp_graph::MAX_RUNTIME_LOOPS],
     trigger_gains: [f32; crate::native_dsp_graph::MAX_RUNTIME_LOOPS],
     pending_exports: Vec<PendingLoopExport>,
@@ -1106,6 +1273,7 @@ impl NativeRuntime {
                 latest_snapshot: RuntimeSnapshot::default(),
                 last_snapshot_request: Instant::now() - UI_SNAPSHOT_INTERVAL,
                 last_diagnostic_report: Instant::now(),
+                synth_diagnostics: None,
                 cached_modes: [LoopMode::Empty; crate::native_dsp_graph::MAX_RUNTIME_LOOPS],
                 trigger_gains: [1.0; crate::native_dsp_graph::MAX_RUNTIME_LOOPS],
                 pending_exports: Vec::with_capacity(
@@ -1176,33 +1344,82 @@ impl NativeRuntime {
     }
 
     fn poll_audio_recovery(&mut self, now: Instant) -> Result<(), String> {
+        struct RecoveredRoute {
+            sample_rate: u32,
+            buffer_frames: u32,
+        }
         let mut r = self.resources.borrow_mut();
-        let RuntimeResources {
-            audio,
-            audio_recovery,
-            controls,
-            ..
-        } = &mut *r;
-        let audio = audio.as_mut().ok_or("audio is closed")?;
-        let recovered = audio_recovery.poll(audio, now)?;
-        if recovered {
+        let started_sample_rate = r.sample_rate;
+        let started_buffer_frames = r.max_callback_frames;
+        let recovered = {
+            let RuntimeResources {
+                audio,
+                audio_recovery,
+                controls,
+                ..
+            } = &mut *r;
+            let audio = audio.as_mut().ok_or("audio is closed")?;
+            if !audio_recovery.poll(audio, now)? {
+                return Ok(());
+            }
             // The backend destroyed the old route (and its owned aggregate),
             // created a fresh route, and re-activated the duplex callback
             // before returning. The alignment measured on the old route is
             // stale: re-seed it with the new route's driver estimate, then
             // measure the physical round trip of the new aggregate device.
+            let sample_rate = audio.get_srate();
+            let buffer_frames = audio.getbufsz();
             let alignment = audio.input_latency_frames();
             if let Some(controls) = controls.as_mut() {
                 let _ = controls.try_command(RuntimeCommand::SetRecordingAlignmentFrames {
                     frames: alignment,
                 });
                 let _ = controls.try_command(RuntimeCommand::CalibrateLatency);
+                if sample_rate != 0 && sample_rate != started_sample_rate {
+                    let _ = controls.try_command(RuntimeCommand::SetSampleRate { sample_rate });
+                }
             }
+            RecoveredRoute {
+                sample_rate,
+                buffer_frames,
+            }
+        };
+        // The app-level rate and buffer size drive every encoder and decoder
+        // header, the crossfade window and the streaming block size. A
+        // recreated route can negotiate different values (CPAL re-runs
+        // `negotiate_format` when it re-opens the devices), so those values
+        // must follow the actual device: an export or a disk stream after a
+        // recovery must never be tagged, or pitched, with the old route's
+        // rate. These writes run after the split borrows above end.
+        if recovered.sample_rate != 0 && recovered.sample_rate != started_sample_rate {
             eprintln!(
-                "[AUDIO-DIAG] audio: route recreated; recalibrating round-trip latency"
+                "[AUDIO-DIAG] audio: recreated route negotiated sample rate {} Hz (was {} Hz)",
+                recovered.sample_rate, started_sample_rate
             );
+            r.sample_rate = recovered.sample_rate;
         }
+        if recovered.buffer_frames != 0
+            && started_buffer_frames != recovered.buffer_frames as usize
+        {
+            eprintln!(
+                "[AUDIO-DIAG] audio: recreated route negotiated a {}-frame callback (was {} frames)",
+                recovered.buffer_frames, started_buffer_frames
+            );
+            r.max_callback_frames = recovered.buffer_frames as usize;
+        }
+        eprintln!("[AUDIO-DIAG] audio: route recreated; recalibrating round-trip latency");
         Ok(())
+    }
+
+    /// Synth diagnostics are always shown (unlike `report_diagnostics`' gated
+    /// heartbeat): each site prints once per run, which is bounded and cannot
+    /// recur even if the same failure fires for every incoming event.
+    fn report_synth_diagnostics(r: &mut RuntimeResources) {
+        if let Some(diagnostics) = r.synth_diagnostics.as_ref() {
+            for message in diagnostics.pending_reports() {
+                eprintln!("FreeWheeling synth: {message}");
+            }
+        }
     }
 
     fn report_diagnostics(r: &mut RuntimeResources, now: Instant) {
@@ -2464,14 +2681,40 @@ impl NativeRuntime {
                 ));
             }
         }
-        let mut moved = Vec::new();
+        // Two library files that share the hash prefix would both map onto the
+        // same destination; on Unix the second `fs::rename` would silently
+        // replace the first's audio, so the rename is refused before any
+        // filesystem change.
+        let mut seen_destinations = std::collections::HashSet::new();
+        for (source, destination) in &pairs {
+            if !seen_destinations.insert(destination) {
+                return Err(format!(
+                    "rename would move several files onto '{}'; erase or rename the duplicate entries first (for example '{}')",
+                    destination.display(),
+                    source.display()
+                ));
+            }
+        }
+        let mut moved: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
         for (source, destination) in &pairs {
             if let Err(error) = fs::rename(source, destination) {
+                let mut rollback_failures = Vec::new();
                 for (old, new) in moved.iter().rev() {
-                    let _ = fs::rename(new, old);
+                    if let Err(rollback) = fs::rename(new, old) {
+                        rollback_failures
+                            .push(format!("restore {} to {}: {rollback}", new.display(), old.display()));
+                    }
                 }
+                let suffix = if rollback_failures.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "; additionally could not roll back: {}",
+                        rollback_failures.join(", ")
+                    )
+                };
                 return Err(format!(
-                    "rename '{}' to '{}': {error}",
+                    "rename '{}' to '{}': {error}{suffix}",
                     source.display(),
                     destination.display()
                 ));
@@ -2759,6 +3002,10 @@ impl NativeRuntime {
             };
             fs::rename(&path, &backup)
                 .map_err(|error| format!("backup scene '{}': {error}", path.display()))?;
+            // Older backups beyond the newest `MAX_SCENE_BACKUPS` are pruned
+            // here, with the freshly numbered head already in place: growing
+            // one dead copy per save unboundedly has no C++ counterpart.
+            prune_scene_backups(&path, MAX_SCENE_BACKUPS);
             Some(backup)
         } else {
             None
@@ -3387,6 +3634,7 @@ impl NativeStartupAdapter for NativeRuntime {
                 // the shipped `interpolation="1"` configuration at startup.
                 let synth = FluidLiteBackend::new(cfg).map_err(|e| format!("FluidLite: {e}"))?;
                 let synth_patches = synth.patches();
+                r.synth_diagnostics = Some(synth.diagnostics());
                 let mut patch_browser = NativePatchBrowser::from_config(&r.config.borrow())?;
                 patch_browser.prepend_synth_patches(&synth_patches);
                 r.patch_browser = Some(patch_browser);
@@ -3416,7 +3664,13 @@ impl NativeStartupAdapter for NativeRuntime {
                     synth,
                     rate,
                     crate::native_dsp_graph::CPP_AUDIO_POOL_FRAMES,
-                    r.max_callback_frames,
+                    // A recreated route may negotiate a larger callback than
+                    // the startup route did. Reserving the shared backend
+                    // ceiling keeps the synthesis output complete (it would
+                    // otherwise truncate after `max_callback_frames`), at the
+                    // cost of a preallocated stereo scratch sized for the
+                    // worst case.
+                    r.max_callback_frames.max(crate::native_dsp_graph::MAX_DEVICE_CALLBACK_FRAMES),
                     dsp_settings,
                 );
                 let mut controls = controls;
@@ -3693,6 +3947,7 @@ impl NativeComponentAdapter for NativeRuntime {
             }
             let mut r = self.resources.borrow_mut();
             Self::report_diagnostics(&mut r, Instant::now());
+            Self::report_synth_diagnostics(&mut r);
             // Keep this ahead of pending-event returns: a busy core-event
             // queue must not prevent idle UI state from being refreshed from
             // the DSP. The non-blocking send and fixed interval bound the
@@ -3742,7 +3997,7 @@ impl NativeComponentAdapter for NativeRuntime {
                 while let Some(status) = controls.try_status() {
                     match status {
                         RuntimeStatus::Snapshot(snapshot) => {
-                            completed_snapshot = Some(snapshot);
+                            completed_snapshot = Some(Arc::clone(&snapshot));
                             latest_modes = Some(snapshot.loops.map(|item| item.mode));
                             latest = Some(
                                 snapshot
@@ -3825,11 +4080,11 @@ impl NativeComponentAdapter for NativeRuntime {
                     midi.output_clock_to_ports(&sync_outputs)?;
                 }
             }
-            if let Some(snapshot) = completed_snapshot
+            if let Some(snapshot) = completed_snapshot.take()
                 && let Some(pending) = r.pending_scene_save.as_mut()
                 && pending.snapshot.is_none()
             {
-                pending.snapshot = Some(snapshot);
+                pending.snapshot = Some(*snapshot);
                 let codec = r.config.borrow().loop_output_format;
                 let slots: Vec<_> = snapshot
                     .loops
@@ -3838,12 +4093,14 @@ impl NativeComponentAdapter for NativeRuntime {
                     .filter(|(_, item)| item.mode != LoopMode::Empty)
                     .map(|(slot, _)| slot as u16)
                     .collect();
+                completed_snapshot = Some(snapshot);
                 for slot in slots {
                     Self::request_loop_export(&mut r, slot, codec)?;
                 }
             }
-            if let Some(snapshot) = completed_snapshot {
-                r.latest_snapshot = snapshot;
+            if let Some(snapshot) = completed_snapshot.take() {
+                r.latest_snapshot = *snapshot;
+                completed_snapshot = Some(snapshot);
             }
             for (handle, metadata) in exports {
                 Self::finish_loop_export(&mut r, handle, metadata)?;
@@ -3884,7 +4141,7 @@ impl NativeComponentAdapter for NativeRuntime {
             if let (Some(snapshot_id), Some(snapshot)) =
                 (r.pending_snapshot_id.take(), completed_snapshot)
             {
-                r.snapshots.insert(snapshot_id, snapshot);
+                r.snapshots.insert(snapshot_id, *snapshot);
             }
             if let Some(loops) = latest {
                 r.cached_loops = loops;
@@ -4205,14 +4462,18 @@ impl NativeComponentAdapter for NativeRuntime {
     }
     fn restore_snapshot(&mut self, snapshot: &Snapshot) -> Result<(), String> {
         let mut r = self.resources.borrow_mut();
+        // The mute set is drawn from the last drained runtime status before
+        // the control handle borrows: the old prelude muted every one of
+        // MAX_RUNTIME_LOOPS slots, which exactly filled the 512-slot command
+        // queue, so any other command in flight (a user action, the recovery
+        // poll) made the restore half-apply and fail. Only the DSP's occupied
+        // slots need silencing, and Empty slots would even refuse the mute.
+        let mute_slots = restore_mute_slots(&r.cached_modes);
         let controls = r.controls.as_mut().ok_or("DSP controls are closed")?;
-        for slot in 0..crate::native_dsp_graph::MAX_RUNTIME_LOOPS {
+        for slot in mute_slots {
             controls
-                .try_command(RuntimeCommand::Mute {
-                    slot: slot as u16,
-                    muted: true,
-                })
-                .map_err(|_| "DSP command queue full")?;
+                .try_command(RuntimeCommand::Mute { slot, muted: true })
+                .map_err(|_| "DSP command queue full (slots to mute)")?;
         }
         for item in &snapshot.loops {
             let slot = item.slot;
@@ -4329,6 +4590,23 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn restore_only_mutes_the_slots_the_dsp_owns() {
+        let mut cached_modes = [LoopMode::Empty; crate::native_dsp_graph::MAX_RUNTIME_LOOPS];
+        cached_modes[0] = LoopMode::Playing;
+        cached_modes[5] = LoopMode::Recording;
+        cached_modes[8] = LoopMode::Overdubbing;
+        cached_modes[9] = LoopMode::Muted;
+        // 477 is in the shipped address space, and an Empty slot is exactly
+        // the one the DSP would refuse a mute for.
+        cached_modes[477] = LoopMode::Empty;
+
+        let slots = restore_mute_slots(&cached_modes);
+        assert_eq!(slots, vec![0, 5, 8, 9]);
+        // Bounded by the occupied count, never by the 512-slot queue size.
+        assert!(slots.len() < crate::native_dsp_graph::MAX_RUNTIME_LOOPS);
+    }
+
+    #[test]
     fn scene_display_name_formats_local_datetime() {
         // Deterministic regardless of the host timezone.
         unsafe extern "C" {
@@ -4392,9 +4670,15 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&directory).unwrap();
-        let audio = directory.join("loop-existing.ogg");
+        // The reuse rule verifies the existing file decodes to the loop being
+        // saved, so the fixture carries real audio: the collision rule must
+        // never alias a foreign file, but an identical take reuses its file.
+        let audio = directory.join("loop-existing.wav");
         let xml = directory.join("loop-existing.xml");
-        fs::write(&audio, b"existing audio").unwrap();
+        let left = [0.5_f32; 8];
+        let right = [0.125_f32; 8];
+        crate::file_codecs::encode_audio_file(&audio, 48_000, Codec::Wav, &left, Some(&right))
+            .unwrap();
         fs::write(&xml, b"<loop existing=\"yes\"/>").unwrap();
 
         save_exported_loop(
@@ -4402,10 +4686,10 @@ mod tests {
             &xml,
             48_000,
             Codec::Unknown,
-            &[],
-            &[],
+            &left,
+            &right,
             LoopTransferMetadata {
-                frames: 0,
+                frames: 8,
                 position: 0,
                 mode: LoopMode::Empty,
                 gain: 1.0,
@@ -4415,8 +4699,85 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(fs::read(&audio).unwrap(), b"existing audio");
+        // The stored file is untouched (bit-exact WAV), and so is the
+        // existing metadata, since the reuse writes only when missing.
+        let before = fs::read(&audio).unwrap();
+        save_exported_loop(
+            &audio,
+            &xml,
+            48_000,
+            Codec::Unknown,
+            &left,
+            &right,
+            LoopTransferMetadata {
+                frames: 8,
+                position: 0,
+                mode: LoopMode::Empty,
+                gain: 1.0,
+                pulse_frames: 24_000,
+                beats: 4,
+            },
+        )
+        .unwrap();
+        assert_eq!(fs::read(&audio).unwrap(), before);
         assert_eq!(fs::read(&xml).unwrap(), b"<loop existing=\"yes\"/>");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_foreign_file_at_a_loop_hash_is_not_aliased_silently() {
+        let directory = std::env::temp_dir().join(format!(
+            "freewheeling-loop-collision-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let audio = directory.join("loop-existing.wav");
+        let xml = directory.join("loop-existing.xml");
+        // Real audio on one side, foreign bytes at the same hashed name on
+        // the other: the byte-level hash cannot discriminate, the decode
+        // verification can.
+        let left = [0.5_f32; 8];
+        let right = [0.125_f32; 8];
+        crate::file_codecs::encode_audio_file(&audio, 48_000, Codec::Wav, &left, Some(&right))
+            .unwrap();
+        let foreign_voice = directory.join("loop-existing-foreign.wav");
+        crate::file_codecs::encode_audio_file(
+            &foreign_voice,
+            48_000,
+            Codec::Wav,
+            &[-0.5; 8],
+            Some(&[0.25; 8]),
+        )
+        .unwrap();
+        let audio_foreign = directory.join("loop-colliding.wav");
+        fs::write(&audio_foreign, fs::read(&foreign_voice).unwrap()).unwrap();
+        save_exported_loop(
+            &audio_foreign,
+            &xml,
+            48_000,
+            Codec::Unknown,
+            &left,
+            &right,
+            LoopTransferMetadata {
+                frames: 8,
+                position: 0,
+                mode: LoopMode::Empty,
+                gain: 1.0,
+                pulse_frames: 24_000,
+                beats: 4,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            fs::read(&audio_foreign).unwrap(),
+            fs::read(&foreign_voice).unwrap(),
+            "the foreign content must not be replaced"
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

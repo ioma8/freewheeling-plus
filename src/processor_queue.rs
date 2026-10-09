@@ -5,8 +5,9 @@
 //! addresses and never dereferences or drops them.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::realtime_guard::InstrumentedMutex;
 
 /// Opaque processor handle.  The concrete processor implementation lives in a
 /// later migration unit.
@@ -67,8 +68,10 @@ pub struct ProcessorCommandQueue {
     // wait for a producer, and treats a producer-held mutex exactly like an
     // empty queue for that callback.  A lock-free queue changes that
     // externally observable timing by allowing the consumer to receive an
-    // item while an enqueue is in progress.
-    commands: Mutex<VecDeque<ProcessorCommand>>,
+    // item while an enqueue is in progress. The wrapping type is the
+    // instrumented mutex so a future change to a blocking realtime read
+    // becomes an acceptance-counter failure instead of silent waiting.
+    commands: InstrumentedMutex<VecDeque<ProcessorCommand>>,
     rejected: AtomicU64,
 }
 
@@ -77,7 +80,7 @@ impl ProcessorCommandQueue {
 
     pub fn new() -> Self {
         Self {
-            commands: Mutex::new(VecDeque::with_capacity(Self::MAX_COMMANDS)),
+            commands: InstrumentedMutex::new(VecDeque::with_capacity(Self::MAX_COMMANDS)),
             rejected: AtomicU64::new(0),
         }
     }

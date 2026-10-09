@@ -45,6 +45,30 @@ pub struct SndFileEncoder {
     output: Option<EncoderOutput>,
 }
 
+/// The one sample-value contract every encoder writes.
+///
+/// A non-finite sample (NaN or ±Infinity) is zero: it survives no PCM
+/// conversion and preserving it verbatim would poison a loop when it is
+/// re-loaded. Finite samples are clamped to the exact full-scale window the
+/// FLAC and AU integer converters already use, so a loop recorded once
+/// produces the same amplitude behaviour in every codec, and reloading any of
+/// them reproduces the same quantised bytes the filename hash was built from.
+fn sanitized_sample(sample: Sample) -> Sample {
+    if sample.is_finite() {
+        sample.clamp(-1.0, 1.0 - f32::EPSILON)
+    } else {
+        0.0
+    }
+}
+
+/// Cheap pass-through check so the common limiter-fed block is encoded
+/// without building a sanitized copy.
+fn already_sanitized(block: &[Sample]) -> bool {
+    block
+        .iter()
+        .all(|sample| sample.is_finite() && *sample >= -1.0 && *sample <= 1.0 - f32::EPSILON)
+}
+
 enum EncoderOutput {
     Wav(hound::WavWriter<Box<dyn WriteSeek>>),
     Vorbis(Box<vorbis_rs::VorbisEncoder<Box<dyn WriteSeek>>>),
@@ -278,19 +302,47 @@ impl IFileEncoder for SndFileEncoder {
         {
             EncoderOutput::Wav(writer) => {
                 for (i, &l) in left[..n].iter().enumerate() {
-                    writer.write_sample(l).map_err(|error| ioerr_chain(&error))?;
+                    writer
+                        .write_sample(sanitized_sample(l))
+                        .map_err(|error| ioerr_chain(&error))?;
                     if let Some(r) = right {
-                        writer.write_sample(r[i]).map_err(|error| ioerr_chain(&error))?;
+                        writer
+                            .write_sample(sanitized_sample(r[i]))
+                            .map_err(|error| ioerr_chain(&error))?;
                     }
                 }
             }
             EncoderOutput::Vorbis(encoder) => {
-                if let Some(r) = right {
-                    encoder
-                        .encode_audio_block([&left[..n], &r[..n]])
-                        .map_err(|error| ioerr_chain(&error))?
+                // The block is sanitized only when it needs it: a limiter-fed
+                // pass-through encodes the caller's slices as they are, while
+                // a pathological block copies through `sanitized_sample`.
+                if already_sanitized(&left[..n])
+                    && right.is_none_or(|r| already_sanitized(&r[..n]))
+                {
+                    if let Some(r) = right {
+                        encoder
+                            .encode_audio_block([&left[..n], &r[..n]])
+                            .map_err(|error| ioerr_chain(&error))?
+                    } else {
+                        encoder
+                            .encode_audio_block([&left[..n]])
+                            .map_err(|error| ioerr_chain(&error))?
+                    }
                 } else {
-                    encoder.encode_audio_block([&left[..n]]).map_err(|error| ioerr_chain(&error))?
+                    let left_block: Vec<Sample> =
+                        left[..n].iter().map(|sample| sanitized_sample(*sample)).collect();
+                    let right_block: Vec<Sample> = right.map_or_else(Vec::new, |r| {
+                        r[..n].iter().map(|sample| sanitized_sample(*sample)).collect()
+                    });
+                    if right.is_some() {
+                        encoder
+                            .encode_audio_block([&left_block, &right_block])
+                            .map_err(|error| ioerr_chain(&error))?
+                    } else {
+                        encoder
+                            .encode_audio_block([&left_block])
+                            .map_err(|error| ioerr_chain(&error))?
+                    }
                 }
             }
             EncoderOutput::Flac(encoder) => encoder.push(&left[..n], right.map(|r| &r[..n]))?,
@@ -681,11 +733,15 @@ fn ioerr_chain(error: &(dyn std::error::Error + 'static)) -> io::Error {
     }
     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
 }
+// Quantise through the shared sanitize so every codec agrees: see
+// `sanitized_sample`. (The two precedence quirks — NaN hashing to the same
+// byte as silence through the saturating float→int cast, and ±Infinity — are
+// made explicit there instead of relying on the cast's behavior.)
 fn float_to_i24(sample: f32) -> i32 {
-    (sample.clamp(-1.0, 1.0 - f32::EPSILON) * 8_388_608.0).round() as i32
+    (sanitized_sample(sample) * 8_388_608.0).round() as i32
 }
 fn float_to_i32(sample: f32) -> i32 {
-    (sample.clamp(-1.0, 1.0 - f32::EPSILON) * 2_147_483_648.0).round() as i32
+    (sanitized_sample(sample) * 2_147_483_648.0).round() as i32
 }
 
 fn write_au_header(out: &mut dyn Write, sample_rate: u32, stereo: bool) -> io::Result<()> {

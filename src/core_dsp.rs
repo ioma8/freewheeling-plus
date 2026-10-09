@@ -10,6 +10,24 @@ use crate::core_dsp_audio_buffers::{AudioBufferConfig, AudioBuffers, InputSettin
 pub type Sample = f32;
 pub type NFrames = u32;
 
+/// Flush an `f32` to exactly zero when it has decayed below the smallest
+/// normal value.
+///
+/// Multiply-chained signals (feedback fades, gain decay) reach IEEE-754
+/// subnormal territory on x86-64 and pay a microcode penalty per arithmetic
+/// unit on every subsequent operation, which is a well-known real-time audio
+/// stall: several silent-but-live samples can push a whole callback past its
+/// deadline. Zero decayed-anyway content costs nothing and is inaudible
+/// (< -783 dB). Values in the normal range are returned untouched.
+#[inline]
+pub fn flush_subnormal(value: f32) -> f32 {
+    if value != 0.0 && value.abs() < f32::MIN_POSITIVE {
+        0.0
+    } else {
+        value
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum SyncState {

@@ -163,3 +163,69 @@ fn the_violation_counters_actually_count() {
     }
     reset_violation_counters();
 }
+
+/// The production DSP graph — the code that used to allocate while recording
+/// crossed a `LoopSlot.blocks` deque boundary — must also record a long loop
+/// with zero allocations on the audio thread.
+#[test]
+fn recording_into_block_storage_allocates_nothing_on_the_audio_thread() {
+    let _counters = COUNTER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    use freewheeling_plus::audioio::{AudioCallback, AudioProcessor};
+    use freewheeling_plus::core_dsp::Sample;
+    use freewheeling_plus::fluidsynth::{FluidSynthBackend, Patch};
+    use freewheeling_plus::native_dsp_graph::RuntimeCommand;
+    use freewheeling_plus::native_dsp_graph::runtime_audio_processor_with_backend;
+
+    struct SilentSynth;
+    impl FluidSynthBackend for SilentSynth {
+        fn render(&mut self, left: &mut [Sample], right: &mut [Sample]) {
+            left.iter_mut().for_each(|sample| *sample = 0.0);
+            right.iter_mut().for_each(|sample| *sample = 0.0);
+        }
+        fn controller(&mut self, _: u8, _: u8, _: u8) {}
+        fn pitch_bend(&mut self, _: u8, _: i32) {}
+        fn note_on(&mut self, _: u8, _: i32, _: u8) {}
+        fn note_off(&mut self, _: u8, _: i32) {}
+        fn program_select(&mut self, _: u8, _: i32, _: i32, _: i32) {}
+        fn patches(&self) -> Vec<Patch> {
+            Vec::new()
+        }
+    }
+
+    // 1,228,800 frames of recording is 61 blocks of 20,000 frames: enough to
+    // cross the preallocated deque's capacity growth boundaries several times.
+    const CALLBACKS: usize = 2_400;
+    let frames = 512;
+    let metrics = RealtimeMetrics::new(48_000, frames as u32).unwrap();
+    let (mut processor, mut controls) =
+        runtime_audio_processor_with_backend(SilentSynth, 48_000, frames, frames);
+    let input = vec![0.1_f32; frames];
+    let mut left = vec![0.0_f32; frames];
+    let mut right = vec![0.0_f32; frames];
+
+    reset_violation_counters();
+    let _callback = metrics.enter_callback();
+    controls
+        .try_command(RuntimeCommand::Record { slot: 0, presslen_ms: 0 })
+        .map_err(|command| format!("record command rejected: {command:?}"))
+        .unwrap();
+    for _ in 0..CALLBACKS {
+        let mut callback = AudioCallback {
+            inputs: [&input[..], &input[..]],
+            outputs: [&mut left[..], &mut right[..]],
+            nframes: frames as u32,
+            position: JackPosition::default(),
+            transport_rolling: false,
+        };
+        processor.process(&mut callback);
+        controls.service_loop_storage();
+    }
+    drop(_callback);
+
+    assert_eq!(
+        callback_allocations(),
+        0,
+        "the DSP callback allocated while recording block-chain storage"
+    );
+    assert_eq!(blocking_lock_attempts(), 0);
+}

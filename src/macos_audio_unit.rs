@@ -274,14 +274,29 @@ impl MacosAudioUnitBackend {
         }
     }
 
-    pub fn set_realtime_metrics(&mut self, metrics: Arc<RealtimeMetrics>) {
+    /// Attach acceptance instrumentation before activating the streams.
+    ///
+    /// Rejected while the unit runs: the render callback runs on CoreAudio's
+    /// own thread and clones the state's metric handle through the raw
+    /// `ref_con` pointer, so a non-atomic store would race that read. The
+    /// acceptance runner attaches before `activate`, which is the only
+    /// supported order.
+    pub fn set_realtime_metrics(&mut self, metrics: Arc<RealtimeMetrics>) -> Result<(), String> {
+        if self.metrics.active.load(Ordering::Acquire) {
+            return Err(
+                "cannot attach realtime metrics to an active audio unit; attach before activate"
+                    .into(),
+            );
+        }
         // The callback state is built during open(), before the acceptance
         // runner attaches its instrumentation; update the live state as well
-        // so instrumentation always sees the realtime callback.
+        // so instrumentation always sees the realtime callback. The guard
+        // above keeps this write outside the render callback's lifetime.
         if let Some(state) = &mut self.state {
             state.realtime_metrics = Some(Arc::clone(&metrics));
         }
         self.realtime_metrics = Some(metrics);
+        Ok(())
     }
 
     pub fn status(&self) -> CpalAudioStatus {
@@ -527,6 +542,23 @@ impl MacosAudioUnitBackend {
         self.latency = None;
     }
 
+    /// Stop the HAL AudioUnit without disposing it.
+    ///
+    /// Apple documents `AudioOutputUnitStop` as synchronous ("does not return
+    /// until the unit has stopped"), so once this succeeds the render callback
+    /// can no longer reach `CallbackState`. Recovery relies on exactly that
+    /// ordering: it must quiesce the render thread before removing the
+    /// processor the callback reaches through the raw `ref_con` pointer.
+    fn stop_unit(&mut self) -> Result<(), String> {
+        if self.unit.is_null() {
+            return Ok(());
+        }
+        check(
+            unsafe { AudioOutputUnitStop(self.unit) },
+            "stop HAL audio unit",
+        )
+    }
+
     /// Device ID of the private aggregate currently owned by this backend, if
     /// any. Exposed for acceptance instrumentation that verifies the device is
     /// gone after close.
@@ -737,7 +769,13 @@ impl AudioBackend for MacosAudioUnitBackend {
         // Recovery closes the old AudioUnit, destroys the old owned aggregate,
         // creates a fresh aggregate for the current route, and reopens the
         // duplex callback with the retained processor.
+        //
+        // The unit is stopped FIRST: `take_callback` mutates the same
+        // non-atomic field the HAL render thread reads through `ref_con`, and
+        // `AudioOutputUnitStop` is synchronous per Apple's documentation, so
+        // stopping is what makes removing the callback single-threaded.
         eprintln!("[AUDIO-DIAG] audio: route changed; recreating audio route");
+        self.stop_unit()?;
         let callback = self
             .take_callback()
             .ok_or("audio callback is unavailable for recovery")?;
@@ -858,10 +896,19 @@ unsafe extern "C" fn render_callback(
                     .frame_size_mismatches
                     .fetch_add(1, Ordering::Relaxed);
                 // The right buffer cannot be written; treat the callback as
-                // silent rather than leaving stale samples in it.
-                // SAFETY: CoreAudio owns the buffer and reported its size.
-                unsafe {
-                    ptr::write_bytes(right_buffer.mData, 0, right_buffer.mDataByteSize as usize);
+                // silent rather than leaving stale samples in it. A null
+                // `mData` must not be dereferenced: clear the buffer only when
+                // CoreAudio handed us one, mirroring `zero_output`.
+                if !right_buffer.mData.is_null() {
+                    // SAFETY: the pointer is non-null and CoreAudio owns the
+                    // buffer whose size it reported.
+                    unsafe {
+                        ptr::write_bytes(
+                            right_buffer.mData,
+                            0,
+                            right_buffer.mDataByteSize as usize,
+                        );
+                    }
                 }
                 None
             } else {

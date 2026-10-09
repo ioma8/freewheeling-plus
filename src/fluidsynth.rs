@@ -8,6 +8,7 @@ use crate::core_dsp::{NFrames, Processor, Sample};
 use crate::core_dsp_audio_buffers::AudioBuffers;
 use crate::midiio::MidiMessage;
 use fluidlite::{IsFont, IsPreset, IsSettings};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -56,21 +57,145 @@ impl FluidLiteConfig {
 pub struct FluidLiteBackend {
     synth: fluidlite::Synth,
     patches: Vec<Patch>,
-    /// Messages already reported, so a per-callback failure is not printed
-    /// thousands of times.
-    reported: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Reported diagnostics, observed by the non-realtime thread. The audio
+    /// thread only touches allocation-free atomics here: a blocking mutex,
+    /// a string table and stderr I/O all run on the control thread.
+    diagnostics: Arc<SynthDiagnosticBus>,
 }
 
-/// Report a backend failure once per distinct message.
-fn report_once(reported: &std::sync::Mutex<std::collections::HashSet<String>>, message: &str) {
-    let first = reported
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(message.to_string());
-    if first {
-        eprintln!("FreeWheeling synth: {message}");
+/// The diagnostic sites a backend can report. Numbers (a failing controller,
+/// a clamped pitch bend, an out-of-range note) are captured as payload,
+/// formatted by the control thread, and each site is reported at most once per
+/// run so a repeat failure cannot spam the realtime path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SynthDiagnosticSite {
+    ControllerFailed,
+    PitchBendOutOfRange,
+    PitchBendFailed,
+    NoteOutOfRangeOn,
+    NoteOutOfRangeOff,
+    NoteOnFailed,
+    NoteOffFailed,
+    ProgramSelectInvalid,
+    ProgramSelectFailed,
+    TuningFailed,
+}
+
+const SYNTH_DIAGNOSTIC_SITES: usize = 10;
+
+/// Lock-free, allocation-free diagnostic leaver and reader.
+///
+/// The realtime thread writes `flag = true` plus a 32-bit payload with a
+/// release store; the control thread reads with acquire and never clears, so
+/// every site stays a one-shot. Both arrays are preallocated at construction.
+pub struct SynthDiagnosticBus {
+    flags: [AtomicBool; SYNTH_DIAGNOSTIC_SITES],
+    payloads: [AtomicU32; SYNTH_DIAGNOSTIC_SITES],
+}
+
+impl Default for SynthDiagnosticBus {
+    fn default() -> Self {
+        Self {
+            flags: [const { AtomicBool::new(false) }; SYNTH_DIAGNOSTIC_SITES],
+            payloads: [const { AtomicU32::new(0) }; SYNTH_DIAGNOSTIC_SITES],
+        }
     }
 }
+
+/// Encode an `i32` payload bit-exactly into the shared cell.
+fn payload_for(value: i32) -> u32 {
+    value as u32
+}
+
+fn decode_i32_payload(value: u32) -> i32 {
+    value as i32
+}
+
+impl SynthDiagnosticBus {
+    fn report(&self, site: SynthDiagnosticSite, payload: u32) {
+        // The site table is sized by the enum's own last discriminant, so a
+        // future variant without a matching `SYNTH_DIAGNOSTIC_SITES` bump is
+        // a compile error rather than an out-of-bounds store on the audio
+        // thread.
+        const _: () = assert!(
+            SYNTH_DIAGNOSTIC_SITES
+                == SynthDiagnosticSite::TuningFailed as usize + 1
+        );
+        let index = site as usize;
+        debug_assert!(index < SYNTH_DIAGNOSTIC_SITES);
+        self.payloads[index].store(payload, Ordering::Release);
+        self.flags[index].store(true, Ordering::Release);
+    }
+
+    /// Yields a formatted message for every site that has been flagged since
+    /// process start. Never runs on the realtime thread and never clears: a
+    /// site stays quiet once its first report is emitted, and a control thread
+    /// that polls repeatedly cannot re-print the same failure.
+    pub fn pending_reports(&self) -> impl Iterator<Item = String> + '_ {
+        self.flags
+            .iter()
+            .enumerate()
+            .filter(|(_, flag)| flag.load(Ordering::Acquire))
+            .map(|(index, _)| {
+                format_synth_diagnostic(
+                    site_index(index),
+                    self.payloads[index].load(Ordering::Acquire),
+                )
+            })
+    }
+}
+
+fn site_index(index: usize) -> SynthDiagnosticSite {
+    // The enum discriminants and this table are one and the same; the
+    // count invariant is asserted inside `report`.
+    match index {
+        0 => SynthDiagnosticSite::ControllerFailed,
+        1 => SynthDiagnosticSite::PitchBendOutOfRange,
+        2 => SynthDiagnosticSite::PitchBendFailed,
+        3 => SynthDiagnosticSite::NoteOutOfRangeOn,
+        4 => SynthDiagnosticSite::NoteOutOfRangeOff,
+        5 => SynthDiagnosticSite::NoteOnFailed,
+        6 => SynthDiagnosticSite::NoteOffFailed,
+        7 => SynthDiagnosticSite::ProgramSelectInvalid,
+        8 => SynthDiagnosticSite::ProgramSelectFailed,
+        _ => SynthDiagnosticSite::TuningFailed,
+    }
+}
+
+/// Control-thread formatting. The realtime path never allocates a string, so
+/// payload-to-message conversion happens here.
+fn format_synth_diagnostic(site: SynthDiagnosticSite, payload: u32) -> String {
+    match site {
+        SynthDiagnosticSite::ControllerFailed => {
+            format!("controller {} change failed", payload)
+        }
+        SynthDiagnosticSite::PitchBendOutOfRange => format!(
+            "pitch bend {} is outside 0..=0x3fff; it was clamped",
+            decode_i32_payload(payload)
+        ),
+        SynthDiagnosticSite::PitchBendFailed => {
+            "a pitch bend was rejected by the synth".into()
+        }
+        SynthDiagnosticSite::NoteOutOfRangeOn => format!(
+            "note {} is outside 0..=127; it was dropped",
+            decode_i32_payload(payload)
+        ),
+        SynthDiagnosticSite::NoteOutOfRangeOff => format!(
+            "note off {} is outside 0..=127; it was dropped",
+            decode_i32_payload(payload)
+        ),
+        SynthDiagnosticSite::NoteOnFailed => "a note on was rejected by the synth".into(),
+        SynthDiagnosticSite::NoteOffFailed => "a note off was rejected by the synth".into(),
+        SynthDiagnosticSite::ProgramSelectInvalid => {
+            "a program selection carried a negative bank, program or soundfont id; it was dropped".into()
+        }
+        SynthDiagnosticSite::ProgramSelectFailed => {
+            "a program selection failed; an unknown soundfont id is the usual cause".into()
+        }
+        SynthDiagnosticSite::TuningFailed => "applying the tuning failed".into(),
+    }
+}
+
 
 impl FluidLiteBackend {
     pub fn new(config: FluidLiteConfig) -> Result<Self, fluidlite::Error> {
@@ -142,8 +267,14 @@ impl FluidLiteBackend {
         Ok(Self {
             synth,
             patches,
-            reported: std::sync::Mutex::new(std::collections::HashSet::new()),
+            diagnostics: Arc::new(SynthDiagnosticBus::default()),
         })
+    }
+
+    /// The diagnostic handle the non-realtime thread polls. Clone before this
+    /// backend moves into the realtime graph.
+    pub fn diagnostics(&self) -> Arc<SynthDiagnosticBus> {
+        Arc::clone(&self.diagnostics)
     }
 
     pub fn load_soundfont(&mut self, path: impl AsRef<Path>) -> Result<i32, fluidlite::Error> {
@@ -213,14 +344,13 @@ impl FluidSynthBackend for FluidLiteBackend {
         }
     }
     fn controller(&mut self, channel: u8, controller: u8, value: u8) {
-        if let Err(error) = self
+        if self
             .synth
             .cc(channel.into(), controller.into(), value.into())
+            .is_err()
         {
-            report_once(
-                &self.reported,
-                &format!("controller {controller} failed: {error}"),
-            );
+            self.diagnostics
+                .report(SynthDiagnosticSite::ControllerFailed, u32::from(controller));
         }
     }
     /// Set the pitch wheel.
@@ -232,65 +362,65 @@ impl FluidSynthBackend for FluidLiteBackend {
     fn pitch_bend(&mut self, channel: u8, value: i32) {
         let clamped = value.clamp(0, 0x3fff);
         if clamped != value {
-            report_once(
-                &self.reported,
-                &format!("pitch bend {value} on channel {channel} is outside 0..=0x3fff"),
-            );
+            self.diagnostics
+                .report(SynthDiagnosticSite::PitchBendOutOfRange, payload_for(value));
         }
-        if let Err(error) = self.synth.pitch_bend(channel.into(), clamped as u32) {
-            report_once(&self.reported, &format!("pitch bend failed: {error}"));
+        if self.synth.pitch_bend(channel.into(), clamped as u32).is_err() {
+            self.diagnostics
+                .report(SynthDiagnosticSite::PitchBendFailed, 0);
         }
     }
     fn note_on(&mut self, channel: u8, note: i32, velocity: u8) {
         if !(0..=127).contains(&note) {
             // A transposed note outside the MIDI range: dropping it is correct,
             // but it must be visible.
-            report_once(&self.reported, &format!("note {note} is outside 0..=127"));
+            self.diagnostics
+                .report(SynthDiagnosticSite::NoteOutOfRangeOn, payload_for(note));
             return;
         }
-        if let Err(error) = self
+        if self
             .synth
             .note_on(channel.into(), note as u32, velocity.into())
+            .is_err()
         {
-            report_once(&self.reported, &format!("note on failed: {error}"));
+            self.diagnostics.report(SynthDiagnosticSite::NoteOnFailed, 0);
         }
     }
     fn note_off(&mut self, channel: u8, note: i32) {
         if !(0..=127).contains(&note) {
-            report_once(&self.reported, &format!("note {note} is outside 0..=127"));
+            self.diagnostics
+                .report(SynthDiagnosticSite::NoteOutOfRangeOff, payload_for(note));
             return;
         }
-        if let Err(error) = self.synth.note_off(channel.into(), note as u32) {
-            report_once(&self.reported, &format!("note off failed: {error}"));
+        if self.synth.note_off(channel.into(), note as u32).is_err() {
+            self.diagnostics.report(SynthDiagnosticSite::NoteOffFailed, 0);
         }
     }
     fn program_select(&mut self, channel: u8, soundfont_id: i32, bank: i32, program: i32) {
         if soundfont_id < 0 || bank < 0 || program < 0 {
-            report_once(
-                &self.reported,
-                &format!(
-                    "invalid program selection (soundfont {soundfont_id}, bank {bank}, \
-                     program {program})"
-                ),
-            );
+            self.diagnostics
+                .report(SynthDiagnosticSite::ProgramSelectInvalid, 0);
             return;
         }
-        if let Err(error) = self.synth.program_select(
-            channel.into(),
-            soundfont_id as u32,
-            bank as u32,
-            program as u32,
-        ) {
+        if self
+            .synth
+            .program_select(
+                channel.into(),
+                soundfont_id as u32,
+                bank as u32,
+                program as u32,
+            )
+            .is_err()
+        {
             // An unknown soundfont id fails here: previously invisible.
-            report_once(&self.reported, &format!("program select failed: {error}"));
+            self.diagnostics
+                .report(SynthDiagnosticSite::ProgramSelectFailed, 0);
         }
     }
     fn set_tuning(&mut self, cents: f64) {
-        if let Err(error) = FluidLiteBackend::set_tuning(self, cents) {
-            report_once(
-                &self.reported,
-                &format!("applying the tuning failed: {error}"),
-            );
+        if FluidLiteBackend::set_tuning(self, cents).is_err() {
+            self.diagnostics
+                .report(SynthDiagnosticSite::TuningFailed, 0);
         }
     }
     fn patches(&self) -> Vec<Patch> {
@@ -520,8 +650,27 @@ mod tests {
     }
 
     #[test]
-    fn legacy_parallel_render_setting_does_not_block_fluidlite_startup() {
-        let mut config = FluidLiteConfig::new(48_000.0);
+    fn synthesised_diagnostics_are_reported_once() {
+        // A real backend needs libfluidlite; the bus under test is the piece
+        // that must stay realtime-safe, so exercise it directly.
+        let bus = SynthDiagnosticBus::default();
+        bus.report(
+            SynthDiagnosticSite::PitchBendOutOfRange,
+            payload_for(24_575),
+        );
+        bus.report(SynthDiagnosticSite::NoteOutOfRangeOn, payload_for(-3));
+
+        // A site stays reported once: re-polling re-yields the first message
+        // but can never multiply reports for the same failure.
+        let first: Vec<String> = bus.pending_reports().collect();
+        let second: Vec<String> = bus.pending_reports().collect();
+        assert_eq!(first.len(), 2);
+        assert!(first[0].contains("24575"), "formatted: {}", first[0]);
+        assert_eq!(first[0], second[0]);
+    }
+
+    #[test]
+    fn legacy_parallel_render_setting_does_not_block_fluidlite_startup() {        let mut config = FluidLiteConfig::new(48_000.0);
         config.settings.push(FluidSetting::Integer {
             name: "synth.parallel-render".into(),
             value: 0,
